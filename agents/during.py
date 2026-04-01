@@ -21,6 +21,7 @@ from google import genai
 
 from store import user_store
 from tools import drive, docs, calendar as cal
+from tools.slack_tools import format_time
 from prompts.briefing import minutes_internal_prompt, minutes_external_prompt
 from agents import after
 
@@ -216,6 +217,8 @@ def start_session(slack_client, user_id: str, title: str):
 
     # 진행 중인 캘린더 이벤트 매칭
     event_id = None
+    event_summary = None
+    event_time_str = None
     title_to_use = title or "미팅"
     try:
         now = datetime.now(KST)
@@ -231,6 +234,8 @@ def start_session(slack_client, user_id: str, title: str):
                 end_dt = datetime.fromisoformat(end_str)
                 if (start_dt <= now <= end_dt) or (title_to_use.lower() in parsed["summary"].lower()):
                     event_id = parsed["id"]
+                    event_summary = parsed["summary"]
+                    event_time_str = f"{format_time(start_str)} ~ {format_time(end_str)}"
                     break
             except Exception:
                 pass
@@ -242,12 +247,17 @@ def start_session(slack_client, user_id: str, title: str):
         "started_at": datetime.now(KST).strftime("%Y-%m-%d %H:%M"),
         "notes": [],
         "event_id": event_id,
+        "event_summary": event_summary,
+        "event_time_str": event_time_str,
     }
     _save_active_session(user_id)
 
-    event_info = " (캘린더 이벤트 연동됨)" if event_id else ""
+    if event_id:
+        event_line = f"\n📅 연동된 일정: *{event_summary}* ({event_time_str})"
+    else:
+        event_line = "\n_(캘린더 일정 미연동)_"
     _post(slack_client, user_id=user_id,
-          text=f"✅ *{title_to_use}* 노트 세션 시작{event_info}\n"
+          text=f"✅ *{title_to_use}* 노트 세션 시작{event_line}\n"
                f"`/메모 내용` 으로 실시간 메모를 기록하세요.\n"
                f"미팅이 끝나면 `/미팅종료` 를 입력해주세요.")
 
@@ -339,14 +349,20 @@ def end_session(slack_client, user_id: str):
     title = session["title"]
     notes = session["notes"]
     event_id = session["event_id"]
+    event_summary = session.get("event_summary")
+    event_time_str = session.get("event_time_str")
     started_at = session["started_at"]
     ended_at = datetime.now(KST).strftime("%H:%M")
 
     _delete_active_session_file(user_id)
 
     note_count = len(notes)
+    if event_id and event_summary:
+        event_line = f"\n📅 일정: *{event_summary}*" + (f" ({event_time_str})" if event_time_str else "")
+    else:
+        event_line = "\n_(캘린더 미연동)_"
     _post(slack_client, user_id=user_id,
-          text=f"✅ *{title}* 세션 종료. 노트 {note_count}개 저장됨.\n"
+          text=f"✅ 세션 종료. 노트 {note_count}개 저장됨.{event_line}\n"
                f"📡 트랜스크립트를 확인하고 회의록을 생성 중입니다...")
 
     if event_id:

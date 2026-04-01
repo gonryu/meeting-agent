@@ -1089,9 +1089,11 @@ def _create_calendar_event(slack_client, user_id: str, info: dict, company: str 
             description=info.get("agenda", ""),
         )
         time_str = format_time(event["start"]["dateTime"])
-        attendee_display = ", ".join(attendee_emails) if attendee_emails else (company or "없음")
-        _post(slack_client, user_id=user_id, channel=channel, thread_ts=thread_ts,
-              text=f"✅ 미팅이 생성되었습니다.\n*{info.get('title', '미팅')}* — {time_str}\n참석자: {attendee_display}")
+        attendee_display = ", ".join(attendee_emails) if attendee_emails else "없음"
+        msg = f"✅ 미팅이 생성되었습니다.\n*{info.get('title', '미팅')}* — {time_str}\n참석자: {attendee_display}"
+        if company:
+            msg += f"\n업체: {company}"
+        _post(slack_client, user_id=user_id, channel=channel, thread_ts=thread_ts, text=msg)
 
         if company:
             event.setdefault("extendedProperties", {}).setdefault("private", {})["company"] = company
