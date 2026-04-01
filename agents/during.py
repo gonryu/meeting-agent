@@ -287,6 +287,7 @@ def _generate_from_session_end(slack_client, *, user_id: str, event_id: str,
         return
 
     # 트랜스크립트 1회 탐색
+    _post(slack_client, user_id=user_id, text=f"🔍 *{title}* 트랜스크립트 탐색 중...")
     transcript_text = ""
     try:
         transcript_file = drive.find_meet_transcript(creds, title, None)
@@ -551,6 +552,7 @@ def _generate_and_post_minutes(slack_client, *, user_id: str, title: str,
     source_label = " + ".join(sources) if sources else "없음"
 
     # ── 내부용 생성 ──
+    _post(slack_client, user_id=user_id, text=f"✍️ *{title}* 내부용 회의록 생성 중... (1/2)")
     try:
         internal_body = _generate(
             minutes_internal_prompt(title, meeting_date, attendees,
@@ -561,6 +563,7 @@ def _generate_and_post_minutes(slack_client, *, user_id: str, title: str,
         internal_body = f"## 회의 요약\n(생성 실패: {e})\n\n## 원본\n{notes_text or transcript_text[:2000]}"
 
     # ── 외부용 생성 ──
+    _post(slack_client, user_id=user_id, text=f"✍️ *{title}* 외부용 회의록 생성 중... (2/2)")
     try:
         external_body = _generate(
             minutes_external_prompt(title, meeting_date, attendees, internal_body)
@@ -570,6 +573,7 @@ def _generate_and_post_minutes(slack_client, *, user_id: str, title: str,
         external_body = f"## 회의 개요\n(생성 실패: {e})\n"
 
     # ── Drive 저장 ──
+    _post(slack_client, user_id=user_id, text=f"💾 *{title}* Drive에 회의록 저장 중...")
     internal_file_id = external_file_id = None
     if minutes_folder_id:
         # 내부용

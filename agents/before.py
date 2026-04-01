@@ -635,6 +635,8 @@ def _send_briefing(slack_client, user_id: str, meeting: dict, company_name: str,
                    channel: str = None, thread_ts: str = None) -> str | None:
     """브리핑 생성 및 Slack 발송. Returns: 발송된 메시지 ts"""
     try:
+        _post(slack_client, user_id=user_id, channel=channel, thread_ts=thread_ts,
+              text=f"🔍 *{company_name}* 업체 리서치 중...")
         try:
             company_content, _ = research_company(user_id, company_name)
         except Exception as e:
@@ -648,9 +650,13 @@ def _send_briefing(slack_client, user_id: str, meeting: dict, company_name: str,
                         for a in meeting.get("attendees", [])]
         persons_info = []
         for name in person_names[:3]:
+            _post(slack_client, user_id=user_id, channel=channel, thread_ts=thread_ts,
+                  text=f"👤 *{name}* 인물 리서치 중...")
             info, _ = research_person(user_id, name, company_name)
             persons_info.append({"name": name, "raw": info})
 
+        _post(slack_client, user_id=user_id, channel=channel, thread_ts=thread_ts,
+              text=f"📨 이전 커뮤니케이션 맥락 조회 중...")
         context = get_previous_context(user_id, company_name, person_names)
 
         # ## 최근 동향 섹션 추출
