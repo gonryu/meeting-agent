@@ -264,6 +264,8 @@ def start_session(slack_client, user_id: str, title: str):
             event_id = parsed["id"]
             event_summary = parsed["summary"]
             event_time_str = f"{format_time(start_str)} ~ {format_time(end_str)}"
+            # 일정이 매칭되면 세션 제목도 캘린더 제목으로 덮어쓰기
+            title_to_use = event_summary
     except Exception as e:
         log.warning(f"캘린더 이벤트 매칭 실패: {e}")
 
