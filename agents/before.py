@@ -1180,6 +1180,10 @@ def update_meeting_from_text(slack_client, user_id: str, user_message: str,
     if not draft:
         return False
 
+    # 채널 응답은 항상 원래 일정 생성 스레드에 달기
+    reply_channel = draft.get("channel") or channel
+    reply_thread_ts = draft.get("thread_ts") or thread_ts
+
     # LLM으로 병합 판단
     try:
         raw = _generate(merge_meeting_prompt(draft["info"], user_message))
@@ -1202,7 +1206,7 @@ def update_meeting_from_text(slack_client, user_id: str, user_message: str,
     updated_info = result.get("updated_info", draft["info"])
     changed_fields = result.get("changed_fields", [])
     if not changed_fields:
-        _post(slack_client, user_id=user_id, channel=channel, thread_ts=thread_ts,
+        _post(slack_client, user_id=user_id, channel=reply_channel, thread_ts=reply_thread_ts,
               text="ℹ️ 변경할 정보를 찾지 못했습니다.")
         return True
 
@@ -1215,7 +1219,7 @@ def update_meeting_from_text(slack_client, user_id: str, user_message: str,
     try:
         creds = user_store.get_credentials(user_id)
     except Exception as e:
-        _post(slack_client, user_id=user_id, channel=channel, thread_ts=thread_ts,
+        _post(slack_client, user_id=user_id, channel=reply_channel, thread_ts=reply_thread_ts,
               text=f"⚠️ 인증 오류: {e}")
         return True
 
@@ -1264,7 +1268,7 @@ def update_meeting_from_text(slack_client, user_id: str, user_message: str,
             change_summary_lines.append(f"  _(이메일 미확인: {', '.join(missing)})_")
 
     if not patch_kwargs:
-        _post(slack_client, user_id=user_id, channel=channel, thread_ts=thread_ts,
+        _post(slack_client, user_id=user_id, channel=reply_channel, thread_ts=reply_thread_ts,
               text="ℹ️ 변경할 내용을 찾지 못했습니다.")
         return True
 
@@ -1274,12 +1278,12 @@ def update_meeting_from_text(slack_client, user_id: str, user_message: str,
             cal.update_event(creds, event_id, **patch_kwargs)
         except Exception as e:
             log.error(f"캘린더 업데이트 실패: {e}")
-            _post(slack_client, user_id=user_id, channel=channel, thread_ts=thread_ts,
+            _post(slack_client, user_id=user_id, channel=reply_channel, thread_ts=reply_thread_ts,
                   text=f"⚠️ 일정 업데이트 실패: {e}")
             return True
 
     changes = "\n".join(f"• {line}" for line in change_summary_lines)
-    _post(slack_client, user_id=user_id, channel=channel, thread_ts=thread_ts,
+    _post(slack_client, user_id=user_id, channel=reply_channel, thread_ts=reply_thread_ts,
           text=f"✅ 일정이 업데이트되었습니다.\n{changes}")
     return True
 
