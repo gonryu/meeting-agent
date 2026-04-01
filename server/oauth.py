@@ -23,6 +23,7 @@ SCOPES = [
     "https://www.googleapis.com/auth/gmail.readonly",
     "https://www.googleapis.com/auth/gmail.send",
     "https://www.googleapis.com/auth/documents.readonly",
+    "https://www.googleapis.com/auth/contacts.readonly",
 ]
 
 _COMPANY_KNOWLEDGE_TEMPLATE = """# 회사 지식 베이스

@@ -18,7 +18,7 @@ Before Agent  →  During Agent  →  After Agent
 | **Before** | 외부 미팅 자동 감지 → 업체·인물 리서치 → 브리핑 Slack 발송 |
 | **Before** | 자연어 미팅 생성 (`내일 오전 10시 KISA 미팅 잡아줘`) |
 | **Before** | 명함 DM 업로드 → Claude Vision OCR → Contacts 자동 등록 |
-| **Before** | Dreamplus 회의실 검색 / 예약 / 크레딧 조회 |
+| **Before** | Dreamplus 회의실 검색 / 예약 / 크레딧 조회 (아직 동작안함) |
 | **During** | Google Meet 트랜스크립트 자동 폴링 (10분 주기) |
 | **During** | Slack 수동 노트 세션 (`/미팅시작`, `/메모`, `/미팅종료`) |
 | **After** | 내부용·외부용 회의록 자동 생성 → Drive 저장 |

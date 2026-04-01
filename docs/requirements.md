@@ -1,6 +1,6 @@
 # Meeting Agent — 시스템 요구사항 문서
 
-> 최종 갱신: 2026-04-01 (명함 OCR, Dreamplus 연동, 브리핑 인트로 메시지, 시간 포맷 변경)
+> 최종 갱신: 2026-04-01 (명함 OCR, Dreamplus 연동, 브리핑 인트로 메시지, 시간 포맷 변경, 참석자 이메일 다중 후보 선택 UI, Gmail/Google Contacts 이메일 조회)
 > 대상: ICONLOOP / Parametacorp 내부 사용
 > 목적: Slack 기반 AI 미팅 어시스턴트 시스템
 
@@ -51,16 +51,18 @@ Before Agent   →   During Agent   →   After Agent
 ### 2.3 Google 권한 범위 ✅
 
 
-| Scope                | 용도                                        |
-| -------------------- | ----------------------------------------- |
-| `calendar`           | 미팅 조회, 생성, 설명 업데이트                        |
-| `drive`              | Contacts, 회의록, company_knowledge.md 읽기/쓰기 |
-| `gmail.readonly`     | 이메일 맥락 검색, 이메일 주소 추출                      |
-| `gmail.send`         | 외부용 회의록 이메일 발송 (After Agent)              |
-| `documents.readonly` | Google Meet 트랜스크립트(Google Docs) 읽기        |
+| Scope                | 용도                                        | 적용 범위 |
+| -------------------- | ----------------------------------------- | ------- |
+| `calendar`           | 미팅 조회, 생성, 설명 업데이트                        | 전체 사용자 |
+| `drive`              | Contacts, 회의록, company_knowledge.md 읽기/쓰기 | 전체 사용자 |
+| `gmail.readonly`     | 이메일 맥락 검색, 이메일 주소 추출                      | 전체 사용자 |
+| `gmail.send`         | 외부용 회의록 이메일 발송 (After Agent)              | 전체 사용자 |
+| `documents.readonly` | Google Meet 트랜스크립트(Google Docs) 읽기        | 전체 사용자 |
+| `contacts.readonly`  | Google 주소록에서 참석자 이메일 조회 (People API)      | 신규 등록자부터 적용 — 기존 사용자는 `/재등록` 필요 |
 
 > ⚠️ 스코프 변경 시 `server/oauth.py`와 `store/user_store.py` **두 파일 모두** 업데이트 필요.
 > `server/oauth.py`가 실제 Google 동의 화면에서 요청할 스코프를 결정하므로 이 파일이 핵심.
+> `contacts.readonly`는 기존 토큰 갱신 호환성을 위해 `store/user_store.py` SCOPES에는 **의도적으로 제외**됨.
 
 
 ### 2.4 보안 ✅
@@ -271,10 +273,24 @@ LLM이 사용자 메시지에서 추출:
 
 ### 5.2 참석자 이메일 조회 순서 ✅
 
-1. 사용자 메시지 인라인 이메일 우선 사용
+각 참석자에 대해 아래 소스에서 이메일 후보를 **모두 수집**하고 중복 제거 후 순서 유지:
+
+1. LLM 인라인 이메일 → 후보 수집 없이 바로 사용
 2. Slack 워크스페이스 멤버 이름 매칭
-3. Drive `People/{이름}.md` 파일 이메일 파싱
-4. 모두 실패 시 사용자에게 이메일 수동 입력 요청
+3. Gmail 헤더 검색 (`find_email_by_name` — metadata-only 쿼리)
+4. Google 주소록 (`find_email_in_contacts` — `contacts.readonly` 스코프 필요, 기존 사용자는 `/재등록` 필요)
+5. Drive `People/{이름}.md` 파일 이메일 파싱
+
+후보 수에 따른 처리:
+
+| 후보 수 | 동작 |
+|---------|------|
+| 인라인 이메일 있음 | 직접 사용 |
+| 1개 | 자동 선택 |
+| 2개 이상 | Block Kit 버튼 UI로 사용자 선택 요청 |
+| 0개 | 경고 후 해당 참석자 제외 |
+
+후보가 여러 개인 참석자가 있는 경우, 미팅 생성이 일시 중단되고 순서대로 선택 UI가 표시됩니다. 모든 선택이 완료되면 Calendar 이벤트가 생성됩니다.
 
 ### 5.3 생성 결과 ✅
 

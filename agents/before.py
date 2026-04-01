@@ -913,19 +913,153 @@ def create_meeting_from_text(slack_client, user_id: str, user_message: str,
 
     attendee_emails = []
     missing_names = []
+    pending_selections = []  # 이메일 후보가 여러 개인 참석자
     inline_emails = info.get("participant_emails", {})
+
     for name in info.get("participants", []):
-        # LLM이 인라인 이메일을 추출한 경우 우선 사용
-        email = inline_emails.get(name) or _find_email(user_id, name, slack_client)
-        if email:
-            attendee_emails.append(email)
+        # LLM이 인라인으로 이메일을 추출한 경우 우선 사용
+        if inline_email := inline_emails.get(name):
+            attendee_emails.append(inline_email)
+            continue
+        candidates = _find_email_candidates(user_id, name, slack_client)
+        if len(candidates) == 1:
+            attendee_emails.append(candidates[0])
+        elif len(candidates) > 1:
+            pending_selections.append({"name": name, "candidates": candidates})
         else:
             missing_names.append(name)
+
+    # 이메일 후보가 여러 개인 참석자가 있으면 사용자 선택 대기
+    if pending_selections:
+        _pending_meetings[user_id] = {
+            "info": info,
+            "company": company,
+            "channel": channel,
+            "thread_ts": thread_ts,
+            "attendee_emails": attendee_emails,
+            "missing_names": missing_names,
+            "pending_selections": pending_selections,
+        }
+        _post_email_selection(slack_client, user_id, pending_selections[0], channel, thread_ts)
+        return
 
     if missing_names:
         _post(slack_client, user_id=user_id, channel=channel, thread_ts=thread_ts,
               text=f"⚠️ *{', '.join(missing_names)}*의 이메일을 찾지 못했습니다. 해당 참석자 없이 일정을 생성합니다.")
 
+    _create_calendar_event(slack_client, user_id, info, company, attendee_emails, channel, thread_ts)
+
+
+def _find_email_candidates(user_id: str, name: str, slack_client) -> list[str]:
+    """이름으로 이메일 후보 전체 수집 (중복 제거, 순서 유지).
+    Slack → Gmail 헤더 → Google 주소록 → Drive Contacts 순으로 탐색.
+    """
+    found: list[str] = []
+    seen: set[str] = set()
+
+    def _add(email: str):
+        e = email.strip().lower()
+        if e and e not in seen:
+            seen.add(e)
+            found.append(email.strip())
+
+    # 1순위: Slack 워크스페이스 멤버
+    try:
+        result = slack_client.users_list()
+        for user in result["members"]:
+            profile = user.get("profile", {})
+            if name in profile.get("real_name", "") or name in profile.get("display_name", ""):
+                if e := profile.get("email"):
+                    _add(e)
+    except Exception:
+        pass
+
+    creds = None
+    contacts_folder_id = None
+    try:
+        creds, contacts_folder_id, _ = _get_creds_and_config(user_id)
+    except Exception as e:
+        log.warning(f"_find_email_candidates: creds 로드 실패 — {e}")
+        return found
+
+    # 2순위: Gmail 이메일 헤더
+    try:
+        if e := gmail.find_email_by_name(creds, name):
+            _add(e)
+    except Exception as e:
+        log.warning(f"_find_email_candidates: Gmail 헤더 조회 실패 — {e}")
+
+    # 3순위: Google 주소록 (People API)
+    try:
+        if e := gmail.find_email_in_contacts(creds, name):
+            _add(e)
+    except Exception as e:
+        log.warning(f"_find_email_candidates: Google 주소록 조회 실패 — {e}")
+
+    # 4순위: Drive People/{이름}.md
+    try:
+        content, _ = drive.get_person_info(creds, contacts_folder_id, name)
+        if content:
+            for line in content.splitlines():
+                if "이메일:" in line or "email:" in line.lower():
+                    e = line.split(":", 1)[1].strip()
+                    if e:
+                        _add(e)
+    except Exception as e:
+        log.warning(f"_find_email_candidates: Drive 조회 실패 — {e}")
+
+    log.info(f"_find_email_candidates: {name} → {found}")
+    return found
+
+
+def _find_email(user_id: str, name: str, slack_client) -> str | None:
+    """이름으로 이메일 단일 조회 (후보 중 첫 번째 반환)"""
+    candidates = _find_email_candidates(user_id, name, slack_client)
+    return candidates[0] if candidates else None
+
+
+# ── 이메일 선택 대기 상태 ─────────────────────────────────────
+# user_id → {info, company, channel, thread_ts, attendee_emails, missing_names, pending_selections}
+_pending_meetings: dict[str, dict] = {}
+
+
+def _post_email_selection(slack_client, user_id: str, selection: dict,
+                          channel: str = None, thread_ts: str = None):
+    """이메일 후보 선택 Block Kit 메시지 발송"""
+    name = selection["name"]
+    candidates = selection["candidates"]
+    buttons = [
+        {
+            "type": "button",
+            "text": {"type": "plain_text", "text": email},
+            "value": f"{user_id}|{email}",
+            "action_id": "select_attendee_email",
+        }
+        for email in candidates
+    ] + [
+        {
+            "type": "button",
+            "text": {"type": "plain_text", "text": "이 참석자 제외"},
+            "value": f"{user_id}|__skip__",
+            "action_id": "select_attendee_email",
+            "style": "danger",
+        }
+    ]
+    blocks = [
+        {
+            "type": "section",
+            "text": {"type": "mrkdwn",
+                     "text": f"*{name}*의 이메일이 여러 개 발견되었습니다. 사용할 이메일을 선택해주세요:"},
+        },
+        {"type": "actions", "elements": buttons},
+    ]
+    _post(slack_client, user_id=user_id, channel=channel, thread_ts=thread_ts,
+          blocks=blocks, text=f"{name}의 이메일 선택")
+
+
+def _create_calendar_event(slack_client, user_id: str, info: dict, company: str | None,
+                           attendee_emails: list[str], channel: str = None, thread_ts: str = None):
+    """Calendar 이벤트 생성 및 브리핑 실행"""
     if not info.get("date") or not info.get("time"):
         _post(slack_client, user_id=user_id, channel=channel, thread_ts=thread_ts,
               text="⚠️ 날짜 또는 시간을 파악하지 못했어요.\n예: '오늘 15시에 김민환 미팅 잡아줘'")
@@ -953,7 +1087,6 @@ def create_meeting_from_text(slack_client, user_id: str, user_message: str,
         _post(slack_client, user_id=user_id, channel=channel, thread_ts=thread_ts,
               text=f"✅ 미팅이 생성되었습니다.\n*{info.get('title', '미팅')}* — {time_str}\n참석자: {attendee_display}")
 
-        # company 필드가 있으면 이벤트 객체에 주입해 브리핑이 업체 리서치를 바로 수행하도록 함
         if company:
             event.setdefault("extendedProperties", {}).setdefault("private", {})["company"] = company
 
@@ -963,32 +1096,35 @@ def create_meeting_from_text(slack_client, user_id: str, user_message: str,
               text=f"⚠️ 미팅 생성 실패: {e}")
 
 
-def _find_email(user_id: str, name: str, slack_client) -> str | None:
-    """이름으로 이메일 조회 (Slack → Drive Contacts 순)"""
-    try:
-        result = slack_client.users_list()
-        for user in result["members"]:
-            profile = user.get("profile", {})
-            real_name = profile.get("real_name", "")
-            display_name = profile.get("display_name", "")
-            if name in real_name or name in display_name:
-                return profile.get("email")
-    except Exception:
-        pass
+def handle_email_selection(slack_client, body: dict):
+    """select_attendee_email 버튼 클릭 처리"""
+    user_id = body["user"]["id"]
+    value = body["actions"][0]["value"]
+    pending = _pending_meetings.get(user_id)
+    if not pending:
+        return
 
-    try:
-        creds, contacts_folder_id, _ = _get_creds_and_config(user_id)
-        log.info(f"_find_email: contacts_folder_id={contacts_folder_id}, name={name}")
-        content, _ = drive.get_person_info(creds, contacts_folder_id, name)
-        log.info(f"_find_email: Drive 조회 결과 content={content[:100] if content else None}")
-        if content:
-            for line in content.splitlines():
-                if "이메일:" in line or "email:" in line.lower():
-                    return line.split(":", 1)[1].strip()
-    except Exception as e:
-        log.warning(f"_find_email Drive 조회 실패: {e}")
+    _, email = value.split("|", 1)
+    if email != "__skip__":
+        pending["attendee_emails"].append(email)
+    pending["pending_selections"].pop(0)
 
-    return None
+    if pending["pending_selections"]:
+        # 아직 선택이 남아있으면 다음 항목 표시
+        _post_email_selection(slack_client, user_id,
+                              pending["pending_selections"][0],
+                              pending["channel"], pending["thread_ts"])
+    else:
+        # 모든 선택 완료 → 이벤트 생성
+        del _pending_meetings[user_id]
+        if pending.get("missing_names"):
+            _post(slack_client, user_id=user_id,
+                  channel=pending["channel"], thread_ts=pending["thread_ts"],
+                  text=f"⚠️ *{', '.join(pending['missing_names'])}*의 이메일을 찾지 못했습니다. 해당 참석자 없이 일정을 생성합니다.")
+        _create_calendar_event(slack_client, user_id,
+                               pending["info"], pending["company"],
+                               pending["attendee_emails"],
+                               pending["channel"], pending["thread_ts"])
 
 
 # ── company_knowledge 갱신 ───────────────────────────────────

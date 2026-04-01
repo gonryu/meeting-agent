@@ -709,6 +709,12 @@ def handle_card_edit_modal(ack, body, client):
     card_agent.handle_edit_modal_submit(client, user_id, view)
 
 
+@app.action("select_attendee_email")
+def handle_select_attendee_email(ack, body, client):
+    ack()
+    before.handle_email_selection(client, body)
+
+
 @app.action("suggest_followup_meeting")
 def handle_suggest_followup_meeting(ack, body, client):
     ack()

@@ -16,6 +16,8 @@ SCOPES = [
     "https://www.googleapis.com/auth/gmail.readonly",
     "https://www.googleapis.com/auth/gmail.send",
     "https://www.googleapis.com/auth/documents.readonly",
+    # contacts.readonly: 신규 등록자부터 적용 (oauth.py에만 추가)
+    # 기존 토큰 refresh 시 scope 불일치 방지를 위해 여기서는 제외
 ]
 
 

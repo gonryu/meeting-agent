@@ -116,6 +116,52 @@ def send_email(creds: Credentials, to: list[str], subject: str, body_html: str) 
         return False
 
 
+def find_email_by_name(creds: Credentials, name: str) -> str | None:
+    """Gmail 이메일 헤더(From/To/Cc)에서 이름 매칭으로 이메일 주소 추출.
+    metadata 형식으로 조회하므로 본문을 가져오지 않아 빠름.
+    """
+    try:
+        svc = _service(creds)
+        result = svc.users().messages().list(
+            userId="me", q=f'"{name}"', maxResults=20
+        ).execute()
+        for msg in result.get("messages", []):
+            detail = svc.users().messages().get(
+                userId="me", id=msg["id"], format="metadata",
+                metadataHeaders=["From", "To", "Cc"],
+            ).execute()
+            headers = {h["name"]: h["value"]
+                       for h in detail.get("payload", {}).get("headers", [])}
+            for field in ("From", "To", "Cc"):
+                for addr in parse_address_header(headers.get(field, "")):
+                    if name in addr["name"] and addr["email"]:
+                        return addr["email"]
+    except Exception:
+        pass
+    return None
+
+
+def find_email_in_contacts(creds: Credentials, name: str) -> str | None:
+    """Google 주소록(People API)에서 이름으로 이메일 검색.
+    contacts.readonly scope 필요 — 미부여 시 None 반환.
+    """
+    try:
+        svc = build("people", "v1", credentials=creds)
+        result = svc.people().searchContacts(
+            query=name,
+            readMask="names,emailAddresses",
+            pageSize=5,
+        ).execute()
+        for item in result.get("results", []):
+            person = item.get("person", {})
+            emails = person.get("emailAddresses", [])
+            if emails:
+                return emails[0]["value"]
+    except Exception:
+        pass
+    return None
+
+
 def search_recent_emails(creds: Credentials, person_name: str,
                          company_name: str, days: int = 90) -> list[dict]:
     """

@@ -1,6 +1,6 @@
 # Before 에이전트 설계 문서
 
-> 최종 갱신: 2026-04-01 | 명함 OCR, Dreamplus 연동, _to_bullet_lines 헬퍼, 업체 파일 섹션 순서 변경
+> 최종 갱신: 2026-04-01 | 명함 OCR, Dreamplus 연동, _to_bullet_lines 헬퍼, 업체 파일 섹션 순서 변경, 참석자 이메일 다중 후보 선택 UI, Gmail/Google Contacts 이메일 조회 추가
 
 ---
 
@@ -369,14 +369,55 @@ def get_previous_context(user_id, company_name, person_names) -> dict:
 _generate(parse_meeting_prompt(message)) → JSON
   {"title", "date", "time", "duration_minutes", "participants", "participant_emails", "agenda"}
   │
-  ├─ 이메일 조회 (_find_email):
-  │    1. LLM 인라인 이메일
+  ├─ 참석자별 이메일 후보 수집 (_find_email_candidates):
+  │    1. LLM 인라인 이메일 → 바로 사용
   │    2. Slack users_list() 이름 매칭
-  │    3. Drive People/{이름}.md 이메일 파싱
-  │    4. 없으면 ask_email() 후 중단
+  │    3. Gmail 헤더 검색 (find_email_by_name)
+  │    4. Google Contacts 조회 (find_email_in_contacts, contacts.readonly 스코프 필요)
+  │    5. Drive People/{이름}.md 이메일 파싱
+  │    중복 제거 후 순서 유지 → list[str] 반환
   │
-  ├─ cal.create_event() → Calendar 이벤트 + Google Meet 생성
-  └─ run_briefing() → 생성된 미팅 즉시 브리핑
+  ├─ 후보 수 별 처리:
+  │    ① LLM 인라인 이메일 있음 → 직접 사용
+  │    ② 후보 1개 → 자동 선택
+  │    ③ 후보 2개 이상 → pending_selections에 추가 (Block Kit 선택 UI 대기)
+  │    ④ 후보 없음 → missing_names에 추가 (경고 후 건너뜀)
+  │
+  ├─ pending_selections 있음:
+  │    └─ _pending_meetings[user_id] = 전체 대기 상태 저장
+  │       _post_email_selection() → 첫 번째 모호한 이름에 대한 버튼 UI 발송
+  │       (사용자 클릭 대기 후 handle_email_selection() 호출로 이어짐)
+  │
+  └─ 모두 확정 시:
+       missing_names 경고 Slack 메시지 후
+       _create_calendar_event() → Calendar 이벤트 + Google Meet 생성
+       run_briefing() → 생성된 미팅 즉시 브리핑
+```
+
+#### 이메일 후보 수집 내부 함수
+
+| 함수 | 설명 |
+|------|------|
+| `_find_email_candidates(user_id, name, slack_client) -> list[str]` | 모든 소스에서 이메일 후보를 수집, 중복 제거 후 순서 유지한 리스트 반환 |
+| `_find_email(user_id, name, slack_client) -> str \| None` | `_find_email_candidates()` 래퍼 — 첫 번째 결과만 반환 (하위 호환) |
+
+#### 다중 후보 선택 UI
+
+| 함수 | 설명 |
+|------|------|
+| `_post_email_selection(slack_client, user_id, selection, channel, thread_ts)` | Block Kit 버튼 UI 발송: 후보 이메일별 버튼 + "이 참석자 제외" (danger) |
+| `handle_email_selection(slack_client, body)` | `select_attendee_email` 버튼 클릭 처리 — 선택 완료 시 다음 미확정 항목 UI 또는 `_create_calendar_event()` 호출 |
+
+모듈 수준 상태: `_pending_meetings: dict[str, dict]` — user_id 키로 대기 중인 미팅 생성 상태 저장.
+
+#### Calendar 이벤트 생성 (`_create_calendar_event`)
+
+`create_meeting_from_text()`에서 분리된 함수. 이메일이 모두 확정된 후 호출:
+
+```python
+def _create_calendar_event(slack_client, user_id, info, company, attendee_emails, channel, thread_ts):
+    # cal.create_event() → Calendar 이벤트 + Google Meet 생성
+    # run_briefing() → 생성된 미팅 즉시 브리핑
 ```
 
 ### 6.7 company_knowledge.md 갱신 (`update_company_knowledge`)
@@ -405,6 +446,22 @@ def parse_address_header(header_value) -> list[dict]:
     # "이름 <email>" 또는 "email" 형식 파싱
     # 쉼표 구분 복수 주소 지원
     # Returns: [{"name": str, "email": str}]
+```
+
+### `find_email_by_name`
+```python
+def find_email_by_name(creds, name) -> str | None:
+    # Gmail 검색 쿼리: "{name}" (metadata-only, 빠름)
+    # From/To/Cc 헤더에서 name과 일치하는 이메일 주소 추출
+    # 일치 없으면 None 반환
+```
+
+### `find_email_in_contacts`
+```python
+def find_email_in_contacts(creds, name) -> str | None:
+    # Google People API searchContacts 사용
+    # contacts.readonly 스코프 필요 — 스코프 없으면 gracefully None 반환
+    # name과 일치하는 첫 번째 이메일 주소 반환
 ```
 
 ---
