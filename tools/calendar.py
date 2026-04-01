@@ -207,22 +207,68 @@ def update_event_description(creds: Credentials, event_id: str, description: str
 
 
 def enable_meet_transcription(creds: Credentials, conference_id: str) -> bool:
-    """Google Meet 스페이스의 트랜스크립트를 활성화.
+    """Google Meet 스페이스의 트랜스크립트 + Gemini 회의록 자동 작성을 활성화.
     meetings.space.created 스코프 필요 — 미부여 시 False 반환.
+
+    google-api-python-client 대신 requests 직접 호출 (회사 방화벽 SSL 우회).
+    1차 시도: 트랜스크립트 + Gemini 회의록(meetingNoteConfig) 동시 활성화
+    2차 시도(fallback): 트랜스크립트만 활성화
     """
+    import requests
+    import urllib3
+    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+    # 액세스 토큰 갱신
     try:
-        meet = build("meet", "v2", credentials=creds)
-        space_name = f"spaces/{conference_id}"
-        meet.spaces().patch(
-            name=space_name,
-            updateMask="config.transcriptionConfig",
-            body={"config": {"transcriptionConfig": {"state": "ON"}}},
-        ).execute()
-        log.info(f"Meet 트랜스크립트 활성화: {space_name}")
-        return True
+        import google.auth.transport.requests as ga_requests
+        creds.refresh(ga_requests.Request())
     except Exception as e:
-        log.warning(f"Meet 트랜스크립트 활성화 실패 (스코프 미부여 또는 API 오류): {e}")
+        log.warning(f"Meet 토큰 갱신 실패: {e}")
         return False
+
+    token = creds.token
+    space_name = f"spaces/{conference_id}"
+    url = f"https://meet.googleapis.com/v2beta/{space_name}"
+    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+
+    # 1차: 트랜스크립트 + Gemini 자동 회의록 동시 활성화
+    try:
+        resp = requests.patch(
+            url,
+            params={"updateMask": "config.transcriptionConfig,config.meetingNoteConfig"},
+            json={"config": {
+                "transcriptionConfig": {"state": "ON"},
+                "meetingNoteConfig": {"state": "ON"},
+            }},
+            headers=headers,
+            verify=False,
+            timeout=15,
+        )
+        if resp.ok:
+            log.info(f"Meet 트랜스크립트 + Gemini 회의록 자동 작성 활성화: {space_name}")
+            return True
+        log.warning(f"Gemini 회의록 설정 실패 ({resp.status_code}), 트랜스크립트만 시도: {resp.text}")
+    except Exception as e1:
+        log.warning(f"Gemini 회의록 설정 요청 실패: {e1}")
+
+    # 2차 fallback: 트랜스크립트만 활성화
+    try:
+        resp2 = requests.patch(
+            url,
+            params={"updateMask": "config.transcriptionConfig"},
+            json={"config": {"transcriptionConfig": {"state": "ON"}}},
+            headers=headers,
+            verify=False,
+            timeout=15,
+        )
+        if resp2.ok:
+            log.info(f"Meet 트랜스크립트 활성화 (Gemini 회의록 미지원): {space_name}")
+            return True
+        log.warning(f"Meet 트랜스크립트 활성화 실패 ({resp2.status_code}): {resp2.text}")
+    except Exception as e2:
+        log.warning(f"Meet 트랜스크립트 요청 실패: {e2}")
+
+    return False
 
 
 def update_event(creds: Credentials, event_id: str, *,
