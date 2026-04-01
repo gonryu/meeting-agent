@@ -411,16 +411,33 @@ def _notify_action_items(
         text = "\n".join(lines)
 
         target_uid = user_id  # 기본: 주최자
+        extra_note = ""
         if assignee:
-            # 캐시에서 먼저 확인 후 없으면 조회
+            # Slack → Google 주소록 → Gmail → Contacts 폴더 순으로 조회
             info = _person_cache.get(assignee)
             if not info and creds:
                 info = _lookup_person(assignee, slack_client, creds, contacts_folder_id)
             slack_uid = (info or {}).get("slack_uid")
+            found_email = (info or {}).get("email")
+
             if slack_uid:
+                # Slack 계정 찾음 → 직접 DM
                 target_uid = slack_uid
+            elif found_email:
+                # Slack 없지만 이메일 발견 → 주최자에게 알리고 이메일로 전달 요청
+                extra_note = (
+                    f"\n\n_(담당자 *{assignee}*의 Slack 계정을 찾지 못했습니다. "
+                    f"이메일({found_email})로 직접 전달해주세요.)_"
+                )
             else:
-                text += f"\n\n_(담당자 '{assignee}' Slack 계정을 찾지 못했습니다.)_"
+                # 어디서도 찾지 못함
+                extra_note = (
+                    f"\n\n_(담당자 *{assignee}*의 연락처를 찾지 못했습니다. "
+                    f"Slack·Google 주소록·Gmail·Contacts 폴더 모두 확인했습니다.)_"
+                )
+
+        if extra_note:
+            text += extra_note
 
         try:
             slack_client.chat_postMessage(channel=target_uid, text=text)
