@@ -204,3 +204,27 @@ def update_event_description(creds: Credentials, event_id: str, description: str
         body={"description": description},
         sendUpdates="all",
     ).execute()
+
+
+def update_event(creds: Credentials, event_id: str, *,
+                 summary: str = None, start_dt: datetime = None,
+                 end_dt: datetime = None, attendee_emails: list[str] = None,
+                 description: str = None) -> dict:
+    """캘린더 이벤트 부분 업데이트 (patch). None인 필드는 변경하지 않음."""
+    body = {}
+    if summary is not None:
+        body["summary"] = summary
+    if start_dt is not None:
+        body["start"] = {"dateTime": start_dt.isoformat(), "timeZone": "Asia/Seoul"}
+    if end_dt is not None:
+        body["end"] = {"dateTime": end_dt.isoformat(), "timeZone": "Asia/Seoul"}
+    if attendee_emails is not None:
+        body["attendees"] = [{"email": e} for e in attendee_emails]
+    if description is not None:
+        body["description"] = description
+    return _service(creds).events().patch(
+        calendarId="primary",
+        eventId=event_id,
+        body=body,
+        sendUpdates="all",
+    ).execute()

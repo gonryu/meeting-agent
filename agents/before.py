@@ -29,6 +29,7 @@ from prompts.briefing import (
     person_info_prompt,
     service_connection_prompt,
     parse_meeting_prompt,
+    merge_meeting_prompt,
     update_knowledge_prompt,
 )
 from store import user_store
@@ -883,6 +884,9 @@ def handle_agenda_reply(slack_client, thread_ts: str, text: str):
 def create_meeting_from_text(slack_client, user_id: str, user_message: str,
                              channel: str = None, thread_ts: str = None):
     """자연어 요청으로 Calendar 미팅 생성"""
+    # 새 일정 생성 시 기존 드래프트 초기화
+    _meeting_drafts.pop(user_id, None)
+
     try:
         raw = _generate(parse_meeting_prompt(user_message))
     except Exception as e:
@@ -1028,6 +1032,11 @@ def _find_email(user_id: str, name: str, slack_client) -> str | None:
 # user_id → {info, company, channel, thread_ts, attendee_emails, missing_names, pending_selections}
 _pending_meetings: dict[str, dict] = {}
 
+# ── 일정 드래프트 상태 ────────────────────────────────────────
+# user_id → {info, company, event_id, channel, thread_ts, created_at}
+_meeting_drafts: dict[str, dict] = {}
+_DRAFT_TTL_SECONDS = 7200  # 2시간 후 만료
+
 
 def _post_email_selection(slack_client, user_id: str, selection: dict,
                           channel: str = None, thread_ts: str = None):
@@ -1088,12 +1097,25 @@ def _create_calendar_event(slack_client, user_id: str, info: dict, company: str 
             attendee_emails=attendee_emails,
             description=info.get("agenda", ""),
         )
+        event_id = event["id"]
         time_str = format_time(event["start"]["dateTime"])
         attendee_display = ", ".join(attendee_emails) if attendee_emails else "없음"
         msg = f"✅ 미팅이 생성되었습니다.\n*{info.get('title', '미팅')}* — {time_str}\n참석자: {attendee_display}"
         if company:
             msg += f"\n업체: {company}"
+        msg += "\n_제목, 참석자, 어젠다를 추가로 알려주시면 업데이트해드릴게요._"
         _post(slack_client, user_id=user_id, channel=channel, thread_ts=thread_ts, text=msg)
+
+        # 드래프트 저장 (후속 메시지로 업데이트 가능)
+        _meeting_drafts[user_id] = {
+            "info": dict(info),
+            "company": company,
+            "event_id": event_id,
+            "attendee_emails": list(attendee_emails),
+            "channel": channel,
+            "thread_ts": thread_ts,
+            "created_at": datetime.now().isoformat(),
+        }
 
         if company:
             event.setdefault("extendedProperties", {}).setdefault("private", {})["company"] = company
@@ -1133,6 +1155,133 @@ def handle_email_selection(slack_client, body: dict):
                                pending["info"], pending["company"],
                                pending["attendee_emails"],
                                pending["channel"], pending["thread_ts"])
+
+
+# ── 일정 드래프트 업데이트 ──────────────────────────────────────
+
+def has_meeting_draft(user_id: str) -> bool:
+    """유효한(만료 안 된) 일정 드래프트가 있는지 확인"""
+    draft = _meeting_drafts.get(user_id)
+    if not draft:
+        return False
+    created = datetime.fromisoformat(draft["created_at"])
+    if (datetime.now() - created).total_seconds() > _DRAFT_TTL_SECONDS:
+        del _meeting_drafts[user_id]
+        return False
+    return True
+
+
+def update_meeting_from_text(slack_client, user_id: str, user_message: str,
+                              channel: str = None, thread_ts: str = None) -> bool:
+    """기존 드래프트에 새 메시지를 병합하여 캘린더 이벤트 업데이트.
+    Returns: True if the message was handled as a meeting update, False otherwise.
+    """
+    draft = _meeting_drafts.get(user_id)
+    if not draft:
+        return False
+
+    # LLM으로 병합 판단
+    try:
+        raw = _generate(merge_meeting_prompt(draft["info"], user_message))
+    except Exception as e:
+        log.warning(f"merge_meeting_prompt 실패: {e}")
+        return False
+
+    cleaned = re.sub(r"```(?:json)?", "", raw).strip().strip("`")
+    json_match = re.search(r"\{.*\}", cleaned, re.DOTALL)
+    if not json_match:
+        return False
+    try:
+        result = json.loads(json_match.group())
+    except json.JSONDecodeError:
+        return False
+
+    if not result.get("is_update"):
+        return False
+
+    updated_info = result.get("updated_info", draft["info"])
+    changed_fields = result.get("changed_fields", [])
+    if not changed_fields:
+        _post(slack_client, user_id=user_id, channel=channel, thread_ts=thread_ts,
+              text="ℹ️ 변경할 정보를 찾지 못했습니다.")
+        return True
+
+    # 드래프트 정보 업데이트
+    draft["info"] = updated_info
+    draft["created_at"] = datetime.now().isoformat()  # TTL 리셋
+
+    event_id = draft.get("event_id")
+    creds = None
+    try:
+        creds = user_store.get_credentials(user_id)
+    except Exception as e:
+        _post(slack_client, user_id=user_id, channel=channel, thread_ts=thread_ts,
+              text=f"⚠️ 인증 오류: {e}")
+        return True
+
+    # 캘린더 패치 인자 구성
+    patch_kwargs: dict = {}
+    attendee_emails = draft.get("attendee_emails", [])
+    change_summary_lines = []
+
+    if "title" in changed_fields:
+        patch_kwargs["summary"] = updated_info.get("title", "미팅")
+        change_summary_lines.append(f"제목 → *{patch_kwargs['summary']}*")
+
+    if "agenda" in changed_fields:
+        patch_kwargs["description"] = updated_info.get("agenda", "")
+        change_summary_lines.append(f"어젠다 → _{patch_kwargs['description']}_")
+
+    if "date" in changed_fields or "time" in changed_fields or "duration_minutes" in changed_fields:
+        try:
+            start_dt = datetime.fromisoformat(
+                f"{updated_info['date']}T{updated_info['time']}:00+09:00"
+            )
+            end_dt = start_dt + timedelta(minutes=int(updated_info.get("duration_minutes", 60)))
+            patch_kwargs["start_dt"] = start_dt
+            patch_kwargs["end_dt"] = end_dt
+            time_str = format_time(start_dt.isoformat())
+            change_summary_lines.append(f"일시 → *{updated_info['date']} {time_str}*")
+        except Exception as e:
+            log.warning(f"날짜/시간 파싱 실패: {e}")
+
+    if "participants" in changed_fields:
+        new_names = updated_info.get("participants", [])
+        new_emails = list(attendee_emails)  # 기존 유지 후 추가
+        missing = []
+        for name in new_names:
+            if name not in [n for n in draft["info"].get("participants", [])]:
+                candidates = _find_email_candidates(user_id, name, slack_client)
+                if candidates:
+                    new_emails.append(candidates[0])
+                else:
+                    missing.append(name)
+        draft["attendee_emails"] = new_emails
+        patch_kwargs["attendee_emails"] = new_emails
+        names_str = ", ".join(new_names) if new_names else "없음"
+        change_summary_lines.append(f"참석자 → {names_str}")
+        if missing:
+            change_summary_lines.append(f"  _(이메일 미확인: {', '.join(missing)})_")
+
+    if not patch_kwargs:
+        _post(slack_client, user_id=user_id, channel=channel, thread_ts=thread_ts,
+              text="ℹ️ 변경할 내용을 찾지 못했습니다.")
+        return True
+
+    # 캘린더 이벤트 업데이트
+    if event_id and creds:
+        try:
+            cal.update_event(creds, event_id, **patch_kwargs)
+        except Exception as e:
+            log.error(f"캘린더 업데이트 실패: {e}")
+            _post(slack_client, user_id=user_id, channel=channel, thread_ts=thread_ts,
+                  text=f"⚠️ 일정 업데이트 실패: {e}")
+            return True
+
+    changes = "\n".join(f"• {line}" for line in change_summary_lines)
+    _post(slack_client, user_id=user_id, channel=channel, thread_ts=thread_ts,
+          text=f"✅ 일정이 업데이트되었습니다.\n{changes}")
+    return True
 
 
 # ── company_knowledge 갱신 ───────────────────────────────────

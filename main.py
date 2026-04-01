@@ -21,6 +21,8 @@ from agents.before import (
     run_briefing,
     handle_agenda_reply,
     create_meeting_from_text,
+    has_meeting_draft,
+    update_meeting_from_text,
     update_company_knowledge,
     research_company,
     research_person,
@@ -209,6 +211,13 @@ def _classify_intent(text: str) -> dict:
 
 def _route_message(text: str, client, user_id: str, channel: str = None, thread_ts: str = None):
     log.info(f"메시지 라우팅 ({user_id}): {text}")
+
+    # 진행 중인 일정 드래프트가 있으면 업데이트 시도 (intent 분류 전)
+    if has_meeting_draft(user_id):
+        handled = update_meeting_from_text(client, user_id=user_id, user_message=text,
+                                           channel=channel, thread_ts=thread_ts)
+        if handled:
+            return
 
     intent_data = _classify_intent(text)
     intent = intent_data.get("intent", "unknown")

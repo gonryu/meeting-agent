@@ -1,4 +1,5 @@
 """Gemini 프롬프트 템플릿"""
+import json
 from datetime import datetime
 
 
@@ -106,6 +107,45 @@ JSON 형식으로만 답변 (다른 텍스트 없이):
 - 시간 언급 없으면 "09:00"
 - "오늘" → {today}, "내일" → 오늘 날짜 +1일 계산
 - duration 언급 없으면 60
+"""
+
+
+def merge_meeting_prompt(existing_info: dict, new_message: str) -> str:
+    today = datetime.now().strftime("%Y-%m-%d")
+    existing_json = json.dumps(existing_info, ensure_ascii=False, indent=2)
+    return f"""현재 진행 중인 일정 드래프트가 있어. 사용자의 새 메시지가 이 일정에 대한 추가/수정 정보인지 판단하고, 맞다면 드래프트를 업데이트해줘. 오늘 날짜는 {today}.
+
+현재 드래프트:
+{existing_json}
+
+새 메시지: "{new_message}"
+
+판단 규칙:
+- 일정 관련 정보(제목, 참석자, 어젠다, 날짜, 시간, 소요시간 등)를 제공하는 메시지면 is_update: true
+- 전혀 다른 주제("브리핑 해줘", "회의실 예약해줘", "회사 알아봐줘" 등)면 is_update: false
+
+JSON으로만 반환 (설명 없이):
+{{
+  "is_update": true,
+  "updated_info": {{
+    "date": "YYYY-MM-DD",
+    "time": "HH:MM",
+    "duration_minutes": 60,
+    "participants": [],
+    "participant_emails": {{}},
+    "company": null,
+    "title": "미팅 제목",
+    "agenda": ""
+  }},
+  "changed_fields": ["변경된 필드명 목록"]
+}}
+
+업데이트 규칙:
+- 명시되지 않은 필드는 기존 드래프트 값 그대로 유지
+- "참석자 추가해줘 홍길동" → participants에 홍길동 추가 (기존 유지)
+- "참석자는 홍길동이야" → participants를 [홍길동]으로 대체
+- participants는 개인 이름만, 업체명 제외
+- is_update가 false면 updated_info는 기존 드래프트 그대로, changed_fields는 []
 """
 
 
