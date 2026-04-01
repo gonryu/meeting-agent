@@ -40,6 +40,7 @@ from agents import after
 from agents import card as card_agent
 from store import user_store
 from server import oauth as oauth_server
+from tools import stt
 
 app = App(token=os.getenv("SLACK_BOT_TOKEN"))
 
@@ -135,7 +136,7 @@ def handle_message(event, client):
     subtype = event.get("subtype")
     user_id = event.get("user")
 
-    # ── 이미지 파일 업로드 (명함 OCR) ──────────────────────────
+    # ── 파일 업로드 (이미지: 명함 OCR / 음성: STT 메모) ──────────
     if subtype == "file_share" and event.get("channel_type") == "im" and user_id:
         if _check_registered(client, user_id):
             for f in event.get("files", []):
@@ -143,6 +144,13 @@ def handle_message(event, client):
                 if mime.startswith("image/"):
                     log.info(f"명함 이미지 업로드 감지: user={user_id} file={f.get('id')}")
                     card_agent.handle_image_upload(client, user_id, f)
+                elif stt.is_audio(mime):
+                    log.info(f"음성 파일 업로드 감지: user={user_id} file={f.get('name')} mime={mime}")
+                    threading.Thread(
+                        target=_handle_audio_upload,
+                        args=(client, user_id, f),
+                        daemon=True,
+                    ).start()
         return
 
     if subtype:
@@ -471,6 +479,34 @@ def _note_handler(ack, body, client):
     add_note(client, user_id=user_id, note_text=note_text)
 
 app.command("/메모")(_note_handler)
+
+
+def _handle_audio_upload(client, user_id: str, file_info: dict):
+    """음성 파일 업로드 처리 — STT 변환 후 메모로 등록 (세션 자동 시작)"""
+    filename = file_info.get("name", "audio")
+    mime = file_info.get("mimetype", "audio/mpeg")
+    file_url = file_info.get("url_private_download") or file_info.get("url_private")
+
+    client.chat_postMessage(
+        channel=user_id,
+        text=f"🎙️ *{filename}* 음성 변환 중...",
+    )
+
+    try:
+        slack_token = os.getenv("SLACK_BOT_TOKEN", "")
+        text = stt.transcribe(file_url, slack_token, mime_type=mime, filename=filename)
+    except Exception as e:
+        log.error(f"STT 실패 ({user_id}): {e}")
+        client.chat_postMessage(channel=user_id, text=f"⚠️ 음성 변환 실패: {e}")
+        return
+
+    if not text:
+        client.chat_postMessage(channel=user_id, text="⚠️ 음성에서 텍스트를 추출하지 못했습니다.")
+        return
+
+    # 세션 자동 시작 + 메모 등록
+    add_note(client, user_id=user_id, note_text=text, session_title="음성 메모 세션")
+
 
 
 def _meeting_end_handler(ack, body, client):

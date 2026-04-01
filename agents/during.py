@@ -262,12 +262,19 @@ def start_session(slack_client, user_id: str, title: str):
                f"미팅이 끝나면 `/미팅종료` 를 입력해주세요.")
 
 
-def add_note(slack_client, user_id: str, note_text: str):
-    """/메모 {내용} — 진행 중 세션에 노트 추가"""
-    if user_id not in _active_sessions:
+def add_note(slack_client, user_id: str, note_text: str, session_title: str = "메모 세션"):
+    """/메모 {내용} — 진행 중 세션에 노트 추가. 세션이 없으면 자동 시작."""
+    if not note_text.strip():
         _post(slack_client, user_id=user_id,
-              text="⚠️ 진행 중인 세션이 없습니다. `/미팅시작 제목` 으로 먼저 시작해주세요.")
+              text="⚠️ 노트 내용을 입력해주세요. 예: `/메모 DID 연동 방안 논의`")
         return
+
+    if user_id not in _active_sessions:
+        # 세션 자동 시작
+        start_session(slack_client, user_id, session_title)
+        if user_id not in _active_sessions:
+            # start_session이 실패한 경우 (인증 오류 등)
+            return
 
     if not note_text.strip():
         _post(slack_client, user_id=user_id,
