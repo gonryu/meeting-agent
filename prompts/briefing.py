@@ -154,13 +154,17 @@ def minutes_internal_prompt(meeting_title: str, meeting_date: str, attendees: st
     """내부용 회의록 — 전체 내용, 전략적 맥락 포함"""
     sources = []
     if transcript:
-        sources.append(f"[트랜스크립트]\n{transcript[:8000]}")
+        sources.append(f"[트랜스크립트]\n{transcript[:40000]}")
     if notes_text:
         sources.append(f"[수동 노트]\n{notes_text}")
     sources_block = "\n\n".join(sources) if sources else "(자료 없음)"
 
     return f"""다음 자료를 바탕으로 내부용 회의록을 작성해줘. 반드시 한국어로.
-내부용이므로 전략적 판단, 내부 의견, 주의사항 등 모든 논의 내용을 포함해줘.
+
+중요 원칙:
+- 트랜스크립트와 수동 노트에 실제로 언급된 내용만 작성할 것
+- 내용을 유추하거나 추론하지 말 것. 자료에 없는 내용은 절대 추가하지 말 것
+- 불명확한 부분은 그대로 "(불명확)" 또는 생략할 것
 
 [미팅 정보]
 - 제목: {meeting_title}
@@ -172,17 +176,19 @@ def minutes_internal_prompt(meeting_title: str, meeting_date: str, attendees: st
 다음 마크다운 형식으로 작성:
 
 ## 회의 요약
-(핵심 내용 3~5줄)
-
-## 주요 결정 사항
-- ...
+(자료에 실제로 언급된 핵심 내용만 3~5줄로 요약. 유추/추론 금지)
 
 ## 액션 아이템
+(반드시 포함. 자료에 언급된 것만. 없으면 "없음"으로 명시)
 | 담당자 | 내용 | 기한 |
 |--------|------|------|
 
+## 주요 결정 사항
+(자료에서 명확히 결정된 것만)
+- ...
+
 ## 주요 논의 내용
-(주제별 핵심 포인트, 전략적 맥락 포함)
+(주제별로 실제 논의된 내용 정리. 전략적 맥락 포함)
 
 ## 내부 메모
 (주의사항, 후속 전략, 상대방 관찰 등 내부에서만 공유할 내용)
