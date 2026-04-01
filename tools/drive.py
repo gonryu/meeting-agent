@@ -250,6 +250,28 @@ def find_meet_transcript(creds: Credentials, meeting_title: str,
     return files[0] if files else None
 
 
+def create_draft_doc(creds: Credentials, name: str, content: str, parent_id: str) -> str:
+    """마크다운 텍스트로 편집 가능한 Google Docs 초안 생성. Returns: doc_id"""
+    media = MediaInMemoryUpload(content.encode("utf-8"), mimetype="text/plain")
+    svc = _service(creds)
+    metadata = {
+        "name": name,
+        "parents": [parent_id],
+        "mimeType": "application/vnd.google-apps.document",
+    }
+    file = svc.files().create(body=metadata, media_body=media, fields="id").execute()
+    return file["id"]
+
+
+def delete_file(creds: Credentials, file_id: str) -> None:
+    """Drive 파일 삭제 (휴지통으로 이동)"""
+    try:
+        _service(creds).files().trash(fileId=file_id).execute()
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).warning(f"파일 삭제 실패 (file_id={file_id}): {e}")
+
+
 def save_minutes(creds: Credentials, minutes_folder_id: str,
                  filename: str, content: str) -> str:
     """회의록 저장. Returns: file_id"""

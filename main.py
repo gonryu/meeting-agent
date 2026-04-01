@@ -35,6 +35,11 @@ from agents.during import (
     end_session,
     check_transcripts,
     get_minutes_list,
+    finalize_minutes,
+    cancel_minutes,
+    request_minutes_edit,
+    handle_minutes_edit_reply,
+    _pending_minutes,
 )
 from agents import after
 from agents import card as card_agent
@@ -169,6 +174,18 @@ def handle_message(event, client):
     if channel_type == "im":
         if not _check_registered(client, user_id):
             return
+
+        # 회의록 수정 요청 스레드 답글 감지
+        if thread_ts and user_id:
+            draft = _pending_minutes.get(user_id)
+            if draft and draft.get("draft_ts") == thread_ts:
+                threading.Thread(
+                    target=handle_minutes_edit_reply,
+                    args=(client, user_id, text),
+                    daemon=True,
+                ).start()
+                return
+
         _route_message(text, client, user_id=user_id)
 
     elif thread_ts and user_id and channel_type != "im":
@@ -570,6 +587,38 @@ def handle_after_cancel_minutes(ack, body, client):
 def handle_after_done_action_item(ack, body, client):
     ack()
     after.handle_complete_action_item(client, body)
+
+
+# ── 회의록 검토 액션 핸들러 ─────────────────────────────────
+
+@app.action("minutes_confirm")
+def handle_minutes_confirm(ack, body, client):
+    ack()
+    user_id = body["user"]["id"]
+    threading.Thread(
+        target=finalize_minutes,
+        args=(client, user_id),
+        daemon=True,
+    ).start()
+
+
+@app.action("minutes_edit_request")
+def handle_minutes_edit_request(ack, body, client):
+    ack()
+    user_id = body["user"]["id"]
+    request_minutes_edit(client, user_id)
+
+
+@app.action("minutes_cancel")
+def handle_minutes_cancel(ack, body, client):
+    ack()
+    user_id = body["user"]["id"]
+    cancel_minutes(client, user_id)
+
+
+@app.action("minutes_open_doc")
+def handle_minutes_open_doc(ack, body, client):
+    ack()  # URL 버튼 — 브라우저에서 열림, 별도 처리 불필요
 
 
 # ── 명함 OCR 액션 핸들러 ────────────────────────────────────
