@@ -1098,6 +1098,12 @@ def _create_calendar_event(slack_client, user_id: str, info: dict, company: str 
             description=info.get("agenda", ""),
         )
         event_id = event["id"]
+
+        # Google Meet 트랜스크립트 자동 활성화
+        conference_id = (event.get("conferenceData") or {}).get("conferenceId")
+        if conference_id:
+            cal.enable_meet_transcription(creds, conference_id)
+
         time_str = format_time(event["start"]["dateTime"])
         attendee_display = ", ".join(attendee_emails) if attendee_emails else "없음"
         msg = f"✅ 미팅이 생성되었습니다.\n*{info.get('title', '미팅')}* — {time_str}\n참석자: {attendee_display}"

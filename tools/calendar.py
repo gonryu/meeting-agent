@@ -206,6 +206,25 @@ def update_event_description(creds: Credentials, event_id: str, description: str
     ).execute()
 
 
+def enable_meet_transcription(creds: Credentials, conference_id: str) -> bool:
+    """Google Meet 스페이스의 트랜스크립트를 활성화.
+    meetings.space.created 스코프 필요 — 미부여 시 False 반환.
+    """
+    try:
+        meet = build("meet", "v2", credentials=creds)
+        space_name = f"spaces/{conference_id}"
+        meet.spaces().patch(
+            name=space_name,
+            updateMask="config.transcriptionConfig",
+            body={"config": {"transcriptionConfig": {"state": "ON"}}},
+        ).execute()
+        log.info(f"Meet 트랜스크립트 활성화: {space_name}")
+        return True
+    except Exception as e:
+        log.warning(f"Meet 트랜스크립트 활성화 실패 (스코프 미부여 또는 API 오류): {e}")
+        return False
+
+
 def update_event(creds: Credentials, event_id: str, *,
                  summary: str = None, start_dt: datetime = None,
                  end_dt: datetime = None, attendee_emails: list[str] = None,
