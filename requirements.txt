@@ -9,3 +9,4 @@ slack-bolt==1.27.0
 fastapi
 uvicorn[standard]
 cryptography
+deepgram-sdk
