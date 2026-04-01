@@ -1,6 +1,6 @@
 # LLM 사용 현황
 
-> 최종 갱신: 2026-04-01 (명함 OCR LLM 호출 추가)
+> 최종 갱신: 2026-04-01 (회의록 수정 요청 재생성, 대화형 미팅 병합, 인텐트 분류 check_credits 제거)
 
 ---
 
@@ -21,6 +21,8 @@
 | `_search(prompt)` | Before | Gemini + GoogleSearch / Claude + web_search | 웹 검색이 필요한 경우 |
 | `_generate(prompt)` | Before, During, After | Gemini / Claude (검색 없음) | 텍스트 생성·분석만 필요한 경우 |
 | `ocr_business_card(image_bytes)` | Card | Claude Haiku Vision (직접 호출) | 명함 이미지 OCR + 구조화 |
+
+> **STT (음성→텍스트)**: LLM 미사용. Deepgram REST API (`nova-2`, `tools/stt.py`) 별도 처리.
 
 ---
 
@@ -97,6 +99,30 @@
 - **위치**: `agents/before.py` → `create_meeting_from_text()`
 - **함수**: `_generate`
 - **프롬프트**: `prompts/briefing.py` → `parse_meeting_prompt(user_message)`
+
+### 3.4-2 미팅 초안 병합 (대화형 미팅 생성)
+
+- **위치**: `agents/before.py` → `update_meeting_from_text()`
+- **함수**: `_generate`
+- **프롬프트**: `prompts/briefing.py` → `merge_meeting_prompt(existing_info, new_message)`
+
+```
+기존 미팅 초안이 있고, 사용자가 새 메시지를 보냈습니다.
+이 메시지가 기존 초안의 업데이트인지, 아니면 무관한 메시지인지 판단해줘.
+
+[기존 미팅 초안]
+{existing_info}
+
+[새 메시지]
+{new_message}
+
+JSON으로만 반환:
+{"is_update": true/false, "updated_info": {...}, "changed_fields": [...]}
+```
+
+---
+
+### 3.5 자연어 미팅 파싱
 
 ```
 다음 메시지에서 미팅 정보를 추출해줘. 오늘 날짜는 {today}이야.
@@ -243,7 +269,27 @@ JSON 형식으로만 답변 (다른 텍스트 없이):
 
 ---
 
-### 4.3 입력 소스 조합 규칙
+### 4.3 회의록 수정 요청 재생성 (검토 단계)
+
+- **위치**: `agents/during.py` → `handle_minutes_edit_reply()`
+- **함수**: `_generate` (2회)
+- **트리거**: `[✏️ 수정 요청]` 버튼 클릭 후 스레드 답글
+
+```
+다음 회의록을 아래 수정 요청에 따라 수정해줘. 반드시 한국어로.
+
+[기존 회의록]
+{internal_body}
+
+[수정 요청]
+{edit_text}
+
+수정된 전체 회의록을 동일한 마크다운 형식으로 반환해줘.
+```
+
+재생성 후 외부용도 동일하게 재생성 → 새 초안 메시지 발송.
+
+### 4.4 입력 소스 조합 규칙
 
 | 트랜스크립트 | 수동 노트 | 생성 방식 |
 |------------|---------|---------|
@@ -330,7 +376,6 @@ JSON으로만 응답해줘:
 - research_company: 기업 리서치 (params: company)
 - research_person: 인물 리서치 (params: person, company)
 - update_knowledge: 지식 갱신
-- check_credits: Dreamplus 크레딧 잔액 조회
 - unknown: 위 항목에 해당 없음
 ```
 

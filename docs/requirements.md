@@ -1,6 +1,6 @@
 # Meeting Agent — 시스템 요구사항 문서
 
-> 최종 갱신: 2026-04-01 (명함 OCR, Dreamplus 연동, 브리핑 인트로 메시지, 시간 포맷 변경, 참석자 이메일 다중 후보 선택 UI, Gmail/Google Contacts 이메일 조회)
+> 최종 갱신: 2026-04-01 (회의록 검토/편집 단계, Deepgram STT, 음성 업로드 회의록, 대화형 미팅 생성, 회의실 예약 제거, Google Meet 트랜스크립션 자동 활성화)
 > 대상: ICONLOOP / Parametacorp 내부 사용
 > 목적: Slack 기반 AI 미팅 어시스턴트 시스템
 
@@ -100,8 +100,6 @@ Before Agent   →   During Agent   →   After Agent
 | `/메모`                  | 미팅 중 노트 추가                          | ✅   |
 | `/미팅종료`                | 세션 종료, 즉시 트랜스크립트 탐색(백그라운드) + 회의록 생성 | ✅   |
 | `/회의록`                 | 저장된 회의록 목록 조회                       | ✅   |
-| `/dreamplus`             | Dreamplus 계정 등록 (모달)                 | ✅   |
-| `/크레딧`                 | Dreamplus 크레딧 잔액 조회                  | ✅   |
 | `/설정`                  | 사용자별 설정 변경                          | ❌   |
 
 
@@ -122,8 +120,6 @@ Before Agent   →   During Agent   →   After Agent
 | `research_company` | "신한캐피탈 리서치해줘" |
 | `research_person` | "김민환 인물 조회" |
 | `update_knowledge` | "회사 지식 업데이트" |
-| `check_credits` | "크레딧 확인해줘", "잔여 크레딧" |
-
 분류 실패 시 도움말 메시지 표시. 인텐트별 파라미터(title, note, company 등)도 함께 추출합니다.
 
 **@멘션 지원** ✅
@@ -143,13 +139,13 @@ Before Agent   →   During Agent   →   After Agent
 - 저장 확인 시 `research_person(card_data=card_data)` 호출 → `People/{이름}.md` 자동 생성/갱신
 - 수정 클릭 시 OCR 결과가 미리 채워진 편집 모달 표시 (값이 있는 항목만 `initial_value` 설정)
 
-**녹음 파일 업로드 → 회의록 생성**
+**녹음 파일 업로드 → STT → 메모/회의록 ✅**
 
-- `@봇이름` 멘션과 함께 녹음 파일(MP3, MP4, M4A, WAV 등) 업로드
-- 가장 최근에 시작했거나 종료한 캘린더 일정과 자동 매칭하여 해당 미팅 회의록으로 처리
-- 오디오 파일을 STT(Speech-to-Text)로 트랜스크립트 변환 후 LLM으로 내부용·외부용 회의록 생성
-- Google Meet 트랜스크립트가 없는 오프라인 미팅, 대면 미팅 등에 활용
-- 계획: Slack `file_shared` 이벤트 감지 → 첨부 파일 유형 판별 → 오디오이면 STT → 회의록 생성 흐름 실행
+- DM에 오디오 파일(MP3, MP4, M4A, WAV, OGG, WebM, AAC 등) 업로드
+- **Deepgram API** (`nova-2` 모델, 한국어) 로 STT 변환 → 세션에 메모로 등록
+- 진행 중인 세션이 없으면 "음성 메모 세션"을 자동 시작 후 등록
+- Google Meet 트랜스크립트가 없는 오프라인 미팅, 대면 미팅에 활용
+- 환경변수: `DEEPGRAM_API_KEY` / 사내 방화벽 대응: SSL 검증 비활성화(`verify=False`)
 
 **텍스트 문서 업로드 → 회의록 생성**
 
@@ -292,10 +288,20 @@ LLM이 사용자 메시지에서 추출:
 
 후보가 여러 개인 참석자가 있는 경우, 미팅 생성이 일시 중단되고 순서대로 선택 UI가 표시됩니다. 모든 선택이 완료되면 Calendar 이벤트가 생성됩니다.
 
-### 5.3 생성 결과 ✅
+### 5.3 대화형 미팅 생성 ✅
+
+여러 메시지로 나눠서 미팅 정보를 제공할 수 있습니다.
+
+- 첫 번째 메시지로 미팅 초안 생성 → `_meeting_drafts[user_id]`에 저장 (TTL 2시간)
+- 이후 메시지가 업데이트인지 새 생성인지 LLM(`merge_meeting_prompt`)으로 판단
+- 채널에서 `@봇`으로 미팅 생성 시, 해당 스레드에 답글만 달면 `@봇` 멘션 없이도 자동 업데이트
+- 명시적으로 새 미팅 생성 요청("오늘 4시 회의 잡아줘")은 기존 초안과 무관하게 신규 생성
+
+### 5.4 생성 결과 ✅
 
 - Google Calendar 이벤트 생성 (KST 기준)
 - Google Meet 회의 링크 자동 생성
+- **Google Meet 트랜스크립션 자동 활성화**: Meet API v2 `spaces.patch`로 `transcriptionConfig.state: ON` 설정
 - 참석자 초대 이메일 발송
 - 생성 완료 후 해당 미팅 즉시 브리핑
 
@@ -352,9 +358,29 @@ LLM이 사용자 메시지에서 추출:
   1. `drive.find_meet_transcript()` — 트랜스크립트 **1회** 탐색
   2. 트랜스크립트 있으면 수동 노트와 결합, 없으면 수동 노트만 사용
   3. `cal.get_recently_ended_meetings()` — Calendar 이벤트에서 참석자·날짜 조회
-  4. `_generate_and_post_minutes()` — 즉시 회의록 생성 및 Slack 발송
-- **변경 이유**: 기존 방식(최대 90분 대기)은 트랜스크립트가 없는 경우 사용자가 장시간 대기해야 하는 문제가 있었음
+  4. `_generate_and_post_minutes()` — 회의록 초안 생성
 - **90분 fallback**: 수동 세션 없이 Calendar 이벤트만 있는 미팅은 폴러가 기존 방식대로 처리
+- **중복 방지**: `/미팅종료` 명시 호출은 `_processed_events.discard(event_id)` 후 항상 재생성 허용
+
+### 6.5 회의록 검토/편집 단계 ✅
+
+회의록 생성 후 Drive 저장 전 반드시 검토 단계를 거칩니다.
+
+```
+회의록 초안 생성 완료
+      │
+      ▼
+Slack 초안 메시지 발송 (버튼 4개)
+  [ ✅ 저장 및 완료 ]  [ 📝 직접 편집 ]  [ ✏️ 수정 요청 ]  [ ❌ 취소 ]
+      │
+      ├─ 저장 및 완료: Google Doc 편집 내용 반영 → Drive 저장 → Slack 발송 → After Agent
+      ├─ 직접 편집: Google Docs 링크 오픈 (URL 버튼) → 편집 후 저장 및 완료
+      ├─ 수정 요청: 스레드에 수정 지시 입력 → LLM 재생성 → 새 초안
+      └─ 취소: 초안 삭제
+```
+
+- 초안 생성 시 Google Docs 파일(`{date}_{title}_초안(편집용).gdoc`) 자동 생성
+- 저장 및 완료 시 Google Doc 최신 내용을 읽어 편집 반영 후 초안 Doc 삭제
 
 ### 6.5 세션 및 처리 상태 영속성 ✅
 

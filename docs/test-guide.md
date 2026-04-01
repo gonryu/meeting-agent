@@ -1,7 +1,13 @@
 # 테스트 가이드
 
-> 최종 갱신: 2026-03-26
-> 총 테스트 수: 149개 (전체 통과) — After Agent 테스트 미추가
+> 최종 갱신: 2026-04-01
+> 총 테스트 수: 149개 (전체 통과) — After Agent, STT, 회의록 검토 단계 테스트 미추가
+
+> ⚠️ 주요 미추가 테스트 항목:
+> - `test_stt.py`: Deepgram API 호출 (mocking), is_audio() MIME 판별
+> - `test_during.py` 추가: `_pending_minutes` 상태, `finalize_minutes()`, `cancel_minutes()`, `handle_minutes_edit_reply()`
+> - `test_during.py` 추가: `/미팅시작` 캘린더 매칭 우선순위 (진행 중 > 30분 내 > 제목)
+> - `test_before.py` 추가: `merge_meeting_prompt()`, `update_meeting_from_text()`
 
 ---
 
