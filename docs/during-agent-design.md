@@ -1,6 +1,6 @@
 # During 에이전트 설계 문서
 
-> 최종 갱신: 2026-04-01 | 회의록 검토/편집 단계 추가, Deepgram STT, `/메모` 자동 세션 시작, `/미팅시작` 캘린더 매칭 우선순위 개선, `_processed_events` 버그 수정
+> 최종 갱신: 2026-04-01 | 회의록 검토/편집 단계 추가, Deepgram STT, `/메모` 자동 세션 시작, `/미팅시작` 캘린더 매칭 우선순위 개선, `_processed_events` 버그 수정, 외부용 생성 타이밍 조정, `/메모` 세션 타이틀 버그 수정
 
 ---
 
@@ -65,8 +65,9 @@ _processed_events: dict[str, set]  # user_id → set(event_id)
 # 회의록 검토 대기 중인 초안
 _pending_minutes: dict[str, dict]
 # 예: { "U123": { "title", "date_str", "time_range", "attendees",
-#                 "internal_body", "external_body", "draft_doc_id",
+#                 "internal_body", "draft_doc_id",
 #                 "draft_ts", "minutes_folder_id", "creds", ... } }
+# ※ external_body는 포함되지 않음 — finalize_minutes()에서 생성
 ```
 
 ### 세션 파일 영속성 (`.sessions/`)
@@ -172,6 +173,15 @@ if user_id not in _active_sessions:
     start_session(slack_client, user_id, session_title)  # "메모 세션"
 ```
 
+이후 캘린더 이벤트 매칭 시 세션 제목을 `event_summary`로 덮어씁니다.
+
+```python
+if matched_event:
+    title_to_use = event_summary  # "메모 세션" → 캘린더 일정 제목으로 교체
+```
+
+따라서 자동 시작된 세션도 캘린더 이벤트와 연결된 경우 회의록이 해당 일정 제목으로 생성됩니다.
+
 ---
 
 ## 8. 방식 C: 음성 파일 STT
@@ -211,18 +221,17 @@ _handle_audio_upload() (백그라운드 스레드)
 
 ## 9. 회의록 생성 흐름 (`_generate_and_post_minutes`)
 
-### LLM 2회 호출 후 초안 저장
+### 내부용 1회 호출 후 초안 저장, 외부용은 `finalize_minutes()`에서 생성
 
 ```python
-# 1단계: 내부용 생성
+# 1단계: 내부용만 생성
 internal_body = _generate(minutes_internal_prompt(..., transcript[:40000], notes_text))
 
-# 2단계: 외부용 생성
-external_body = _generate(minutes_external_prompt(..., internal_body))
-
-# 3단계: 초안 저장 (Drive 저장/발송 보류)
-_pending_minutes[user_id] = { ...모든 메타데이터... }
+# 2단계: 초안 저장 (외부용 생성 없이 Drive 저장/발송 보류)
+_pending_minutes[user_id] = { ...내부용 메타데이터... }  # external_body 없음
 _post_minutes_draft(slack_client, user_id=user_id)
+
+# ※ 외부용 생성은 [저장 및 완료] 클릭 후 finalize_minutes()에서 수행
 ```
 
 > 트랜스크립트 제한: `40,000자` (한국어 약 2시간 분량)
@@ -252,11 +261,12 @@ _post_minutes_draft(slack_client, user_id=user_id)
 
 `[✅ 저장 및 완료]` 클릭 시:
 1. `docs.read_document(creds, draft_doc_id)` 로 현재 Doc 내용 읽기
-2. 원본과 다르면 편집 내용 반영 + 외부용 재생성
-3. Drive에 내부용·외부용 `.md` 저장
-4. Slack 회의록 링크 발송
-5. 편집용 초안 Doc 삭제 (`drive.delete_file()`)
-6. After Agent 백그라운드 실행
+2. 원본과 다르면 편집 내용을 `internal_body`에 반영
+3. **외부용 회의록 생성**: `_generate(minutes_external_prompt(..., internal_body))` (LLM 호출)
+4. Drive에 내부용·외부용 `.md` 저장
+5. Slack 회의록 링크 발송
+6. 편집용 초안 Doc 삭제 (`drive.delete_file()`)
+7. After Agent 백그라운드 실행
 
 ### LLM 재생성을 통한 수정 요청
 
@@ -265,8 +275,8 @@ _post_minutes_draft(slack_client, user_id=user_id)
 ```python
 edit_prompt = f"[기존 회의록]\n{internal_body}\n\n[수정 요청]\n{edit_text}\n\n수정된 전체 회의록을 반환해줘."
 new_internal = _generate(edit_prompt)
-new_external = _generate(minutes_external_prompt(..., new_internal))
-# → 새 초안 메시지 재발송
+# 내부용만 재생성 후 새 초안 메시지 재발송
+# ※ 외부용은 재생성하지 않음 — [저장 및 완료] 시 finalize_minutes()에서 생성
 ```
 
 ### 버튼 액션 핸들러 (`main.py`)

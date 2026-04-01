@@ -1,7 +1,7 @@
 # After Agent 설계 문서
 
 > 작성일: 2026-03-25
-> 최종 갱신: 2026-03-26
+> 최종 갱신: 2026-04-01 | 사람 정보 조회 Slack→구글주소록→Gmail→Contacts 순서 개선, After Agent 트리거 시점 명확화
 > 상태: 구현 완료 (Phase 4)
 > 목적: 미팅 종료 후 사후 관리 자동화
 
@@ -14,22 +14,23 @@ After Agent는 During Agent가 회의록 생성을 완료한 직후 자동으로
 
 - **파일 경로**: `agents/after.py` (신규 생성)
 - **LLM**: Gemini `gemini-2.0-flash` / Claude 폴백 (기존 `_generate` 재사용)
-- **트리거**: `agents/during.py` → `_generate_and_post_minutes()` 완료 직후 호출
+- **트리거**: `agents/during.py` → `finalize_minutes()` 완료 직후 호출 (`[저장 및 완료]` 확정 후)
 - **사용자 관리**: 다중 사용자, 사용자별 독립 Drive/Credentials
 
 ---
 
 ## 2. 트리거 진입점
 
-During Agent의 `_generate_and_post_minutes()` 가 Drive 저장 + Slack 발송 후 종료되는 시점에
-After Agent를 호출합니다.
+During Agent의 `finalize_minutes()` 가 Drive 저장 + Slack 발송 후 종료되는 시점에
+After Agent를 호출합니다. 즉, 사용자가 `[✅ 저장 및 완료]` 버튼을 클릭하여 회의록 초안을
+확정한 이후에 실행됩니다.
 
 ```python
-# agents/during.py — _generate_and_post_minutes() 끝부분 (현재 line 517 이후)
+# agents/during.py — finalize_minutes() 끝부분
 
 _post_combined_minutes(...)   # 기존 Slack 발송 (현재 마지막 라인)
 
-# After Agent 트리거 추가 예정
+# After Agent 트리거
 after.trigger_after_meeting(
     slack_client,
     user_id=user_id,
@@ -61,14 +62,18 @@ after.trigger_after_meeting(
 ## 3. 전체 흐름도
 
 ```
-_generate_and_post_minutes() 완료
+finalize_minutes() 완료 ([저장 및 완료] 확정 후)
           │
           ▼
 after.trigger_after_meeting()
           │
           ├─ [Step A] 참석자 이메일 조회
-          │    └─ event_id 있음 → Calendar API get_event_attendees()
-          │    └─ event_id 없음 → Drive People/ 파일 이름 매칭
+          │    └─ event_id 있음 → Calendar API get_event_attendees() (가장 신뢰성 높음)
+          │    └─ 이메일 없는 참석자 → _lookup_person() 으로 보완
+          │         ① Slack 계정 이름 매칭 → slack_uid + email
+          │         ② Google 주소록 (People API) → email
+          │         ③ Gmail 이메일 헤더 검색 → email
+          │         ④ Contacts 폴더 (Drive People/{이름}.md) → email
           │
           ├─ [Step B] 액션아이템 추출 → DB 저장
           │    └─ LLM: extract_action_items_prompt(internal_body)
@@ -277,7 +282,7 @@ def handle_send_draft(slack_client, draft_id):
 ```python
 def notify_action_items(slack_client, event_id, user_id):
     items = user_store.get_action_items(event_id)
-    # 담당자 이름 → Slack 멤버 이름 매칭 → user_id 조회
+    # _lookup_person()으로 담당자 Slack UID + 이메일 조회
     # 담당자별 그룹핑 → 각 담당자에게 DM
 
     # DM 메시지 예시:
@@ -285,6 +290,13 @@ def notify_action_items(slack_client, event_id, user_id):
     # - [ ] 내용 (기한: YYYY-MM-DD)
     # - [ ] 내용2
 ```
+
+담당자 Slack 계정 없을 때 처리 방식:
+
+| 상황 | 처리 |
+|------|------|
+| Slack UID 없음 + 이메일 있음 | 주최자에게 "이메일로 직접 전달 요청" 안내 메시지 발송 |
+| Slack UID·이메일 모두 없음 | 주최자에게 "모든 소스(Slack·Google주소록·Gmail·Contacts) 확인했으나 연락처 없음" 명시하여 알림 |
 
 #### 4-2. APScheduler 리마인더 (매일 08:00)
 
@@ -364,8 +376,12 @@ def _suggest_followup(slack_client, user_id, internal_body, title):
 ```
 agents/
 └── after.py                    # ✅ 구현 완료
-    ├── trigger_after_meeting()         # During Agent 호출 진입점 (백그라운드 스레드)
-    ├── _resolve_attendee_emails()      # Calendar API → attendees_raw 순서로 외부 참석자 해석
+    ├── trigger_after_meeting()         # finalize_minutes() 완료 후 호출 진입점 (백그라운드 스레드)
+    ├── _lookup_person(name, slack_client, creds, contacts_folder_id)
+    │                                   # 사람 정보 조회: Slack→Google주소록→Gmail→Contacts 순서
+    │                                   # 반환: {"email": str|None, "slack_uid": str|None}
+    │                                   # 미팅별 캐시 _person_cache 적용
+    ├── _resolve_attendee_emails()      # Calendar API → 이메일 없는 참석자에 _lookup_person() 보완
     ├── _extract_and_save_action_items()  # LLM 추출 → action_items 테이블 저장
     ├── _send_draft_to_slack()          # pending_drafts 저장 + Block Kit 버튼 메시지 발송
     ├── handle_send_draft()             # "발송하기" 핸들러: pending/failed 상태 모두 재시도 허용
