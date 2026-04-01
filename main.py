@@ -150,16 +150,27 @@ def handle_message(event, client):
 
     thread_ts = event.get("thread_ts")
     text = event.get("text", "").strip()
+    channel = event.get("channel")
+    channel_type = event.get("channel_type")
 
-    log.info(f"handle_message: channel_type={event.get('channel_type')} thread_ts={thread_ts} pending_keys={list(_pending_agenda.keys())[:5]}")
+    log.info(f"handle_message: channel_type={channel_type} thread_ts={thread_ts} pending_keys={list(_pending_agenda.keys())[:5]}")
     if thread_ts and thread_ts in _pending_agenda:
         handle_agenda_reply(client, thread_ts, text)
         return
 
-    if event.get("channel_type") == "im":
+    if channel_type == "im":
         if not _check_registered(client, user_id):
             return
         _route_message(text, client, user_id=user_id)
+
+    elif thread_ts and user_id and channel_type != "im":
+        # 채널 스레드 일반 답글 — 해당 스레드가 일정 드래프트 스레드면 업데이트 처리
+        from agents.before import _meeting_drafts
+        draft = _meeting_drafts.get(user_id)
+        if draft and draft.get("thread_ts") == thread_ts:
+            if _check_registered(client, user_id):
+                update_meeting_from_text(client, user_id=user_id, user_message=text,
+                                         channel=channel, thread_ts=thread_ts)
 
 
 _INTENT_PROMPT = """사용자의 Slack 메시지를 분석해서 의도(intent)를 분류해줘.
@@ -204,17 +215,18 @@ def _classify_intent(text: str) -> dict:
 def _route_message(text: str, client, user_id: str, channel: str = None, thread_ts: str = None):
     log.info(f"메시지 라우팅 ({user_id}): {text}")
 
-    # 진행 중인 일정 드래프트가 있으면 업데이트 시도 (intent 분류 전)
-    if has_meeting_draft(user_id):
-        handled = update_meeting_from_text(client, user_id=user_id, user_message=text,
-                                           channel=channel, thread_ts=thread_ts)
-        if handled:
-            return
-
     intent_data = _classify_intent(text)
     intent = intent_data.get("intent", "unknown")
     params = intent_data.get("params", {})
     log.info(f"인텐트 분류: {intent} / params: {params}")
+
+    # create_meeting이 아닌 경우에만 드래프트 업데이트 시도
+    # (새 일정 생성 요청은 드래프트와 무관하게 새로 생성)
+    if intent != "create_meeting" and has_meeting_draft(user_id):
+        handled = update_meeting_from_text(client, user_id=user_id, user_message=text,
+                                           channel=channel, thread_ts=thread_ts)
+        if handled:
+            return
 
     if intent == "briefing":
         run_briefing(client, user_id=user_id, channel=channel, thread_ts=thread_ts)
