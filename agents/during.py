@@ -598,8 +598,8 @@ def _generate_and_post_minutes(slack_client, *, user_id: str, title: str,
         sources.append("수동 노트")
     source_label = " + ".join(sources) if sources else "없음"
 
-    # ── 내부용 생성 ──
-    _post(slack_client, user_id=user_id, text=f"✍️ *{title}* 내부용 회의록 생성 중... (1/2)")
+    # ── 내부용 생성 (외부용은 '저장 및 완료' 후 생성) ──
+    _post(slack_client, user_id=user_id, text=f"✍️ *{title}* 내부용 회의록 생성 중...")
     try:
         internal_body = _generate(
             minutes_internal_prompt(title, meeting_date, attendees,
@@ -608,16 +608,6 @@ def _generate_and_post_minutes(slack_client, *, user_id: str, title: str,
     except Exception as e:
         log.error(f"내부용 회의록 생성 실패: {e}")
         internal_body = f"## 회의 요약\n(생성 실패: {e})\n\n## 원본\n{notes_text or transcript_text[:2000]}"
-
-    # ── 외부용 생성 ──
-    _post(slack_client, user_id=user_id, text=f"✍️ *{title}* 외부용 회의록 생성 중... (2/2)")
-    try:
-        external_body = _generate(
-            minutes_external_prompt(title, meeting_date, attendees, internal_body)
-        )
-    except Exception as e:
-        log.error(f"외부용 회의록 생성 실패: {e}")
-        external_body = f"## 회의 개요\n(생성 실패: {e})\n"
 
     # ── 초안 저장 + 검토 요청 ──
     _pending_minutes[user_id] = {
@@ -629,7 +619,6 @@ def _generate_and_post_minutes(slack_client, *, user_id: str, title: str,
         "transcript_text": transcript_text,
         "notes_text": notes_text,
         "internal_body": internal_body,
-        "external_body": external_body,
         "minutes_folder_id": minutes_folder_id,
         "creds": creds,
         "event_id": event_id,
@@ -803,7 +792,6 @@ def finalize_minutes(slack_client, user_id: str):
     attendees = draft["attendees"]
     source_label = draft["source_label"]
     internal_body = draft["internal_body"]
-    external_body = draft["external_body"]
     transcript_text = draft["transcript_text"]
     notes_text = draft["notes_text"]
     minutes_folder_id = draft["minutes_folder_id"]
@@ -811,6 +799,7 @@ def finalize_minutes(slack_client, user_id: str):
     event_id = draft["event_id"]
     attendees_raw = draft["attendees_raw"]
     draft_doc_id = draft.get("draft_doc_id")
+    meeting_date = f"{date_str} {time_range}".strip()
 
     # ── Google Doc 직접 편집 내용 반영 ──
     if draft_doc_id and creds:
@@ -819,21 +808,20 @@ def finalize_minutes(slack_client, user_id: str):
             if edited and edited.strip() != internal_body.strip():
                 log.info(f"Google Doc 편집 내용 반영: {title}")
                 internal_body = edited.strip()
-                # 편집된 내부용 기준으로 외부용 재생성
-                _post(slack_client, user_id=user_id,
-                      text=f"🔄 *{title}* 편집된 내용으로 외부용 재생성 중...")
-                meeting_date = f"{date_str} {time_range}".strip()
-                from prompts.briefing import minutes_external_prompt
-                try:
-                    external_body = _generate(
-                        minutes_external_prompt(title, meeting_date, attendees, internal_body)
-                    )
-                except Exception as e:
-                    log.error(f"외부용 재생성 실패: {e}")
         except Exception as e:
             log.warning(f"Google Doc 읽기 실패, 원본 사용: {e}")
         # 편집용 초안 Doc 삭제 (정리)
         drive.delete_file(creds, draft_doc_id)
+
+    # ── 외부용 생성 (확정된 내부용 기준) ──
+    _post(slack_client, user_id=user_id, text=f"✍️ *{title}* 외부용 회의록 생성 중...")
+    try:
+        external_body = _generate(
+            minutes_external_prompt(title, meeting_date, attendees, internal_body)
+        )
+    except Exception as e:
+        log.error(f"외부용 회의록 생성 실패: {e}")
+        external_body = f"## 회의 개요\n(생성 실패: {e})\n"
 
     _post(slack_client, user_id=user_id, text=f"💾 *{title}* Drive에 회의록 저장 중...")
     internal_file_id = external_file_id = None
@@ -922,10 +910,7 @@ def handle_minutes_edit_reply(slack_client, user_id: str, edit_text: str):
     title = draft["title"]
     _post(slack_client, user_id=user_id, text=f"🔄 *{title}* 회의록 수정 중...")
 
-    meeting_date = f"{draft['date_str']} {draft['time_range']}".strip()
-    from prompts.briefing import minutes_internal_prompt, minutes_external_prompt
-
-    # 기존 내부용에 수정 지시를 더해 재생성
+    # 기존 내부용에 수정 지시를 더해 재생성 (외부용은 '저장 및 완료' 후 생성)
     edit_prompt = (
         f"다음 회의록을 아래 수정 요청에 따라 수정해줘. 반드시 한국어로.\n\n"
         f"[기존 회의록]\n{draft['internal_body']}\n\n"
@@ -939,16 +924,7 @@ def handle_minutes_edit_reply(slack_client, user_id: str, edit_text: str):
         _post(slack_client, user_id=user_id, text=f"⚠️ 회의록 수정 실패: {e}")
         return
 
-    try:
-        new_external = _generate(
-            minutes_external_prompt(title, meeting_date, draft["attendees"], new_internal)
-        )
-    except Exception as e:
-        log.error(f"외부용 수정 실패: {e}")
-        new_external = draft["external_body"]
-
     draft["internal_body"] = new_internal
-    draft["external_body"] = new_external
     draft["draft_ts"] = None  # 새 메시지로 재발송
     _post_minutes_draft(slack_client, user_id=user_id)
 

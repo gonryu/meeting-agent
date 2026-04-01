@@ -25,6 +25,9 @@ from prompts.briefing import extract_action_items_prompt
 log = logging.getLogger(__name__)
 KST = ZoneInfo("Asia/Seoul")
 
+# 사람 정보 조회 캐시 (name → {"email": str|None, "slack_uid": str|None})
+_person_cache: dict[str, dict] = {}
+
 _gemini = genai.Client(api_key=os.getenv("GOOGLE_API_KEY"))
 _GEMINI_MODEL = "gemini-2.0-flash"
 _claude = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
@@ -74,8 +77,23 @@ def trigger_after_meeting(
     try:
         log.info(f"After Agent 시작: {title} (event_id={event_id})")
 
+        # 사용자 설정 조회 (contacts_folder_id)
+        contacts_folder_id = None
+        try:
+            user_info = user_store.get_user(user_id)
+            contacts_folder_id = user_info.get("contacts_folder_id")
+        except Exception:
+            pass
+
+        # 사람 조회 캐시 초기화 (미팅별로 새로 조회)
+        _person_cache.clear()
+
         # A. 외부 참석자 이메일 조회
-        recipients = _resolve_attendee_emails(attendees_raw, event_id, creds)
+        recipients = _resolve_attendee_emails(
+            attendees_raw, event_id, creds,
+            slack_client=slack_client,
+            contacts_folder_id=contacts_folder_id,
+        )
         log.info(f"외부 참석자: {[r['email'] for r in recipients]}")
 
         # B. 액션아이템 추출
@@ -98,12 +116,12 @@ def trigger_after_meeting(
             event_id=event_id or title,
             user_id=user_id,
             title=title,
+            creds=creds,
+            contacts_folder_id=contacts_folder_id,
         )
 
         # E. Contacts 자동 갱신
         try:
-            user = user_store.get_user(user_id)
-            contacts_folder_id = user.get("contacts_folder_id")
             if contacts_folder_id and recipients:
                 _update_contacts(creds, contacts_folder_id, recipients, title, date_str)
         except Exception as e:
@@ -120,28 +138,98 @@ def trigger_after_meeting(
 
 # ── A. 참석자 이메일 조회 ────────────────────────────────────
 
+def _lookup_person(name: str, slack_client, creds, contacts_folder_id: str | None) -> dict:
+    """이름으로 사람 정보 조회. 우선순위: Slack → Google 주소록 → Gmail → Contacts 폴더
+    Returns: {"email": str|None, "slack_uid": str|None}
+    """
+    if name in _person_cache:
+        return _person_cache[name]
+
+    result = {"email": None, "slack_uid": None}
+
+    # 1. Slack 계정 조회 (display_name / real_name 매칭)
+    try:
+        resp = slack_client.users_list()
+        for member in resp.get("members", []):
+            if member.get("deleted") or member.get("is_bot"):
+                continue
+            profile = member.get("profile", {})
+            display = profile.get("display_name", "").strip()
+            real = profile.get("real_name", "").strip()
+            email_addr = profile.get("email", "")
+            if name in (display, real) or (display and display in name) or (real and real in name):
+                result["slack_uid"] = member["id"]
+                if email_addr:
+                    result["email"] = email_addr
+                break
+    except Exception as e:
+        log.debug(f"Slack 조회 실패 ({name}): {e}")
+
+    # 2. Google 주소록 (People API)
+    if not result["email"]:
+        try:
+            result["email"] = gmail.find_email_in_contacts(creds, name)
+        except Exception as e:
+            log.debug(f"Google 주소록 조회 실패 ({name}): {e}")
+
+    # 3. Gmail 이메일 헤더 검색
+    if not result["email"]:
+        try:
+            result["email"] = gmail.find_email_by_name(creds, name)
+        except Exception as e:
+            log.debug(f"Gmail 검색 실패 ({name}): {e}")
+
+    # 4. Contacts 폴더 (Drive People/{이름}.md)
+    if not result["email"] and contacts_folder_id:
+        try:
+            content, _ = drive.get_person_info(creds, contacts_folder_id, name)
+            if content:
+                m = re.search(r"email:\s*([\w.+-]+@[\w.-]+)", content)
+                if m:
+                    result["email"] = m.group(1)
+        except Exception as e:
+            log.debug(f"Contacts 폴더 조회 실패 ({name}): {e}")
+
+    _person_cache[name] = result
+    return result
+
+
 def _resolve_attendee_emails(
     attendees_raw: list[dict],
     event_id: str | None,
     creds,
+    slack_client=None,
+    contacts_folder_id: str | None = None,
 ) -> list[dict]:
     """외부 참석자 이메일+이름 목록 반환 (내부 도메인 제외)
-    우선순위: Calendar API → attendees_raw
+    우선순위: Calendar API attendees → attendees_raw + 이름 기반 조회
     """
     # 1. Calendar API로 참석자 조회 (event_id 있는 경우)
+    base_list: list[dict] = []
     if event_id:
         try:
-            return cal.get_event_attendees(creds, event_id)
+            base_list = cal.get_event_attendees(creds, event_id)
         except Exception as e:
             log.warning(f"Calendar 참석자 조회 실패, attendees_raw 사용: {e}")
 
-    # 2. attendees_raw에서 외부 참석자만 필터링
+    # Calendar API 결과가 없으면 attendees_raw 사용
+    if not base_list:
+        for a in attendees_raw:
+            email = a.get("email", "")
+            domain = email.split("@")[-1] if "@" in email else ""
+            if domain and domain not in _INTERNAL_DOMAINS:
+                base_list.append({"name": a.get("name", ""), "email": email})
+
+    # 2. 이메일 없는 참석자는 이름으로 추가 조회
     result = []
-    for a in attendees_raw:
-        email = a.get("email", "")
-        domain = email.split("@")[-1] if "@" in email else ""
-        if domain and domain not in _INTERNAL_DOMAINS:
-            result.append({"name": a.get("name", ""), "email": email})
+    for person in base_list:
+        name = person.get("name", "").strip()
+        email = person.get("email", "")
+        if not email and name and slack_client:
+            info = _lookup_person(name, slack_client, creds, contacts_folder_id)
+            email = info.get("email", "")
+        if email:
+            result.append({"name": name, "email": email})
     return result
 
 
@@ -298,9 +386,12 @@ def handle_cancel_draft(slack_client, body: dict) -> None:
 # ── D. 담당자 DM 알림 ────────────────────────────────────────
 
 def _notify_action_items(
-    slack_client, *, event_id: str, user_id: str, title: str
+    slack_client, *, event_id: str, user_id: str, title: str,
+    creds=None, contacts_folder_id: str | None = None,
 ) -> None:
-    """액션아이템 담당자별 Slack DM 발송"""
+    """액션아이템 담당자별 Slack DM 발송.
+    담당자 Slack UID 조회: Slack → Google 주소록 → Gmail → Contacts 폴더 순서
+    """
     items = user_store.get_action_items(event_id)
     if not items:
         return
@@ -311,23 +402,6 @@ def _notify_action_items(
         key = item.get("assignee")
         by_assignee.setdefault(key, []).append(item)
 
-    # Slack 워크스페이스 멤버 목록 조회 (이름 → user_id 매핑)
-    name_to_uid: dict[str, str] = {}
-    try:
-        resp = slack_client.users_list()
-        for member in resp.get("members", []):
-            if member.get("deleted") or member.get("is_bot"):
-                continue
-            display = member.get("profile", {}).get("display_name", "").strip()
-            real = member.get("profile", {}).get("real_name", "").strip()
-            uid = member["id"]
-            if display:
-                name_to_uid[display] = uid
-            if real:
-                name_to_uid[real] = uid
-    except Exception as e:
-        log.warning(f"Slack 멤버 목록 조회 실패: {e}")
-
     for assignee, assignee_items in by_assignee.items():
         lines = [f"📋 *{title}* 미팅 후 액션아이템"]
         for it in assignee_items:
@@ -336,12 +410,16 @@ def _notify_action_items(
 
         text = "\n".join(lines)
 
-        if assignee and assignee in name_to_uid:
-            target_uid = name_to_uid[assignee]
-        else:
-            # 담당자 불명확하면 주최자에게만 발송
-            target_uid = user_id
-            if assignee:
+        target_uid = user_id  # 기본: 주최자
+        if assignee:
+            # 캐시에서 먼저 확인 후 없으면 조회
+            info = _person_cache.get(assignee)
+            if not info and creds:
+                info = _lookup_person(assignee, slack_client, creds, contacts_folder_id)
+            slack_uid = (info or {}).get("slack_uid")
+            if slack_uid:
+                target_uid = slack_uid
+            else:
                 text += f"\n\n_(담당자 '{assignee}' Slack 계정을 찾지 못했습니다.)_"
 
         try:
