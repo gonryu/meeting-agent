@@ -179,41 +179,6 @@ def all_users() -> list[dict]:
     return [dict(r) for r in rows]
 
 
-# ── Dreamplus 계정 ───────────────────────────────────────────
-
-def save_dreamplus_credentials(slack_user_id: str, email: str, password: str) -> None:
-    """Dreamplus 이메일 + 비밀번호(Fernet 암호화) 저장"""
-    enc = _fernet().encrypt(password.encode()).decode()
-    with _conn() as conn:
-        conn.execute(
-            """UPDATE users SET dreamplus_email = ?, dreamplus_password_enc = ?
-               WHERE slack_user_id = ?""",
-            (email, enc, slack_user_id),
-        )
-
-
-def get_dreamplus_credentials(slack_user_id: str) -> tuple[str, str] | None:
-    """(email, password) 반환. 미등록 시 None."""
-    with _conn() as conn:
-        row = conn.execute(
-            "SELECT dreamplus_email, dreamplus_password_enc FROM users WHERE slack_user_id = ?",
-            (slack_user_id,),
-        ).fetchone()
-    if not row or not row["dreamplus_email"] or not row["dreamplus_password_enc"]:
-        return None
-    password = _fernet().decrypt(row["dreamplus_password_enc"].encode()).decode()
-    return row["dreamplus_email"], password
-
-
-def has_dreamplus_credentials(slack_user_id: str) -> bool:
-    with _conn() as conn:
-        row = conn.execute(
-            "SELECT 1 FROM users WHERE slack_user_id = ? AND dreamplus_email IS NOT NULL",
-            (slack_user_id,),
-        ).fetchone()
-    return row is not None
-
-
 # ── Action Items ──────────────────────────────────────────────
 
 def save_action_items(event_id: str, user_id: str, items: list[dict]) -> None:
