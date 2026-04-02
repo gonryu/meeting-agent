@@ -806,6 +806,12 @@ def handle_dp_next_rooms(ack, body, client):
     dreamplus_agent.next_rooms(client, body)
 
 
+@app.action("dreamplus_prev_rooms")
+def handle_dp_prev_rooms(ack, body, client):
+    ack()
+    dreamplus_agent.prev_rooms(client, body)
+
+
 # ── FastAPI OAuth 서버 (백그라운드) ──────────────────────────
 
 def _start_oauth_server():

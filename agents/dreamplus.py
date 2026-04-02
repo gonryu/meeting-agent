@@ -25,13 +25,14 @@ _MODAL_CALLBACK = "dreamplus_settings_modal"
 
 # ── 인증 헬퍼 ─────────────────────────────────────────────────
 
-def _get_session(user_id: str) -> tuple[str, str, int, int]:
+def _get_session(user_id: str, force_refresh: bool = False) -> tuple[str, str, int, int]:
     """(jwt, public_key, member_id, company_id) 반환. 캐시 우선, 만료/없음 시 재로그인.
     드림플러스 자격증명 미설정 시 ValueError.
     """
-    cached = user_store.get_dreamplus_jwt(user_id)
-    if cached:
-        return cached
+    if not force_refresh:
+        cached = user_store.get_dreamplus_jwt(user_id)
+        if cached:
+            return cached
 
     creds = user_store.get_dreamplus_credentials(user_id)
     if not creds:
@@ -290,33 +291,34 @@ def book_room(slack_client, user_id: str, text: str,
 
     try:
         rooms = dp.get_rooms(jwt)
-    except dp.TokenExpiredError:
-        user_store.save_dreamplus_jwt(user_id, "", "")
-        _post(slack_client, user_id, "⚠️ 세션이 만료되었습니다. 다시 시도해주세요.",
-              channel=channel, thread_ts=thread_ts)
-        return
-    except Exception as e:
-        _post(slack_client, user_id, f"❌ 회의실 목록 조회 실패: {e}",
-              channel=channel, thread_ts=thread_ts)
-        return
+    except (dp.TokenExpiredError, RuntimeError):
+        # JWT 만료 또는 세션 오류 → 강제 재로그인 후 1회 재시도
+        try:
+            jwt, pub_key, member_id, company_id = _get_session(user_id, force_refresh=True)
+            rooms = dp.get_rooms(jwt)
+        except Exception as e:
+            _post(slack_client, user_id, f"❌ 회의실 목록 조회 실패: {e}",
+                  channel=channel, thread_ts=thread_ts)
+            return
 
-    recommended = _recommend_rooms(rooms, attendee_count, start_dt, end_dt,
-                                   preferred_floor=preferred_floor,
-                                   preferred_capacity=preferred_capacity)[:3]
-    if not recommended:
+    all_candidates = _recommend_rooms(rooms, attendee_count, start_dt, end_dt,
+                                      preferred_floor=preferred_floor,
+                                      preferred_capacity=preferred_capacity)
+    if not all_candidates:
         _post(slack_client, user_id,
               f"😔 {attendee_count}인 이상 수용 가능한 회의실을 찾지 못했습니다.",
               channel=channel, thread_ts=thread_ts)
         return
 
+    page = 0
+    batch = all_candidates[:3]
     date_str = start_dt.strftime("%m월 %d일")
     cond_str = f"{attendee_count}인 이상"
     if preferred_floor:
         cond_str += f" · {preferred_floor}층"
     if preferred_capacity:
         cond_str += f" · {preferred_capacity}인실 우선"
-    shown = ",".join(str(r["roomCode"]) for r in recommended)
-    next_value = f"{start_dt.isoformat()}|{end_dt.isoformat()}|{text}|{attendee_count}|{shown}|{preferred_floor or ''}|{preferred_capacity or ''}"
+    nav_value = f"{start_dt.isoformat()}|{end_dt.isoformat()}|{text}|{attendee_count}|{{page}}|{preferred_floor or ''}|{preferred_capacity or ''}"
     blocks = [
         {
             "type": "section",
@@ -330,17 +332,9 @@ def book_room(slack_client, user_id: str, text: str,
         },
         {"type": "divider"},
     ]
-    for room in recommended:
+    for room in batch:
         blocks.append(_room_block(room, start_dt, end_dt))
-    blocks.append({
-        "type": "actions",
-        "elements": [{
-            "type": "button",
-            "text": {"type": "plain_text", "text": "다음"},
-            "action_id": "dreamplus_next_rooms",
-            "value": next_value,
-        }],
-    })
+    blocks.append(_nav_buttons(page, has_next=len(all_candidates) > 3, nav_value=nav_value))
     _post(slack_client, user_id,
           f"드림플러스 회의실 추천 ({date_str})", blocks=blocks,
           channel=channel, thread_ts=thread_ts)
@@ -476,10 +470,32 @@ def list_reservations(slack_client, user_id: str,
           channel=channel, thread_ts=thread_ts)
 
 
-# ── 다음 회의실 추천 ─────────────────────────────────────────
+# ── 이전/다음 회의실 네비게이션 ──────────────────────────────
 
-def next_rooms(slack_client, body: dict):
-    """dreamplus_next_rooms 버튼 핸들러 — 다음 순위 회의실 표시"""
+def _nav_buttons(page: int, has_next: bool, nav_value: str) -> dict:
+    """이전/다음 버튼 actions 블록 생성.
+    nav_value: '{page}' 플레이스홀더 포함된 포맷 문자열
+    """
+    elements = []
+    if page > 0:
+        elements.append({
+            "type": "button",
+            "text": {"type": "plain_text", "text": "이전"},
+            "action_id": "dreamplus_prev_rooms",
+            "value": nav_value.format(page=page - 1),
+        })
+    if has_next:
+        elements.append({
+            "type": "button",
+            "text": {"type": "plain_text", "text": "다음"},
+            "action_id": "dreamplus_next_rooms",
+            "value": nav_value.format(page=page + 1),
+        })
+    return {"type": "actions", "elements": elements}
+
+
+def _navigate_rooms(slack_client, body: dict):
+    """이전/다음 버튼 공통 핸들러"""
     user_id = body["user"]["id"]
     value = body["actions"][0]["value"]
 
@@ -489,50 +505,31 @@ def next_rooms(slack_client, body: dict):
         end_dt = datetime.fromisoformat(parts[1])
         meeting_title = parts[2]
         attendee_count = int(parts[3]) if parts[3].isdigit() else 2
-        shown_codes = set(int(c) for c in parts[4].split(",") if c.isdigit()) if len(parts) > 4 else set()
+        page = int(parts[4]) if len(parts) > 4 and parts[4].isdigit() else 0
         preferred_floor = int(parts[5]) if len(parts) > 5 and parts[5].isdigit() else None
         preferred_capacity = int(parts[6]) if len(parts) > 6 and parts[6].isdigit() else None
     except Exception:
-        _post(slack_client, user_id, "⚠️ 다음 추천을 불러오지 못했습니다.")
+        _post(slack_client, user_id, "⚠️ 회의실 목록을 불러오지 못했습니다.")
         return
 
     try:
         jwt, pub_key, member_id, company_id = _get_session(user_id)
         rooms = dp.get_rooms(jwt)
+    except (dp.TokenExpiredError, RuntimeError):
+        try:
+            jwt, pub_key, member_id, company_id = _get_session(user_id, force_refresh=True)
+            rooms = dp.get_rooms(jwt)
+        except Exception as e:
+            _post(slack_client, user_id, f"❌ 회의실 목록 조회 실패: {e}")
+            return
     except ValueError as e:
         _post(slack_client, user_id, f"⚠️ {e}")
-        return
-    except Exception as e:
-        _post(slack_client, user_id, f"❌ 회의실 목록 조회 실패: {e}")
         return
 
     all_candidates = _recommend_rooms(rooms, attendee_count, start_dt, end_dt,
                                       preferred_floor=preferred_floor,
                                       preferred_capacity=preferred_capacity)
-    # 이미 보여준 회의실 제외
-    remaining = [r for r in all_candidates if r["roomCode"] not in shown_codes]
-
-    if not remaining:
-        try:
-            slack_client.chat_update(
-                channel=body["container"]["channel_id"],
-                ts=body["container"]["message_ts"],
-                text="더 이상 추천 가능한 회의실이 없습니다.",
-                blocks=[{
-                    "type": "section",
-                    "text": {"type": "mrkdwn", "text": "😔 더 이상 추천 가능한 회의실이 없습니다."},
-                }],
-            )
-        except Exception:
-            _post(slack_client, user_id, "😔 더 이상 추천 가능한 회의실이 없습니다.")
-        return
-
-    next_batch = remaining[:3]
-    new_shown = shown_codes | {r["roomCode"] for r in next_batch}
-    next_value = (
-        f"{start_dt.isoformat()}|{end_dt.isoformat()}|{meeting_title}|{attendee_count}"
-        f"|{','.join(str(c) for c in new_shown)}|{preferred_floor or ''}|{preferred_capacity or ''}"
-    )
+    batch = all_candidates[page * 3:(page + 1) * 3]
 
     date_str = start_dt.strftime("%m월 %d일")
     cond_str = f"{attendee_count}인 이상"
@@ -540,6 +537,14 @@ def next_rooms(slack_client, body: dict):
         cond_str += f" · {preferred_floor}층"
     if preferred_capacity:
         cond_str += f" · {preferred_capacity}인실 우선"
+
+    nav_value = f"{start_dt.isoformat()}|{end_dt.isoformat()}|{meeting_title}|{attendee_count}|{{page}}|{preferred_floor or ''}|{preferred_capacity or ''}"
+
+    if not batch:
+        # 범위 벗어난 경우 (이전 누르다가 0 미만 등) 첫 페이지로
+        page = 0
+        batch = all_candidates[:3]
+
     blocks = [
         {
             "type": "section",
@@ -547,23 +552,16 @@ def next_rooms(slack_client, body: dict):
                 "type": "mrkdwn",
                 "text": (
                     f"🏢 *{date_str} {start_dt.strftime('%H:%M')}~{end_dt.strftime('%H:%M')}* "
-                    f"({cond_str}) 다음 추천 회의실"
+                    f"({cond_str}) 추천 회의실"
                 ),
             },
         },
         {"type": "divider"},
     ]
-    for room in next_batch:
+    for room in batch:
         blocks.append(_room_block(room, start_dt, end_dt, meeting_title))
-    blocks.append({
-        "type": "actions",
-        "elements": [{
-            "type": "button",
-            "text": {"type": "plain_text", "text": "다음"},
-            "action_id": "dreamplus_next_rooms",
-            "value": next_value,
-        }],
-    })
+    has_next = len(all_candidates) > (page + 1) * 3
+    blocks.append(_nav_buttons(page, has_next=has_next, nav_value=nav_value))
 
     try:
         slack_client.chat_update(
@@ -574,6 +572,16 @@ def next_rooms(slack_client, body: dict):
         )
     except Exception:
         _post(slack_client, user_id, f"드림플러스 회의실 추천 ({date_str})", blocks=blocks)
+
+
+def next_rooms(slack_client, body: dict):
+    """dreamplus_next_rooms 버튼 핸들러"""
+    _navigate_rooms(slack_client, body)
+
+
+def prev_rooms(slack_client, body: dict):
+    """dreamplus_prev_rooms 버튼 핸들러"""
+    _navigate_rooms(slack_client, body)
 
 
 # ── /회의실취소 ───────────────────────────────────────────────
@@ -663,11 +671,20 @@ def auto_book_room(slack_client, *, user_id: str, start_dt: datetime,
     try:
         jwt, pub_key, member_id, company_id = _get_session(user_id)
         rooms = dp.get_rooms(jwt)
+    except (dp.TokenExpiredError, RuntimeError):
+        # JWT 만료 또는 세션 오류 → 강제 재로그인 후 1회 재시도
+        try:
+            jwt, pub_key, member_id, company_id = _get_session(user_id, force_refresh=True)
+            rooms = dp.get_rooms(jwt)
+        except Exception as e:
+            log.warning(f"auto_book_room 회의실 조회 재시도 실패 (스킵): {e}")
+            return
     except Exception as e:
         log.warning(f"auto_book_room 회의실 조회 실패 (스킵): {e}")
         return
 
-    recommended = _recommend_rooms(rooms, attendee_count, start_dt, end_dt)[:3]
+    all_candidates = _recommend_rooms(rooms, attendee_count, start_dt, end_dt)
+    recommended = all_candidates[:3]
     if not recommended:
         return
 
@@ -685,19 +702,11 @@ def auto_book_room(slack_client, *, user_id: str, start_dt: datetime,
         },
         {"type": "divider"},
     ]
-    shown = ",".join(str(r["roomCode"]) for r in recommended)
-    next_value = f"{start_dt.isoformat()}|{end_dt.isoformat()}|{title}|{attendee_count}|{shown}"
+    page = 0
+    nav_value = f"{start_dt.isoformat()}|{end_dt.isoformat()}|{title}|{attendee_count}|{{page}}||"
     for room in recommended:
         blocks.append(_room_block(room, start_dt, end_dt, title))
-    blocks.append({
-        "type": "actions",
-        "elements": [{
-            "type": "button",
-            "text": {"type": "plain_text", "text": "다음"},
-            "action_id": "dreamplus_next_rooms",
-            "value": next_value,
-        }],
-    })
+    blocks.append(_nav_buttons(page, has_next=len(all_candidates) > 3, nav_value=nav_value))
     _post(slack_client, user_id,
           f"드림플러스 회의실 예약 제안: {title}", blocks=blocks,
           channel=channel, thread_ts=thread_ts)
