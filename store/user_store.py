@@ -59,7 +59,9 @@ def init_db():
         # 기존 DB에 컬럼이 없을 경우 추가 (마이그레이션)
         for col in ("minutes_folder_id TEXT",
                     "dreamplus_email TEXT",
-                    "dreamplus_password_enc TEXT"):
+                    "dreamplus_password_enc TEXT",
+                    "dreamplus_jwt TEXT",
+                    "dreamplus_jwt_exp TEXT"):
             try:
                 conn.execute(f"ALTER TABLE users ADD COLUMN {col}")
             except Exception:
@@ -177,6 +179,76 @@ def all_users() -> list[dict]:
     with _conn() as conn:
         rows = conn.execute("SELECT * FROM users").fetchall()
     return [dict(r) for r in rows]
+
+
+# ── Dreamplus 자격증명 ────────────────────────────────────────
+
+def save_dreamplus_credentials(slack_user_id: str, email: str, password: str) -> None:
+    """드림플러스 이메일·비밀번호를 Fernet 암호화하여 저장"""
+    enc = _fernet().encrypt(password.encode()).decode()
+    with _conn() as conn:
+        conn.execute(
+            """UPDATE users
+               SET dreamplus_email = ?, dreamplus_password_enc = ?,
+                   dreamplus_jwt = NULL, dreamplus_jwt_exp = NULL
+               WHERE slack_user_id = ?""",
+            (email, enc, slack_user_id),
+        )
+
+
+def get_dreamplus_credentials(slack_user_id: str) -> tuple[str, str] | None:
+    """(email, password) 복호화 반환. 미설정 시 None."""
+    with _conn() as conn:
+        row = conn.execute(
+            "SELECT dreamplus_email, dreamplus_password_enc FROM users WHERE slack_user_id = ?",
+            (slack_user_id,),
+        ).fetchone()
+    if not row or not row["dreamplus_email"] or not row["dreamplus_password_enc"]:
+        return None
+    email = row["dreamplus_email"]
+    password = _fernet().decrypt(row["dreamplus_password_enc"].encode()).decode()
+    return email, password
+
+
+def get_dreamplus_jwt(slack_user_id: str) -> tuple[str, str] | None:
+    """캐시된 (jwt, public_key) 반환. 없거나 만료면 None.
+    jwt와 public_key를 함께 저장 (취소/크레딧에 public_key 필요).
+    """
+    with _conn() as conn:
+        row = conn.execute(
+            "SELECT dreamplus_jwt, dreamplus_jwt_exp FROM users WHERE slack_user_id = ?",
+            (slack_user_id,),
+        ).fetchone()
+    if not row or not row["dreamplus_jwt"]:
+        return None
+    if row["dreamplus_jwt_exp"]:
+        from datetime import timezone
+        try:
+            exp = datetime.fromisoformat(row["dreamplus_jwt_exp"])
+            if datetime.now() >= exp:
+                return None
+        except Exception:
+            return None
+    # jwt_exp 컬럼에 "jwt|||public_key" 형태로 저장
+    stored = row["dreamplus_jwt"]
+    if "|||" in stored:
+        jwt, pub_key = stored.split("|||", 1)
+        return jwt, pub_key
+    return stored, ""
+
+
+def save_dreamplus_jwt(slack_user_id: str, jwt: str, public_key: str,
+                       exp_dt: datetime = None) -> None:
+    """JWT와 공개키를 함께 캐시 저장. exp_dt 기본값 = 6시간 후."""
+    from datetime import timedelta
+    if exp_dt is None:
+        exp_dt = datetime.now() + timedelta(hours=6)
+    stored = f"{jwt}|||{public_key}"
+    with _conn() as conn:
+        conn.execute(
+            "UPDATE users SET dreamplus_jwt = ?, dreamplus_jwt_exp = ? WHERE slack_user_id = ?",
+            (stored, exp_dt.isoformat(), slack_user_id),
+        )
 
 
 # ── Action Items ──────────────────────────────────────────────

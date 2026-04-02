@@ -43,6 +43,7 @@ from agents.during import (
 )
 from agents import after
 from agents import card as card_agent
+from agents import dreamplus as dreamplus_agent
 from store import user_store
 from server import oauth as oauth_server
 from tools import stt
@@ -669,6 +670,104 @@ def handle_suggest_followup_meeting(ack, body, client):
         channel=user_id,
         text=f"📅 후속 미팅을 생성하려면 `/미팅추가` 명령어를 사용해주세요.\n예: `/미팅추가 {title} 후속 미팅 다음주 월요일 오후 2시`",
     )
+
+
+# ── 드림플러스 커맨드 ────────────────────────────────────────
+
+def _dp_settings_handler(ack, body, client):
+    ack()
+    if not _check_registered(client, body["user_id"]):
+        return
+    dreamplus_agent.open_settings_modal(client, body["trigger_id"], body["user_id"])
+
+app.command("/드림플러스설정")(_dp_settings_handler)
+
+
+@app.view(dreamplus_agent._MODAL_CALLBACK)
+def handle_dp_settings_modal(ack, body, client):
+    ack()
+    dreamplus_agent.handle_settings_modal(client, body)
+
+
+def _dp_book_handler(ack, body, client):
+    ack()
+    user_id = body["user_id"]
+    if not _check_registered(client, user_id):
+        return
+    threading.Thread(
+        target=dreamplus_agent.book_room,
+        args=(client, user_id, body.get("text", "")),
+        daemon=True,
+    ).start()
+
+app.command("/회의실예약")(_dp_book_handler)
+
+
+def _dp_list_handler(ack, body, client):
+    ack()
+    user_id = body["user_id"]
+    if not _check_registered(client, user_id):
+        return
+    threading.Thread(
+        target=dreamplus_agent.list_reservations,
+        args=(client, user_id),
+        daemon=True,
+    ).start()
+
+app.command("/회의실조회")(_dp_list_handler)
+
+
+def _dp_cancel_handler(ack, body, client):
+    ack()
+    user_id = body["user_id"]
+    if not _check_registered(client, user_id):
+        return
+    threading.Thread(
+        target=dreamplus_agent.cancel_room,
+        args=(client, user_id, body.get("text", "")),
+        daemon=True,
+    ).start()
+
+app.command("/회의실취소")(_dp_cancel_handler)
+
+
+def _dp_credits_handler(ack, body, client):
+    ack()
+    user_id = body["user_id"]
+    if not _check_registered(client, user_id):
+        return
+    threading.Thread(
+        target=dreamplus_agent.show_credits,
+        args=(client, user_id),
+        daemon=True,
+    ).start()
+
+app.command("/크레딧조회")(_dp_credits_handler)
+
+
+@app.action("dreamplus_book_room")
+def handle_dp_book_room(ack, body, client):
+    ack()
+    threading.Thread(
+        target=dreamplus_agent.confirm_room_booking,
+        args=(client, body),
+        daemon=True,
+    ).start()
+
+
+@app.action("dreamplus_cancel_confirm")
+def handle_dp_cancel_confirm(ack, body, client):
+    ack()
+    threading.Thread(
+        target=dreamplus_agent.confirm_cancel,
+        args=(client, body),
+        daemon=True,
+    ).start()
+
+
+@app.action("dreamplus_skip_booking")
+def handle_dp_skip_booking(ack, body, client):
+    ack()  # 건너뜀 — 아무 동작 없음
 
 
 # ── FastAPI OAuth 서버 (백그라운드) ──────────────────────────

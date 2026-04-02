@@ -1074,7 +1074,9 @@ def _post_email_selection(slack_client, user_id: str, selection: dict,
 
 def _create_calendar_event(slack_client, user_id: str, info: dict, company: str | None,
                            attendee_emails: list[str], channel: str = None, thread_ts: str = None):
-    """Calendar 이벤트 생성 및 브리핑 실행"""
+    """Calendar 이벤트 생성, 브리핑 실행, 드림플러스 회의실 예약 제안"""
+    import threading
+    from agents import dreamplus as dreamplus_agent
     if not info.get("date") or not info.get("time"):
         _post(slack_client, user_id=user_id, channel=channel, thread_ts=thread_ts,
               text="⚠️ 날짜 또는 시간을 파악하지 못했어요.\n예: '오늘 15시에 김민환 미팅 잡아줘'")
@@ -1127,6 +1129,22 @@ def _create_calendar_event(slack_client, user_id: str, info: dict, company: str 
             event.setdefault("extendedProperties", {}).setdefault("private", {})["company"] = company
 
         run_briefing(slack_client, user_id, event, channel=channel, thread_ts=thread_ts)
+
+        # 드림플러스 회의실 자동 추천 (계정 미설정 시 스킵)
+        attendee_count = len(attendee_emails) + 1  # 참석자 + 주최자
+        threading.Thread(
+            target=dreamplus_agent.auto_book_room,
+            kwargs=dict(
+                slack_client=slack_client,
+                user_id=user_id,
+                start_dt=start_dt,
+                end_dt=end_dt,
+                title=info.get("title", "미팅"),
+                attendee_count=attendee_count,
+            ),
+            daemon=True,
+        ).start()
+
     except Exception as e:
         _post(slack_client, user_id=user_id, channel=channel, thread_ts=thread_ts,
               text=f"⚠️ 미팅 생성 실패: {e}")
