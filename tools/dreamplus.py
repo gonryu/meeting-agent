@@ -287,7 +287,6 @@ def get_reservations(jwt: str, date_str: str = None,
             "searchType": "startTime",
         }
     raw = _post("/api2/meetingroom/reservations", payload, jwt=jwt)
-    log.info(f"[get_reservations] raw={raw}")
     body = _check(raw)
     return body.get("list") or []
 
@@ -306,14 +305,12 @@ def cancel_reservation(jwt: str, public_key_b64: str, reservation_id: int) -> bo
     """
     # 암호화 없이 시도
     raw = _delete("/api2/meetingroom/reservation", {"id": reservation_id}, jwt=jwt)
-    log.info(f"[cancel_reservation] plain id={reservation_id} raw={raw}")
     if raw.get("result") is not False:
         _check(raw)
         return True
     # 실패 시 ek/ed 암호화 시도
     encrypted = _encrypt_ek_ed({"id": reservation_id}, public_key_b64)
     raw = _delete("/api2/meetingroom/reservation", encrypted, jwt=jwt)
-    log.info(f"[cancel_reservation] encrypted id={reservation_id} raw={raw}")
     _check(raw)
     return True
 
@@ -325,6 +322,5 @@ def get_credits(jwt: str, public_key_b64: str) -> dict:
     """
     encrypted = _encrypt_ek_ed({}, public_key_b64)
     raw = _post("/api2/invoice/point", encrypted, jwt=jwt)
-    log.info(f"[get_credits] response: {raw}")
     body = _check(raw)
     return body.get("data") or body
