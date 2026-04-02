@@ -115,8 +115,7 @@ def build_meeting_header_block(meeting: dict, company_name: str) -> list[dict]:
             if line.strip():
                 lines.append(f"• {line.strip()}")
     else:
-        lines.append("📝  *어젠다 등록하려면 이 스레드에 답장하세요*")
-        lines.append("_(입력 내용은 Calendar 이벤트에도 자동 반영됩니다)_")
+        lines.append("📝  _(어젠다 등록 및 내용을 수정하려면 이 스레드에 답장하세요)_")
 
     return [{"type": "section", "text": {"type": "mrkdwn", "text": "\n".join(lines)}}]
 
@@ -319,8 +318,7 @@ def build_briefing_message(
             if line.strip():
                 lines.append(f"• {line.strip()}")
     else:
-        lines.append("📝  *어젠다 등록하려면 이 스레드에 답장하세요*")
-        lines.append("_(입력 내용은 Calendar 이벤트에도 자동 반영됩니다)_")
+        lines.append("📝  _(어젠다 등록 및 내용을 수정하려면 이 스레드에 답장하세요)_")
 
     return [{"type": "section", "text": {"type": "mrkdwn", "text": "\n".join(lines)}}]
 

@@ -797,7 +797,7 @@ def _send_internal_briefing(slack_client, user_id: str, meeting: dict,
         if agenda:
             lines.append(f"📝  *어젠다*: {agenda}")
         else:
-            lines.append("📝  *어젠다 등록하려면 이 스레드에 답장하세요*")
+            lines.append("📝  _(어젠다 등록 및 내용을 수정하려면 이 스레드에 답장하세요)_")
 
         blocks = [{"type": "section", "text": {"type": "mrkdwn", "text": "\n".join(lines)}}]
         resp = _post(slack_client, user_id=user_id, channel=channel, thread_ts=thread_ts,
