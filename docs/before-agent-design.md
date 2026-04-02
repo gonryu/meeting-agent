@@ -1,6 +1,6 @@
 # Before 에이전트 설계 문서
 
-> 최종 갱신: 2026-04-01 | 명함 OCR, Dreamplus 연동, _to_bullet_lines 헬퍼, 업체 파일 섹션 순서 변경, 참석자 이메일 다중 후보 선택 UI, Gmail/Google Contacts 이메일 조회 추가
+> 최종 갱신: 2026-04-02 | 미팅 생성 후 즉시 브리핑 제거, 스레드 답글 전용 드래프트 업데이트, 장소(location) 필드 추가, 프롬프트 템플릿 외부 파일 분리, 도움말 커맨드
 
 ---
 
@@ -417,8 +417,26 @@ _generate(parse_meeting_prompt(message)) → JSON
 ```python
 def _create_calendar_event(slack_client, user_id, info, company, attendee_emails, channel, thread_ts):
     # cal.create_event() → Calendar 이벤트 + Google Meet 생성
-    # run_briefing() → 생성된 미팅 즉시 브리핑
+    # ※ run_briefing() 자동 실행 제거됨 (2026-04-02)
+    # 생성 완료 메시지만 발송, 즉시 브리핑은 더 이상 실행하지 않음
 ```
+
+#### 미팅 초안 수정 (`update_meeting_from_text`)
+
+생성된 미팅 초안에 대한 후속 수정 처리. **스레드 답글 전용**으로 동작 (2026-04-02 변경):
+
+```python
+# main.py DM 이벤트 핸들러에서 사전 판별
+if thread_ts and user_id:
+    draft = _meeting_drafts.get(user_id)
+    if draft and (thread_ts == draft.get("reply_ts") or thread_ts == draft.get("thread_ts")):
+        handled = update_meeting_from_text(...)
+```
+
+- `reply_ts`: 봇이 미팅 생성 응답으로 보낸 메시지의 `ts` (스레드 루트 기준)
+- 스레드 판별 실패 시 `_route_message()`로 일반 명령어 처리
+- **수정 가능 필드**: `title`, `date`, `time`, `duration_minutes`, `participants`, `agenda`, `location`
+- `location` 수정 시 `cal.patch_event(creds, event_id, location=...)` 호출 + Slack 업데이트 메시지 발송
 
 ### 6.7 company_knowledge.md 갱신 (`update_company_knowledge`)
 
@@ -542,7 +560,14 @@ meeting-agent/
 │   ├── slack_tools.py          # 브리핑 메시지 빌더
 │   └── dreamplus.py            # Dreamplus API 클라이언트
 ├── prompts/
-│   └── briefing.py             # LLM 프롬프트 템플릿
+│   ├── briefing.py             # LLM 프롬프트 로더 (_load_template + 변수 치환)
+│   └── templates/              # 외부 프롬프트 템플릿 파일 (2026-04-02)
+│       ├── minutes_internal.md
+│       ├── minutes_external.md
+│       ├── company_news.md
+│       ├── person_info.md
+│       ├── service_connection.md
+│       └── briefing_summary.md
 ├── store/
 │   └── user_store.py           # SQLite + Fernet 사용자 토큰 관리
 ├── server/

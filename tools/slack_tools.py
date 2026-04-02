@@ -95,6 +95,120 @@ def format_time(iso_str: str) -> str:
         return iso_str
 
 
+def build_meeting_header_block(meeting: dict, company_name: str) -> list[dict]:
+    """미팅 기본 정보 블록 (즉시 발송용). 리서치 없이 Calendar 정보만으로 구성."""
+    time_str = format_time(meeting.get("start_time", ""))
+    meet_link = meeting.get("meet_link", "")
+    link_text = f"<{meet_link}|Google Meet>" if meet_link else "미팅"
+    location = meeting.get("location", "")
+    location_str = f" · 📍{location}" if location else ""
+    agenda = meeting.get("description", "").strip()
+
+    lines = [
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+        f"*📋 {meeting.get('summary', company_name)} ({company_name}) — {time_str} ({link_text}){location_str}*",
+        "",
+    ]
+    if agenda:
+        lines.append("📝  *어젠다*")
+        for line in agenda.splitlines():
+            if line.strip():
+                lines.append(f"• {line.strip()}")
+    else:
+        lines.append("📝  *어젠다 등록하려면 이 스레드에 답장하세요*")
+        lines.append("_(입력 내용은 Calendar 이벤트에도 자동 반영됩니다)_")
+
+    return [{"type": "section", "text": {"type": "mrkdwn", "text": "\n".join(lines)}}]
+
+
+def build_company_research_block(
+    company_name: str,
+    news_lines: list[str],
+    parascope_lines: list[str],
+    connection_lines: list[str],
+) -> list[dict]:
+    """업체 뉴스 + ParaScope + 서비스 연결점 블록 (리서치 완료 후 발송)."""
+    lines = [f"*🏢 {company_name} 리서치 결과*", ""]
+
+    if parascope_lines:
+        lines.append("🔭  *ParaScope 브리핑*")
+        for item in parascope_lines:
+            lines.append(_slack_linkify(item))
+        lines.append("")
+
+    lines.append("📰  *업체 동향*")
+    filtered_news = [n for n in news_lines if not _is_preamble(n)]
+    if filtered_news:
+        for news in filtered_news[:3]:
+            lines.append(f"• {_slack_linkify(news)}")
+    else:
+        lines.append("• 최근 동향 정보 없음")
+    lines.append("")
+
+    lines.append("🔗  *파라메타 서비스 연결점*")
+    if connection_lines:
+        for conn in connection_lines[:3]:
+            lines.append(f"• {conn}")
+    else:
+        lines.append("• 분석 정보 없음")
+
+    return [{"type": "section", "text": {"type": "mrkdwn", "text": "\n".join(lines)}}]
+
+
+def build_persons_block(persons_info: list[dict]) -> list[dict]:
+    """담당자 목록 블록 (리서치 완료 후 발송).
+    persons_info: [{"name": str, "role": str, "linkedin": str, "memo": str}]
+    """
+    if not persons_info:
+        return []
+    lines = ["👤  *담당자*"]
+    for p in persons_info:
+        name = p.get("name", "")
+        role = p.get("role", "")
+        link = p.get("linkedin", "")
+        memo = p.get("memo", "")
+        line = f"• {name}"
+        if role:
+            line += f" / {role}"
+        if link:
+            line += f" (<{link}|LinkedIn>)"
+        lines.append(line)
+        if memo:
+            lines.append(f"  └ 메모: {memo}")
+    return [{"type": "section", "text": {"type": "mrkdwn", "text": "\n".join(lines)}}]
+
+
+def build_context_block(context: dict) -> list[dict]:
+    """이전 미팅 맥락 + 이메일 블록 (컨텍스트 조회 완료 후 발송)."""
+    lines = []
+    emails = context.get("emails", [])
+    minutes = context.get("minutes", [])
+
+    lines.append("📌  *이전 미팅 맥락*")
+    for m in minutes:
+        name = m.get("name", "").replace("_내부용.md", "").replace("_", " ")
+        modified = m.get("modifiedTime", "")[:10]
+        file_id = m.get("id", "")
+        link = f"https://drive.google.com/file/d/{file_id}/view" if file_id else ""
+        link_str = f" <{link}|열기>" if link else ""
+        lines.append(f"• 회의록: {name} ({modified}){link_str}")
+    if not minutes:
+        lines.append("• 이전 미팅 기록 없음")
+
+    lines.append("")
+    lines.append("📧  *이메일 맥락*")
+    if emails:
+        for email in emails[:3]:
+            snippet = email.get("snippet", "")[:60]
+            date = email.get("date", "")
+            subject = email.get("subject", "")
+            lines.append(f"• {date}  {subject or snippet}")
+    else:
+        lines.append("• 이메일 기록 없음")
+
+    return [{"type": "section", "text": {"type": "mrkdwn", "text": "\n".join(lines)}}]
+
+
 def build_briefing_message(
     meeting: dict,
     company_name: str,

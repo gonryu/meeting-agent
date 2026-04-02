@@ -52,7 +52,7 @@ after.trigger_after_meeting(
 | `event_id` | str \| None | Google Calendar 이벤트 ID |
 | `title` | str | 미팅 제목 |
 | `date_str` | str | "YYYY-MM-DD" |
-| `attendees` | str | 쉼표 구분 이름/이메일 문자열 |
+| `attendees_raw` | list[dict] | Calendar 원본 참석자 목록 (`[{"name": ..., "email": ...}]`) — `attendees` 문자열 대신 구조화 데이터로 변경 |
 | `internal_body` | str | LLM 생성 내부용 회의록 (마크다운) |
 | `external_body` | str | LLM 생성 외부용 회의록 (마크다운) |
 | `creds` | Credentials | 주최자 Google OAuth 자격증명 |

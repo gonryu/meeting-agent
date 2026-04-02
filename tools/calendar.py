@@ -274,8 +274,11 @@ def enable_meet_transcription(creds: Credentials, conference_id: str) -> bool:
 def update_event(creds: Credentials, event_id: str, *,
                  summary: str = None, start_dt: datetime = None,
                  end_dt: datetime = None, attendee_emails: list[str] = None,
-                 description: str = None, location: str = None) -> dict:
-    """캘린더 이벤트 부분 업데이트 (patch). None인 필드는 변경하지 않음."""
+                 description: str = None, location: str = None,
+                 extended_properties: dict = None) -> dict:
+    """캘린더 이벤트 부분 업데이트 (patch). None인 필드는 변경하지 않음.
+    extended_properties: {"private": {"key": "value"}} 형태로 전달.
+    """
     body = {}
     if summary is not None:
         body["summary"] = summary
@@ -289,6 +292,8 @@ def update_event(creds: Credentials, event_id: str, *,
         body["description"] = description
     if location is not None:
         body["location"] = location
+    if extended_properties is not None:
+        body["extendedProperties"] = extended_properties
     return _service(creds).events().patch(
         calendarId="primary",
         eventId=event_id,

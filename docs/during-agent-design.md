@@ -1,6 +1,6 @@
 # During 에이전트 설계 문서
 
-> 최종 갱신: 2026-04-01 | 회의록 검토/편집 단계 추가, Deepgram STT, `/메모` 자동 세션 시작, `/미팅시작` 캘린더 매칭 우선순위 개선, `_processed_events` 버그 수정, 외부용 생성 타이밍 조정, `/메모` 세션 타이틀 버그 수정
+> 최종 갱신: 2026-04-02 | After Agent 트리거 시점 명확화 (finalize_minutes → trigger_after_meeting, attendees_raw 포함)
 
 ---
 
@@ -266,7 +266,19 @@ _post_minutes_draft(slack_client, user_id=user_id)
 4. Drive에 내부용·외부용 `.md` 저장
 5. Slack 회의록 링크 발송
 6. 편집용 초안 Doc 삭제 (`drive.delete_file()`)
-7. After Agent 백그라운드 실행
+7. After Agent 백그라운드 실행:
+   ```python
+   threading.Thread(
+       target=after.trigger_after_meeting,
+       kwargs=dict(
+           slack_client=slack_client, user_id=user_id,
+           event_id=event_id, title=title, date_str=date_str,
+           attendees_raw=attendees_raw,   # Calendar 원본 참석자 목록
+           internal_body=internal_body, external_body=external_body,
+           creds=creds,
+       ), daemon=True,
+   ).start()
+   ```
 
 ### LLM 재생성을 통한 수정 요청
 

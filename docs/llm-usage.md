@@ -1,6 +1,6 @@
 # LLM 사용 현황
 
-> 최종 갱신: 2026-04-01 (회의록 수정 요청 재생성, 대화형 미팅 병합, 인텐트 분류 check_credits 제거, 외부용 생성 위치 finalize_minutes()로 변경, 수정 요청 시 내부용만 재생성)
+> 최종 갱신: 2026-04-02 (`help` 인텐트 추가, 미팅 파싱 프롬프트에 location 필드 추가, 프롬프트 외부 템플릿 파일 분리 반영)
 
 ---
 
@@ -137,7 +137,8 @@ JSON 형식으로만 답변 (다른 텍스트 없이):
   "participants": ["이름1", "이름2"],
   "participant_emails": {"이름1": "email@example.com"},
   "title": "미팅 제목",
-  "agenda": "어젠다 (없으면 빈 문자열)"
+  "agenda": "어젠다 (없으면 빈 문자열)",
+  "location": "장소 (없으면 빈 문자열)"
 }
 
 추출 규칙:
@@ -147,6 +148,7 @@ JSON 형식으로만 답변 (다른 텍스트 없이):
 - 시간 언급 없으면 "09:00"
 - "오늘" → {today}, "내일" → 오늘 날짜 +1일 계산
 - duration 언급 없으면 60
+- location: 명시된 장소가 없으면 빈 문자열 ""
 ```
 
 ---
@@ -378,10 +380,15 @@ JSON으로만 응답해줘:
 - research_company: 기업 리서치 (params: company)
 - research_person: 인물 리서치 (params: person, company)
 - update_knowledge: 지식 갱신
+- dreamplus_book: 드림플러스 회의실 예약 (params: start, end, title, attendee_count, ...)
+- dreamplus_list: 내 회의실 예약 목록 조회
+- dreamplus_cancel: 회의실 예약 취소
+- help: 도움말·사용법 요청
 - unknown: 위 항목에 해당 없음
 ```
 
 분류 실패(JSON 파싱 오류) 시 `{"intent": "unknown", "params": {}}` 반환.
+`unknown` 인텐트 수신 시 `/도움말` 안내 메시지 발송 (단순 에러 메시지 → 도움말 안내로 개선, 2026-04-02).
 
 ---
 
@@ -416,6 +423,24 @@ JSON으로만 응답해줘:
 - Block Kit UI 발송: ✅저장 (`card_confirm_save`) / ✏️수정 (`card_open_edit`) / ❌취소 (`card_cancel`)
 - 저장: `research_person(card_data=card_data)` → `People/{이름}.md` 자동 생성/갱신
 - 수정: 필드별 편집 모달 (`card_edit_modal`), OCR 값 `initial_value` 사전 입력 (비어있으면 생략)
+
+---
+
+## 6. 프롬프트 템플릿 파일 관리
+
+> 2026-04-02: 주요 프롬프트를 `prompts/templates/` 외부 파일로 분리.
+> `prompts/briefing.py`의 각 함수는 `_load_template(filename)`으로 파일을 읽고, `str.replace("{{var}}", value)` 방식으로 변수를 치환하여 반환.
+
+| 템플릿 파일 | 대응 함수 | 변수 |
+|------------|----------|------|
+| `minutes_internal.md` | `minutes_internal_prompt()` | `{{title}}`, `{{date}}`, `{{attendees}}`, `{{sources}}` |
+| `minutes_external.md` | `minutes_external_prompt()` | `{{title}}`, `{{date}}`, `{{attendees}}`, `{{internal_minutes}}` |
+| `company_news.md` | `company_news_prompt()` | `{{today}}`, `{{company_name}}` |
+| `person_info.md` | `person_info_prompt()` | `{{person_name}}`, `{{company_name}}` |
+| `service_connection.md` | `service_connection_prompt()` | `{{knowledge}}`, `{{company_info}}` |
+| `briefing_summary.md` | `briefing_summary_prompt()` | `{{company_name}}`, `{{company_news}}`, `{{person_info}}`, `{{service_connections}}`, `{{email_context}}` |
+
+인라인 프롬프트로 유지되는 함수: `parse_meeting_prompt`, `merge_meeting_prompt`, `update_knowledge_prompt`, `extract_action_items_prompt`, `extract_company_prompt`
 
 ---
 

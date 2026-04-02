@@ -1,6 +1,6 @@
 # Meeting Agent — 시스템 요구사항 문서
 
-> 최종 갱신: 2026-04-01 (회의록 검토/편집 단계, Deepgram STT, 음성 업로드 회의록, 대화형 미팅 생성, 회의실 예약 제거, Google Meet 트랜스크립션 자동 활성화, 외부용 생성 타이밍 조정(초안 검토 → 저장 및 완료 후), 사람 정보 조회 순서 개선)
+> 최종 갱신: 2026-04-02 (도움말 커맨드 추가, `/dreamplus` 별칭, `help` 인텐트, 미팅 생성 후 즉시 브리핑 제거, 스레드 답글 전용 드래프트 업데이트, 장소 필드, 프롬프트 템플릿 외부 파일 분리, DreamPlus JWT 개선·이전 버튼·시간 파싱 수정)
 > 대상: ICONLOOP / Parametacorp 내부 사용
 > 목적: Slack 기반 AI 미팅 어시스턴트 시스템
 
@@ -100,6 +100,8 @@ Before Agent   →   During Agent   →   After Agent
 | `/메모`                  | 미팅 중 노트 추가                          | ✅   |
 | `/미팅종료`                | 세션 종료, 즉시 트랜스크립트 탐색(백그라운드) + 회의록 생성 | ✅   |
 | `/회의록`                 | 저장된 회의록 목록 조회                       | ✅   |
+| `/도움말` / `/help`       | 사용 가능한 커맨드 및 자연어 명령어 안내              | ✅   |
+| `/드림플러스설정` / `/dreamplus` | 드림플러스 계정 등록/변경                   | ✅   |
 | `/설정`                  | 사용자별 설정 변경                          | ❌   |
 
 
@@ -120,7 +122,9 @@ Before Agent   →   During Agent   →   After Agent
 | `research_company` | "신한캐피탈 리서치해줘" |
 | `research_person` | "김민환 인물 조회" |
 | `update_knowledge` | "회사 지식 업데이트" |
-분류 실패 시 도움말 메시지 표시. 인텐트별 파라미터(title, note, company 등)도 함께 추출합니다.
+| `help` | "도움말", "help", "사용법 알려줘" |
+
+분류 실패 시 `/도움말` 안내 메시지 표시. 인텐트별 파라미터(title, note, company 등)도 함께 추출합니다.
 
 **@멘션 지원** ✅
 
@@ -294,7 +298,12 @@ LLM이 사용자 메시지에서 추출:
 
 - 첫 번째 메시지로 미팅 초안 생성 → `_meeting_drafts[user_id]`에 저장 (TTL 2시간)
 - 이후 메시지가 업데이트인지 새 생성인지 LLM(`merge_meeting_prompt`)으로 판단
+- **스레드 답글 전용**: 미팅 생성 메시지에 대한 업데이트는 **해당 스레드의 답글로만** 처리 (2026-04-02 변경)
+  - 일반 DM은 새 의도로 취급, 스레드 외부 메시지는 미팅 드래프트 업데이트에 사용하지 않음
+  - 판단 기준: `thread_ts`가 봇의 생성 응답 `reply_ts` 또는 원본 요청 `thread_ts`와 일치하는 경우만 업데이트
 - 채널에서 `@봇`으로 미팅 생성 시, 해당 스레드에 답글만 달면 `@봇` 멘션 없이도 자동 업데이트
+- **수정 가능 필드**: 제목, 참석자, 날짜·시간, 어젠다, **장소(location)** 포함 (2026-04-02 추가)
+  - 예: "장소는 로비야" → Google Calendar 이벤트 location 필드 업데이트
 - 명시적으로 새 미팅 생성 요청("오늘 4시 회의 잡아줘")은 기존 초안과 무관하게 신규 생성
 
 ### 5.4 생성 결과 ✅
@@ -303,7 +312,7 @@ LLM이 사용자 메시지에서 추출:
 - Google Meet 회의 링크 자동 생성
 - **Google Meet 트랜스크립션 자동 활성화**: Meet API v2 `spaces.patch`로 `transcriptionConfig.state: ON` 설정
 - 참석자 초대 이메일 발송
-- 생성 완료 후 해당 미팅 즉시 브리핑
+- ~~생성 완료 후 해당 미팅 즉시 브리핑~~ → 제거됨 (2026-04-02). 생성 직후 자동 브리핑은 더 이상 실행되지 않음
 
 ### 5.4 미팅 생성 시 Contacts 갱신 ❌
 
@@ -649,24 +658,32 @@ MeetingAgent/
 
 ## 12.5 Dreamplus 회의실 예약 연동 ✅
 
-`agents/room.py` + `tools/dreamplus.py` 구현 완료.
+`agents/dreamplus.py` + `tools/dreamplus.py` 구현 완료 (2026-04-02 대폭 개선).
 
 ### 슬래시 커맨드 / 인텐트
 
 | 커맨드 / 인텐트 | 동작 |
 |--------------|------|
-| `/dreamplus` | Dreamplus 계정 등록 모달 표시 |
-| `/크레딧` / `check_credits` 인텐트 | 잔여 크레딧 조회 (`cmd_credits()`) |
-| `check_rooms` | 예약 가능 회의실 목록 조회 (`cmd_rooms()`) |
-| `reserve_room` | 회의실 예약 (`cmd_reserve()`) |
-| `my_reservations` | 내 예약 목록 조회 (`cmd_my_reservations()`) |
-| `cancel_reservation` | 예약 취소 |
+| `/드림플러스설정` / `/dreamplus` | Dreamplus 계정 등록 모달 표시 |
+| `/회의실예약` / `dreamplus_book` 인텐트 | 회의실 예약 (자연어 시간 파싱) |
+| `/회의실조회` / `dreamplus_list` 인텐트 | 내 예약 목록 조회 |
+| `/회의실취소` / `dreamplus_cancel` 인텐트 | 예약 취소 |
+| `/크레딧조회` / `check_credits` 인텐트 | 잔여 크레딧 조회 (API 오류 시 보류) |
 
 ### `tools/dreamplus.py` API 클라이언트
 
-- RSA 공개키 조회 + 비밀번호 RSA 암호화 → `/auth/login` → JWT 반환
-- JWT 캐시 + 자동 갱신: `TokenExpiredError` (code=301 응답) → 재로그인 1회
-- 주요 함수: `login(email, password)`, `get_credits(jwt)`, `get_rooms(jwt, date, center_id)`, `reserve(jwt, ...)`
+- RSA 공개키 조회 + 비밀번호 RSA 암호화 → `/auth/login` → JWT + company_id 반환
+- JWT 캐시: `(jwt, pub_key, member_id, company_id)` 4-field 캐시, TTL **30분** (이전 6시간 → 단축)
+- 자동 재인증: `TokenExpiredError` (code=301) 또는 `RuntimeError` 발생 시 `force_refresh=True`로 재로그인 1회 후 즉시 재시도 — `book_room`, `auto_book_room`, `list_reservations`, `confirm_cancel` 전체에 적용
+- 주요 함수: `login()`, `get_credits(jwt)`, `get_rooms(jwt, date)`, `reserve(jwt, ...)`, `cancel_reservation(jwt, ...)`
+
+### `agents/dreamplus.py` 주요 동작
+
+- **시간 파싱**: "5시" → 오후 5시(17:00)로 해석 (오전/오후 미지정 + 1~8시 → 오후 간주)
+- **회의실 추천 네비게이션**: 추천 목록 3개씩 페이지 단위 표시, **[이전] [다음]** 버튼 모두 지원
+  - `dreamplus_prev_rooms` / `dreamplus_next_rooms` Block Kit 액션 처리
+- **자동 예약** (`auto_book_room`): 일정 생성 시 회의실 조건 매칭 → 1순위 자동 예약 시도
+- **예약 취소**: 기본 DELETE 요청 실패 시 암호화(ek/ed 파라미터) DELETE로 자동 재시도
 
 ---
 
@@ -711,7 +728,14 @@ meeting-agent/
 │   ├── slack_tools.py          # 브리핑 메시지 빌더
 │   └── dreamplus.py            # Dreamplus API 클라이언트
 ├── prompts/
-│   └── briefing.py             # LLM 프롬프트 템플릿
+│   ├── briefing.py             # LLM 프롬프트 로더 (템플릿 변수 치환)
+│   └── templates/              # 외부 프롬프트 템플릿 파일 (2026-04-02 추가)
+│       ├── minutes_internal.md
+│       ├── minutes_external.md
+│       ├── company_news.md
+│       ├── person_info.md
+│       ├── service_connection.md
+│       └── briefing_summary.md
 ├── store/
 │   └── user_store.py           # SQLite + Fernet 사용자 토큰 관리
 ├── server/

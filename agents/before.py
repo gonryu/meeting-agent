@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import re
+import threading
 import time
 from datetime import datetime, timedelta
 
@@ -20,6 +21,10 @@ from tools import calendar as cal
 from tools import drive, gmail
 from tools.slack_tools import (
     build_briefing_message,
+    build_meeting_header_block,
+    build_company_research_block,
+    build_persons_block,
+    build_context_block,
     ask_company_name,
     ask_email,
     format_time,
@@ -491,6 +496,9 @@ def run_briefing(slack_client, user_id: str, event: dict = None,
         log.warning(f"내부 제품명 사전 로드 실패: {e}")
 
     sent_threads = []
+    research_queue: list[tuple[dict, str]] = []  # (meeting, company_name)
+
+    # 1단계: 모든 미팅 헤더 즉시 발송 (리서치 없이)
     for ev in events:
         meeting = cal.parse_event(ev)
 
@@ -507,11 +515,21 @@ def run_briefing(slack_client, user_id: str, event: dict = None,
         if company_name:
             ts = _send_briefing(slack_client, user_id, meeting, company_name,
                                 channel=channel, thread_ts=thread_ts)
+            if ts:
+                research_queue.append((meeting, company_name))
         else:
             ts = _send_internal_briefing(slack_client, user_id, meeting,
                                          channel=channel, thread_ts=thread_ts)
         if ts:
             sent_threads.append(ts)
+
+    # 2단계: 업체 리서치를 단일 백그라운드 스레드에서 순차 실행 (섞임 방지)
+    if research_queue:
+        threading.Thread(
+            target=_run_all_briefing_research,
+            args=(slack_client, user_id, research_queue, channel, thread_ts),
+            daemon=True,
+        ).start()
 
     user_store.update_last_active(user_id)
     return sent_threads
@@ -632,179 +650,212 @@ def _extract_company_with_llm(summary: str, internal_products: frozenset = froze
         return None
 
 
-def _send_briefing(slack_client, user_id: str, meeting: dict, company_name: str,
-                   channel: str = None, thread_ts: str = None) -> str | None:
-    """브리핑 생성 및 Slack 발송. Returns: 발송된 메시지 ts"""
+def _extract_company_content_sections(company_content: str) -> tuple[list[str], list[str], list[str], list[dict]]:
+    """업체 Drive 파일에서 뉴스·ParaScope·연결점·이메일 섹션을 추출.
+    Returns: (news_lines, parascope_lines, connection_lines, drive_emails)
+    """
+    # 최근 동향 섹션 추출
+    news_lines: list[str] = []
+    news_section_lines: list[str] = []
+    in_news = False
+    for line in company_content.splitlines():
+        if "최근 동향" in line and line.strip().startswith("#"):
+            in_news = True
+            continue
+        if in_news:
+            if line.strip().startswith("#"):
+                break
+            if "last_searched" in line:
+                continue
+            news_section_lines.append(line)
+    news_section = "\n".join(news_section_lines)
+
+    raw_blocks = re.split(r'\n\s*-{3,}\s*\n', news_section)
+    if len(raw_blocks) <= 1:
+        raw_blocks = []
+        cur: list[str] = []
+        for line in news_section_lines:
+            if line.strip() in ("-", "•"):
+                if cur:
+                    raw_blocks.append("\n".join(cur))
+                cur = []
+            else:
+                cur.append(line)
+        if cur:
+            raw_blocks.append("\n".join(cur))
+
+    for block in raw_blocks:
+        if len(news_lines) >= 3:
+            break
+        block = block.strip()
+        if not block:
+            continue
+        block_lines = [l.strip() for l in block.splitlines() if l.strip()]
+        has_bold = any("**" in l for l in block_lines)
+        has_url = any("http" in l or "출처" in l for l in block_lines)
+        if not has_bold and not has_url and len(block) > 120:
+            continue
+        title = ""
+        for l in block_lines:
+            m = re.search(r'\*\*(.+?)\*\*', l)
+            if m:
+                title = re.sub(r'^\d+\.\s*', '', m.group(1).strip())
+                break
+        if not title:
+            title = block_lines[0][:120] if block_lines else ""
+        url = ""
+        for l in block_lines:
+            url_m = re.search(r'https?://\S+', l)
+            if url_m:
+                url = url_m.group(0).rstrip(')').rstrip('.')
+                break
+        if title:
+            news_lines.append(f"{title} ({url})" if url else title)
+
+    # ParaScope 섹션 추출
+    parascope_lines: list[str] = []
+    in_parascope = False
+    for line in company_content.splitlines():
+        if "ParaScope 브리핑" in line and line.strip().startswith("#"):
+            in_parascope = True
+            continue
+        if in_parascope:
+            if line.strip().startswith("#"):
+                break
+            stripped = line.strip()
+            if not stripped or "last_searched" in stripped:
+                continue
+            parascope_lines.append(stripped)
+
+    # 서비스 연결점 섹션 추출
+    connection_lines: list[str] = []
+    in_connections = False
+    for line in company_content.splitlines():
+        if "## 파라메타 서비스 연결점" in line:
+            in_connections = True
+            continue
+        if in_connections:
+            if line.startswith("##"):
+                break
+            if line.strip().startswith("-"):
+                connection_lines.append(line.strip("- ").strip())
+    connection_lines = connection_lines[:3]
+
+    # 이메일 맥락 섹션 추출 (Drive 파일 보완용)
+    drive_emails: list[dict] = []
+    in_email = False
+    for line in company_content.splitlines():
+        if "이메일 맥락" in line and line.strip().startswith("#"):
+            in_email = True
+            continue
+        if in_email:
+            if line.strip().startswith("#"):
+                break
+            stripped = line.strip()
+            if not stripped or "last_searched" in stripped:
+                continue
+            cleaned = stripped.lstrip("-•").strip()
+            if cleaned:
+                parts = cleaned.split("|", 2)
+                drive_emails.append({
+                    "date": parts[0].strip() if len(parts) > 0 else "",
+                    "subject": parts[1].strip() if len(parts) > 1 else cleaned,
+                    "snippet": parts[2].strip() if len(parts) > 2 else "",
+                })
+                if len(drive_emails) >= 3:
+                    break
+
+    return news_lines, parascope_lines, connection_lines, drive_emails
+
+
+def _run_briefing_research(
+    slack_client, user_id: str, meeting: dict, company_name: str,
+    channel: str | None, thread_ts: str | None,
+) -> None:
+    """백그라운드 스레드: 업체·인물 리서치 후 순차적으로 Slack에 발송."""
     try:
+        # 1. 업체 리서치
         _post(slack_client, user_id=user_id, channel=channel, thread_ts=thread_ts,
               text=f"🔍 *{company_name}* 업체 리서치 중...")
+        company_content = ""
         try:
             company_content, _ = research_company(user_id, company_name)
         except Exception as e:
             err = str(e)
             msg = ("⚠️ Gemini API 할당량 초과. 잠시 후 다시 시도해주세요."
-                   if "429" in err else f"⚠️ 리서치 오류: {err[:200]}")
+                   if "429" in err else f"⚠️ 업체 리서치 오류: {err[:200]}")
             _post(slack_client, user_id=user_id, channel=channel, thread_ts=thread_ts, text=msg)
-            return None
 
+        news_lines, parascope_lines, connection_lines, drive_emails = \
+            _extract_company_content_sections(company_content)
+        log.info(f"news_lines ({company_name}): {news_lines}")
+
+        company_blocks = build_company_research_block(
+            company_name, news_lines, parascope_lines, connection_lines
+        )
+        _post(slack_client, user_id=user_id, channel=channel, thread_ts=thread_ts,
+              blocks=company_blocks, text=f"🏢 {company_name} 업체 정보")
+
+        # 2. 인물 리서치 (순차적으로 각 인물 완료 시 발송)
         person_names = [a.get("name") or a.get("email", "").split("@")[0]
                         for a in meeting.get("attendees", [])]
-        persons_info = []
+        persons_info: list[dict] = []
         for name in person_names[:3]:
             _post(slack_client, user_id=user_id, channel=channel, thread_ts=thread_ts,
                   text=f"👤 *{name}* 인물 리서치 중...")
-            info, _ = research_person(user_id, name, company_name)
+            try:
+                info, _ = research_person(user_id, name, company_name)
+            except Exception:
+                info = ""
             persons_info.append({"name": name, "raw": info})
 
+        if persons_info:
+            person_blocks = build_persons_block([{"name": p["name"]} for p in persons_info])
+            if person_blocks:
+                _post(slack_client, user_id=user_id, channel=channel, thread_ts=thread_ts,
+                      blocks=person_blocks, text="👤 담당자 정보")
+
+        # 3. 이전 맥락 조회
         _post(slack_client, user_id=user_id, channel=channel, thread_ts=thread_ts,
-              text=f"📨 이전 커뮤니케이션 맥락 조회 중...")
+              text="📨 이전 커뮤니케이션 맥락 조회 중...")
         context = get_previous_context(user_id, company_name, person_names)
 
-        # ## 최근 동향 섹션 추출
-        news_lines = []
+        if not context.get("emails") and drive_emails:
+            context = {**context, "emails": drive_emails}
 
-        # 1) 섹션 텍스트 추출
-        news_section_lines: list[str] = []
-        in_news = False
-        for line in company_content.splitlines():
-            if "최근 동향" in line and line.strip().startswith("#"):
-                in_news = True
-                continue
-            if in_news:
-                if line.strip().startswith("#"):
-                    break
-                if "last_searched" in line:
-                    continue
-                news_section_lines.append(line)
-        news_section = "\n".join(news_section_lines)
+        context_blocks = build_context_block(context)
+        _post(slack_client, user_id=user_id, channel=channel, thread_ts=thread_ts,
+              blocks=context_blocks, text="📌 이전 미팅 맥락")
 
-        # 2) 블록 분리: `---` 구분자 우선 시도, 없으면 단독 `-`/`•` 사용
-        import re as _re
-        raw_blocks = _re.split(r'\n\s*-{3,}\s*\n', news_section)
-        if len(raw_blocks) <= 1:
-            # fallback: 단독 `-` 또는 `•` 줄 기준 분리
-            raw_blocks = []
-            cur: list[str] = []
-            for line in news_section_lines:
-                if line.strip() in ("-", "•"):
-                    if cur:
-                        raw_blocks.append("\n".join(cur))
-                    cur = []
-                else:
-                    cur.append(line)
-            if cur:
-                raw_blocks.append("\n".join(cur))
+    except Exception:
+        log.exception(f"브리핑 리서치 오류: {company_name}")
 
-        # 3) 각 블록에서 제목 + URL 한 줄로 요약
-        for block in raw_blocks:
-            if len(news_lines) >= 3:
-                break
-            block = block.strip()
-            if not block:
-                continue
 
-            block_lines = [l.strip() for l in block.splitlines() if l.strip()]
+def _run_all_briefing_research(
+    slack_client, user_id: str,
+    research_queue: list[tuple[dict, str]],
+    channel: str | None, thread_ts: str | None,
+) -> None:
+    """업체 리서치를 순차적으로 실행 (섞임 방지).
+    research_queue: [(meeting, company_name), ...]
+    """
+    for meeting, company_name in research_queue:
+        _run_briefing_research(slack_client, user_id, meeting, company_name, channel, thread_ts)
 
-            # 도입 문장(preamble) 블록 스킵: bold/URL 없이 길기만 한 경우
-            has_bold = any("**" in l for l in block_lines)
-            has_url  = any("http" in l or "출처" in l for l in block_lines)
-            if not has_bold and not has_url and len(block) > 120:
-                continue
 
-            # 제목 추출: bold(**...**) 줄 우선, 없으면 첫 줄
-            title = ""
-            for l in block_lines:
-                m = _re.search(r'\*\*(.+?)\*\*', l)
-                if m:
-                    title = m.group(1).strip()
-                    # "N. 제목" 형식이면 번호 제거
-                    title = _re.sub(r'^\d+\.\s*', '', title)
-                    break
-            if not title:
-                title = block_lines[0][:120] if block_lines else ""
+def _send_briefing(slack_client, user_id: str, meeting: dict, company_name: str,
+                   channel: str = None, thread_ts: str = None) -> str | None:
+    """미팅 기본 정보 블록만 즉시 발송. Returns: 발송된 메시지 ts
 
-            # URL 추출
-            url = ""
-            for l in block_lines:
-                url_m = _re.search(r'https?://\S+', l)
-                if url_m:
-                    url = url_m.group(0).rstrip(')').rstrip('.')
-                    break
-
-            if not title:
-                continue
-            news_lines.append(f"{title} ({url})" if url else title)
-
-        log.info(f"news_lines ({company_name}): {news_lines}")
-
-        # ## ParaScope 브리핑 섹션 추출
-        parascope_lines = []
-        in_parascope = False
-        for line in company_content.splitlines():
-            if "ParaScope 브리핑" in line and line.strip().startswith("#"):
-                in_parascope = True
-                continue
-            if in_parascope:
-                if line.strip().startswith("#"):
-                    break
-                stripped = line.strip()
-                if not stripped or "last_searched" in stripped:
-                    continue
-                parascope_lines.append(stripped)
-
-        in_connections = False
-        connection_lines = []
-        for line in company_content.splitlines():
-            if "## 파라메타 서비스 연결점" in line:
-                in_connections = True
-                continue
-            if in_connections:
-                if line.startswith("##"):
-                    break
-                if line.strip().startswith("-"):
-                    connection_lines.append(line.strip("- ").strip())
-        connection_lines = connection_lines[:3]
-
-        # Gmail 이메일 없으면 Drive 파일의 ## 이메일 맥락 섹션으로 보완
-        if not context.get("emails"):
-            drive_emails = []
-            in_email = False
-            for line in company_content.splitlines():
-                if "이메일 맥락" in line and line.strip().startswith("#"):
-                    in_email = True
-                    continue
-                if in_email:
-                    if line.strip().startswith("#"):
-                        break
-                    stripped = line.strip()
-                    if not stripped or "last_searched" in stripped:
-                        continue
-                    cleaned = stripped.lstrip("-•").strip()
-                    if cleaned:
-                        # "날짜 | 제목 | snippet" 형식 파싱
-                        parts = cleaned.split("|", 2)
-                        drive_emails.append({
-                            "date": parts[0].strip() if len(parts) > 0 else "",
-                            "subject": parts[1].strip() if len(parts) > 1 else cleaned,
-                            "snippet": parts[2].strip() if len(parts) > 2 else "",
-                        })
-                        if len(drive_emails) >= 3:
-                            break
-            if drive_emails:
-                context = {**context, "emails": drive_emails}
-
-        blocks = build_briefing_message(
-            meeting=meeting,
-            company_name=company_name,
-            company_news=news_lines,
-            persons=[{"name": p["name"]} for p in persons_info],
-            service_connections=connection_lines,
-            previous_context=context,
-            parascope_content=parascope_lines,
-        )
-
+    리서치는 호출자(run_briefing)가 단일 백그라운드 스레드에서 관리한다.
+    여러 업체가 있을 때 섞이지 않도록 스레드를 여기서 시작하지 않는다.
+    """
+    try:
+        header_blocks = build_meeting_header_block(meeting, company_name)
         resp = _post(slack_client, user_id=user_id, channel=channel, thread_ts=thread_ts,
-                     blocks=blocks, text=f"{company_name} 미팅 브리핑")
+                     blocks=header_blocks, text=f"{company_name} 미팅 브리핑")
+        if not resp:
+            return None
         msg_ts = resp["ts"]
         _pending_agenda[msg_ts] = [meeting["id"], user_id]
         _save_pending_agenda(_pending_agenda)
@@ -1075,7 +1126,6 @@ def _post_email_selection(slack_client, user_id: str, selection: dict,
 def _create_calendar_event(slack_client, user_id: str, info: dict, company: str | None,
                            attendee_emails: list[str], channel: str = None, thread_ts: str = None):
     """Calendar 이벤트 생성, 브리핑 실행, 드림플러스 회의실 예약 제안"""
-    import threading
     from agents import dreamplus as dreamplus_agent
     if not info.get("date") or not info.get("time"):
         _post(slack_client, user_id=user_id, channel=channel, thread_ts=thread_ts,
@@ -1278,6 +1328,13 @@ def update_meeting_from_text(slack_client, user_id: str, user_message: str,
     if "location" in changed_fields:
         patch_kwargs["location"] = updated_info.get("location", "")
         change_summary_lines.append(f"장소 → *{patch_kwargs['location']}*")
+
+    if "company" in changed_fields:
+        new_company = updated_info.get("company")
+        if isinstance(new_company, str) and new_company.lower() not in ("null", "none", ""):
+            draft["company"] = new_company
+            patch_kwargs["extended_properties"] = {"private": {"company": new_company}}
+            change_summary_lines.append(f"업체 → *{new_company}*")
 
     if "participants" in changed_fields:
         new_names = updated_info.get("participants", [])
