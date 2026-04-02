@@ -635,7 +635,8 @@ def show_credits(slack_client, user_id: str,
 # ── 미팅 생성 연동 (auto_book_room) ──────────────────────────
 
 def auto_book_room(slack_client, *, user_id: str, start_dt: datetime,
-                   end_dt: datetime, title: str, attendee_count: int = 2):
+                   end_dt: datetime, title: str, attendee_count: int = 2,
+                   channel: str = None, thread_ts: str = None):
     """미팅 생성 직후 자동 호출 — 회의실 추천 버튼 Slack 발송.
     드림플러스 계정 미설정 또는 오류 시 조용히 스킵.
     """
@@ -682,4 +683,5 @@ def auto_book_room(slack_client, *, user_id: str, start_dt: datetime,
         }],
     })
     _post(slack_client, user_id,
-          f"드림플러스 회의실 예약 제안: {title}", blocks=blocks)
+          f"드림플러스 회의실 예약 제안: {title}", blocks=blocks,
+          channel=channel, thread_ts=thread_ts)

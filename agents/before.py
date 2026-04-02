@@ -1141,6 +1141,8 @@ def _create_calendar_event(slack_client, user_id: str, info: dict, company: str 
                 end_dt=end_dt,
                 title=info.get("title", "미팅"),
                 attendee_count=attendee_count,
+                channel=channel,
+                thread_ts=thread_ts,
             ),
             daemon=True,
         ).start()
