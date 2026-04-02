@@ -796,9 +796,10 @@ def handle_dp_cancel_confirm(ack, body, client):
     ).start()
 
 
-@app.action("dreamplus_skip_booking")
-def handle_dp_skip_booking(ack, body, client):
-    ack()  # 건너뜀 — 아무 동작 없음
+@app.action("dreamplus_next_rooms")
+def handle_dp_next_rooms(ack, body, client):
+    ack()
+    dreamplus_agent.next_rooms(client, body)
 
 
 # ── FastAPI OAuth 서버 (백그라운드) ──────────────────────────

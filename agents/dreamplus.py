@@ -266,6 +266,8 @@ def book_room(slack_client, user_id: str, text: str):
         return
 
     date_str = start_dt.strftime("%m월 %d일")
+    shown = ",".join(str(r["roomCode"]) for r in recommended)
+    next_value = f"{start_dt.isoformat()}|{end_dt.isoformat()}|{text}|{attendee_count}|{shown}"
     blocks = [
         {
             "type": "section",
@@ -285,9 +287,9 @@ def book_room(slack_client, user_id: str, text: str):
         "type": "actions",
         "elements": [{
             "type": "button",
-            "text": {"type": "plain_text", "text": "건너뜀"},
-            "action_id": "dreamplus_skip_booking",
-            "value": "skip",
+            "text": {"type": "plain_text", "text": "다음"},
+            "action_id": "dreamplus_next_rooms",
+            "value": next_value,
         }],
     })
     _post(slack_client, user_id,
@@ -403,6 +405,95 @@ def list_reservations(slack_client, user_id: str):
     _post(slack_client, user_id, "드림플러스 예약 내역", blocks=blocks)
 
 
+# ── 다음 회의실 추천 ─────────────────────────────────────────
+
+def next_rooms(slack_client, body: dict):
+    """dreamplus_next_rooms 버튼 핸들러 — 다음 순위 회의실 표시"""
+    user_id = body["user"]["id"]
+    value = body["actions"][0]["value"]
+
+    try:
+        parts = value.split("|", 4)
+        start_dt = datetime.fromisoformat(parts[0])
+        end_dt = datetime.fromisoformat(parts[1])
+        meeting_title = parts[2]
+        attendee_count = int(parts[3]) if parts[3].isdigit() else 2
+        shown_codes = set(int(c) for c in parts[4].split(",") if c.isdigit()) if len(parts) > 4 else set()
+    except Exception:
+        _post(slack_client, user_id, "⚠️ 다음 추천을 불러오지 못했습니다.")
+        return
+
+    try:
+        jwt, pub_key, member_id = _get_session(user_id)
+        rooms = dp.get_rooms(jwt)
+    except ValueError as e:
+        _post(slack_client, user_id, f"⚠️ {e}")
+        return
+    except Exception as e:
+        _post(slack_client, user_id, f"❌ 회의실 목록 조회 실패: {e}")
+        return
+
+    all_candidates = _recommend_rooms(rooms, attendee_count, start_dt, end_dt)
+    # 이미 보여준 회의실 제외
+    remaining = [r for r in all_candidates if r["roomCode"] not in shown_codes]
+
+    if not remaining:
+        # 기존 메시지 업데이트
+        try:
+            slack_client.chat_update(
+                channel=body["container"]["channel_id"],
+                ts=body["container"]["message_ts"],
+                text="더 이상 추천 가능한 회의실이 없습니다.",
+                blocks=[{
+                    "type": "section",
+                    "text": {"type": "mrkdwn", "text": "😔 더 이상 추천 가능한 회의실이 없습니다."},
+                }],
+            )
+        except Exception:
+            _post(slack_client, user_id, "😔 더 이상 추천 가능한 회의실이 없습니다.")
+        return
+
+    next_batch = remaining[:3]
+    new_shown = shown_codes | {r["roomCode"] for r in next_batch}
+    next_value = f"{start_dt.isoformat()}|{end_dt.isoformat()}|{meeting_title}|{attendee_count}|{','.join(str(c) for c in new_shown)}"
+
+    date_str = start_dt.strftime("%m월 %d일")
+    blocks = [
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": (
+                    f"🏢 *{date_str} {start_dt.strftime('%H:%M')}~{end_dt.strftime('%H:%M')}* "
+                    f"({attendee_count}인 이상) 다음 추천 회의실"
+                ),
+            },
+        },
+        {"type": "divider"},
+    ]
+    for room in next_batch:
+        blocks.append(_room_block(room, start_dt, end_dt, meeting_title))
+    blocks.append({
+        "type": "actions",
+        "elements": [{
+            "type": "button",
+            "text": {"type": "plain_text", "text": "다음"},
+            "action_id": "dreamplus_next_rooms",
+            "value": next_value,
+        }],
+    })
+
+    try:
+        slack_client.chat_update(
+            channel=body["container"]["channel_id"],
+            ts=body["container"]["message_ts"],
+            text=f"드림플러스 회의실 추천 ({date_str})",
+            blocks=blocks,
+        )
+    except Exception:
+        _post(slack_client, user_id, f"드림플러스 회의실 추천 ({date_str})", blocks=blocks)
+
+
 # ── /회의실취소 ───────────────────────────────────────────────
 
 def cancel_room(slack_client, user_id: str, text: str):
@@ -505,15 +596,17 @@ def auto_book_room(slack_client, *, user_id: str, start_dt: datetime,
         },
         {"type": "divider"},
     ]
+    shown = ",".join(str(r["roomCode"]) for r in recommended)
+    next_value = f"{start_dt.isoformat()}|{end_dt.isoformat()}|{title}|{attendee_count}|{shown}"
     for room in recommended:
         blocks.append(_room_block(room, start_dt, end_dt, title))
     blocks.append({
         "type": "actions",
         "elements": [{
             "type": "button",
-            "text": {"type": "plain_text", "text": "건너뜀"},
-            "action_id": "dreamplus_skip_booking",
-            "value": "skip",
+            "text": {"type": "plain_text", "text": "다음"},
+            "action_id": "dreamplus_next_rooms",
+            "value": next_value,
         }],
     })
     _post(slack_client, user_id,
