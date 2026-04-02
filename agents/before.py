@@ -1147,14 +1147,6 @@ def _create_calendar_event(slack_client, user_id: str, info: dict, company: str 
             daemon=True,
         ).start()
 
-        # 업체 리서치/브리핑은 백그라운드에서 나중에 실행
-        threading.Thread(
-            target=run_briefing,
-            args=(slack_client, user_id, event),
-            kwargs=dict(channel=channel, thread_ts=thread_ts),
-            daemon=True,
-        ).start()
-
     except Exception as e:
         _post(slack_client, user_id=user_id, channel=channel, thread_ts=thread_ts,
               text=f"⚠️ 미팅 생성 실패: {e}")
