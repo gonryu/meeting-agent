@@ -429,6 +429,15 @@ def show_credits(slack_client, user_id: str):
         user_store.save_dreamplus_jwt(user_id, "", "")
         _post(slack_client, user_id, "⚠️ 세션이 만료되었습니다. 다시 시도해주세요.")
         return
+    except RuntimeError as e:
+        msg = str(e)
+        if "시스템 오류" in msg:
+            _post(slack_client, user_id,
+                  "⚠️ 드림플러스 포인트 조회 API가 현재 지원되지 않습니다.\n"
+                  "잔여 포인트는 드림플러스 앱 또는 웹사이트에서 직접 확인해주세요.")
+        else:
+            _post(slack_client, user_id, f"❌ 크레딧 조회 실패: {msg}")
+        return
     except Exception as e:
         _post(slack_client, user_id, f"❌ 크레딧 조회 실패: {e}")
         return

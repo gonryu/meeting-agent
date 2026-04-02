@@ -306,10 +306,12 @@ def cancel_reservation(jwt: str, public_key_b64: str, reservation_id: int) -> bo
 
 
 def get_credits(jwt: str, public_key_b64: str) -> dict:
-    """남은 크레딧(포인트) 조회. ek/ed 암호화 사용.
+    """남은 크레딧(포인트) 조회.
 
-    API: POST /api2/invoice/point
+    API: POST /api2/invoice/point  (ek/ed 암호화)
     """
     encrypted = _encrypt_ek_ed({}, public_key_b64)
-    body = _check(_post("/api2/invoice/point", encrypted, jwt=jwt))
+    raw = _post("/api2/invoice/point", encrypted, jwt=jwt)
+    log.info(f"[get_credits] response: {raw}")
+    body = _check(raw)
     return body.get("data") or body
