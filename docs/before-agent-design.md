@@ -1,6 +1,6 @@
 # Before 에이전트 설계 문서
 
-> 최종 갱신: 2026-04-02 | 미팅 생성 후 즉시 브리핑 제거, 스레드 답글 전용 드래프트 업데이트, 장소(location) 필드 추가, 프롬프트 템플릿 외부 파일 분리, 도움말 커맨드
+> 최종 갱신: 2026-04-02 | 브리핑 비동기화(즉시 헤더 + 순차 리서치), 다중 업체 섞임 방지, 스레드에서 업체명 인식·Calendar 반영, 업체 리서치 블록 빌더 분리
 
 ---
 
@@ -23,7 +23,7 @@ Google Calendar에서 오늘의 미팅을 감지하고, 업체/인물 리서치 
 |------|-----------|------|
 | **자동** | APScheduler, 매일 09:00 KST | 전체 등록 사용자 순회 → 오늘 미팅 브리핑 |
 | **수동** | `/brief`, `/브리핑`, 자연어 DM/멘션 | 즉시 브리핑 생성 |
-| **미팅 생성 후** | `create_meeting_from_text()` 완료 시 | 생성된 미팅에 대한 즉시 브리핑 |
+| ~~미팅 생성 후~~ | ~~`create_meeting_from_text()` 완료 시~~ | ~~생성된 미팅에 대한 즉시 브리핑~~ → **제거됨 (2026-04-02)** |
 | **기업 리서치** | `/company {업체명}`, `/기업 {업체명}` | 강제 리서치 후 Drive 저장 |
 | **인물 리서치** | `/person {이름} (회사)`, `/인물 {이름} (회사)` | 강제 리서치 후 Drive 저장 + 연관 기업 갱신 |
 | **지식 갱신** | `/update`, `/업데이트` | `company_knowledge.md` 자동 재작성 |
@@ -64,17 +64,16 @@ _send_briefing()     _send_internal_briefing()
     │                   │
     │                   └─ 간단 정보 + 어젠다 입력 안내
     │
-    ├─ research_company()       업체 정보 수집
-    ├─ research_person() × 3   담당자 정보 수집 (최대 3명)
-    ├─ get_previous_context()  Gmail 이전 이메일 + Drive 회의록
-    │
-    ▼
-build_briefing_message() → Slack blocks
-_post() → DM 또는 채널 스레드 발송
-    │
-    ▼
-_pending_agenda[msg_ts] = (event_id, user_id)
-   브리핑 스레드 답장 대기 등록
+    ▼  [1단계: 즉시]
+build_meeting_header_block() → Slack blocks 즉시 발송
+_pending_agenda[msg_ts] = (event_id, user_id) 등록
+research_queue.append((meeting, company_name))
+         │
+         ▼  [2단계: 백그라운드 단일 스레드]
+_run_all_briefing_research()   ← 업체 A → 업체 B 순차 처리 (섞임 없음)
+    ├─ research_company()  → build_company_research_block() 발송
+    ├─ research_person() × 3  → build_persons_block() 발송
+    └─ get_previous_context()  → build_context_block() 발송
 ```
 
 ---
@@ -319,7 +318,7 @@ def get_previous_context(user_id, company_name, person_names) -> dict:
 
 > ⚠️ Trello 미구현 (`"trello": []` 하드코딩)
 
-### 6.4 브리핑 메시지 (`_send_briefing`)
+### 6.4 브리핑 메시지 (`_send_briefing` + 비동기 리서치)
 
 #### 브리핑 인트로 메시지
 
@@ -329,14 +328,41 @@ def get_previous_context(user_id, company_name, person_names) -> dict:
 📅 {display_name}님의 향후 24시간 일정을 보여드리겠습니다.
 ```
 
-브리핑 표시 섹션 순서:
-1. 미팅 기본 정보 (제목, 시간, 장소, Google Meet 링크)
-2. 업체 최근 동향 (최대 3줄, URL은 텍스트 링크로 변환 — 원시 URL 미표시)
-3. 담당자 정보 (최대 3명)
-4. 파라메타 서비스 연결점 (최대 3줄)
-5. 이전 미팅 맥락 (Drive 회의록 최대 3개, Drive 열기 링크 포함)
-6. 이메일 맥락 📧 (Gmail 최근 이메일 최대 1개 — 별도 섹션)
-7. 어젠다: Calendar 이벤트 `description`에 내용이 있으면 표시, 없으면 스레드 답장 안내
+#### 2단계 비동기 발송 구조 (2026-04-02 변경)
+
+리서치 대기 시간으로 인한 응답 지연을 해소하기 위해 미팅 기본 정보를 먼저 발송하고, 리서치 결과는 백그라운드에서 순차적으로 발송합니다.
+
+```
+run_briefing()
+  │
+  ├─ [1단계: 즉시] 모든 미팅 헤더 발송 (_send_briefing × N)
+  │    └─ build_meeting_header_block() → 미팅 제목/시간/링크/어젠다만 포함
+  │
+  └─ [2단계: 백그라운드 단일 스레드] _run_all_briefing_research()
+       └─ 업체별 순차 실행 (_run_briefing_research × N)
+            ├─ "🔍 {업체명} 리서치 중..." → research_company()
+            │    └─ build_company_research_block() 발송
+            │         (🏢 {업체명} 리서치 결과 / 업체 동향 / ParaScope / 연결점)
+            ├─ "👤 {이름} 리서치 중..." × 3 → research_person()
+            │    └─ build_persons_block() 발송
+            └─ "📨 이전 커뮤니케이션 맥락 조회 중..." → get_previous_context()
+                 └─ build_context_block() 발송 (이전 회의록 / 이메일 맥락)
+```
+
+> **다중 업체 섞임 방지**: 업체마다 개별 스레드를 시작하지 않고,
+> `_run_all_briefing_research()`가 단일 스레드에서 업체 A → 업체 B 순서로 처리하여
+> 2개 이상 업체 브리핑 시에도 결과가 섞이지 않습니다.
+
+#### 발송 블록 구성 (`tools/slack_tools.py`)
+
+| 함수 | 발송 시점 | 포함 내용 |
+|------|---------|---------|
+| `build_meeting_header_block()` | 즉시 | 미팅 제목, 시간, Meet 링크, 장소, 어젠다 |
+| `build_company_research_block()` | 업체 리서치 완료 후 | 🏢 업체명 헤더, ParaScope, 업체 동향, 서비스 연결점 |
+| `build_persons_block()` | 인물 리서치 완료 후 | 담당자 이름/직책/LinkedIn |
+| `build_context_block()` | 컨텍스트 조회 완료 후 | 이전 회의록(Drive), 이메일 맥락 |
+
+브리핑 헤더 발송 후 `_pending_agenda[msg_ts] = (event_id, user_id)` 등록.
 
 #### URL 링크화 (`_slack_linkify`)
 
@@ -391,7 +417,7 @@ _generate(parse_meeting_prompt(message)) → JSON
   └─ 모두 확정 시:
        missing_names 경고 Slack 메시지 후
        _create_calendar_event() → Calendar 이벤트 + Google Meet 생성
-       run_briefing() → 생성된 미팅 즉시 브리핑
+       ※ run_briefing() 자동 실행 제거됨 (2026-04-02) — 생성 완료 메시지만 발송
 ```
 
 #### 이메일 후보 수집 내부 함수
@@ -435,8 +461,21 @@ if thread_ts and user_id:
 
 - `reply_ts`: 봇이 미팅 생성 응답으로 보낸 메시지의 `ts` (스레드 루트 기준)
 - 스레드 판별 실패 시 `_route_message()`로 일반 명령어 처리
-- **수정 가능 필드**: `title`, `date`, `time`, `duration_minutes`, `participants`, `agenda`, `location`
-- `location` 수정 시 `cal.patch_event(creds, event_id, location=...)` 호출 + Slack 업데이트 메시지 발송
+- **수정 가능 필드**: `title`, `date`, `time`, `duration_minutes`, `participants`, `agenda`, `location`, `company`
+
+| 필드 | Calendar 반영 방법 |
+|------|-----------------|
+| `title` | `cal.update_event(summary=...)` |
+| `date` / `time` / `duration_minutes` | `cal.update_event(start_dt=..., end_dt=...)` |
+| `agenda` | `cal.update_event(description=...)` |
+| `location` | `cal.update_event(location=...)` |
+| `participants` | `cal.update_event(attendee_emails=...)` |
+| `company` | `draft["company"]` 업데이트 + `cal.update_event(extended_properties={"private": {"company": ...}})` |
+
+- `company` 수정 시 (2026-04-02 추가): `"업체는 한국은행이야"` 처럼 명시적으로 언급된 경우만 인식
+  - `draft["company"]` 갱신 → 이후 브리핑 시 해당 업체로 리서치
+  - `extendedProperties.private.company` 패치 → `run_briefing()` 에서 `injected_company`로 재사용
+- `tools/calendar.py` → `update_event()` 에 `extended_properties: dict = None` 파라미터 추가
 
 ### 6.7 company_knowledge.md 갱신 (`update_company_knowledge`)
 

@@ -15,8 +15,8 @@ Before Agent  →  During Agent  →  After Agent
 
 | 단계 | 기능 |
 |------|------|
-| **Before** | 외부 미팅 자동 감지 → 업체·인물 리서치 → 브리핑 Slack 발송 |
-| **Before** | 자연어 미팅 생성 (`내일 오전 10시 KISA 미팅 잡아줘`) |
+| **Before** | 외부 미팅 자동 감지 → 미팅 헤더 즉시 발송 → 업체·인물 리서치 백그라운드 순차 발송 |
+| **Before** | 자연어 미팅 생성 (`내일 오전 10시 KISA 미팅 잡아줘`) + 스레드 답글로 업체명·장소 등 수정 |
 | **Before** | 명함 DM 업로드 → Claude Vision OCR → Contacts 자동 등록 |
 | **During** | Google Meet 트랜스크립트 자동 폴링 (10분 주기) |
 | **During** | Slack 수동 노트 세션 (`/미팅시작`, `/메모`, `/미팅종료`) |
@@ -137,7 +137,7 @@ Google OAuth 인증 후 Drive 폴더 자동 생성.
 **Slash Commands 등록**
 
 10. 좌측 메뉴 **Slash Commands** → **Create New Command** 로 아래 커맨드 등록:
-    `/등록`, `/재등록`, `/브리핑`, `/brief`, `/미팅추가`, `/meet`, `/기업`, `/company`, `/인물`, `/person`, `/미팅시작`, `/메모`, `/미팅종료`, `/회의록`, `/업데이트`, `/update`
+    `/등록`, `/재등록`, `/브리핑`, `/brief`, `/미팅추가`, `/meet`, `/기업`, `/company`, `/인물`, `/person`, `/미팅시작`, `/메모`, `/미팅종료`, `/회의록`, `/업데이트`, `/update`, `/도움말`, `/help`, `/드림플러스설정`, `/dreamplus`
 
 ---
 
@@ -243,7 +243,7 @@ ENCRYPTION_KEY=abc123...==
 | 커맨드 | 설명 |
 |--------|------|
 | `/등록` / `/register` | Google 계정 연동 |
-| `/재등록` / `/reregister` | Google 계정 재인증 |
+| `/재등록` / `/reregister` | Google 계정 재인증 (스코프 변경 시 활용) |
 | `/브리핑` / `/brief` | 오늘 미팅 브리핑 수동 실행 |
 | `/미팅추가` / `/meet` | 자연어로 미팅 생성 |
 | `/기업` / `/company` | 기업 정보 강제 리서치 |
@@ -253,8 +253,59 @@ ENCRYPTION_KEY=abc123...==
 | `/미팅종료` | 세션 종료 + 회의록 즉시 생성 + 검토 단계 |
 | `/회의록` | 저장된 회의록 목록 조회 |
 | `/업데이트` / `/update` | company_knowledge.md 갱신 |
+| `/도움말` / `/help` | 사용 가능한 커맨드 및 자연어 명령어 안내 |
+| `/드림플러스설정` / `/dreamplus` | 드림플러스 계정 등록/변경 |
 
 자연어 DM도 지원합니다 (`브리핑 해줘`, `내일 3시 KISA 미팅 잡아줘` 등).
+
+---
+
+## 브리핑 동작 방식
+
+외부 미팅 브리핑은 **2단계 비동기** 방식으로 동작합니다. 리서치 대기 없이 미팅 정보를 즉시 수신하고, 리서치 결과는 완료되는 순서대로 스레드에 추가됩니다.
+
+```
+1단계 (즉시)     미팅 헤더 발송
+                  ┌────────────────────────────────┐
+                  │ 📋 업체명 — 오후 3:00 (Google Meet) │
+                  │ [어젠다 내용 또는 스레드 답글 안내]   │
+                  └────────────────────────────────┘
+
+2단계 (백그라운드, 업체별 순차)
+  → 업체 리서치 완료  🏢 업체명 리서치 결과 (ParaScope / 업체 동향 / 서비스 연결점)
+  → 담당자 완료       👤 담당자 정보
+  → 맥락 조회 완료    📌 이전 미팅 맥락 + 📧 이메일 맥락
+```
+
+> 다중 업체 브리핑 시에도 단일 스레드에서 순차 처리하므로 두 업체의 결과가 섞이지 않습니다.
+
+---
+
+## 프롬프트 템플릿 커스터마이징
+
+LLM에 전달되는 주요 프롬프트는 `prompts/templates/` 폴더의 마크다운 파일로 관리됩니다.
+**파일을 수정한 뒤 서버를 재실행하면** 변경 내용이 즉시 반영됩니다 (코드 수정 불필요).
+
+```
+prompts/templates/
+├── minutes_internal.md     # 내부용 회의록 생성 프롬프트
+├── minutes_external.md     # 외부용 회의록 생성 프롬프트
+├── company_news.md         # 업체 최근 동향 검색 프롬프트
+├── person_info.md          # 인물 정보 검색 프롬프트
+└── service_connection.md   # 서비스 연결점 분석 프롬프트
+```
+
+템플릿 내 변수는 `{{변수명}}` 형식으로 작성합니다:
+
+| 템플릿 파일 | 사용 변수 |
+|------------|----------|
+| `minutes_internal.md` | `{{title}}`, `{{date}}`, `{{attendees}}`, `{{sources}}` |
+| `minutes_external.md` | `{{title}}`, `{{date}}`, `{{attendees}}`, `{{internal_minutes}}` |
+| `company_news.md` | `{{today}}`, `{{company_name}}` |
+| `person_info.md` | `{{person_name}}`, `{{company_name}}` |
+| `service_connection.md` | `{{knowledge}}`, `{{company_info}}` |
+
+> 인라인으로 관리되는 프롬프트(미팅 파싱, 인텐트 분류, 액션아이템 추출 등)는 `prompts/briefing.py`에서 직접 수정합니다.
 
 ---
 
@@ -290,12 +341,18 @@ meeting-agent/
 │   ├── stt.py              # Deepgram STT API
 │   └── slack_tools.py      # Slack Block Kit 메시지 빌더
 ├── prompts/
-│   └── briefing.py         # LLM 프롬프트 템플릿
+│   ├── briefing.py         # LLM 프롬프트 함수 (템플릿 로더 포함)
+│   └── templates/          # 외부 프롬프트 템플릿 (서버 재실행으로 반영)
+│       ├── minutes_internal.md
+│       ├── minutes_external.md
+│       ├── company_news.md
+│       ├── person_info.md
+│       └── service_connection.md
 ├── store/
 │   └── user_store.py       # SQLite + Fernet 사용자 토큰 관리
 ├── server/
 │   └── oauth.py            # FastAPI Google OAuth 콜백 서버
-├── tests/                  # 단위 테스트 (149개)
+├── tests/                  # 단위 테스트
 ├── requirements.txt
 └── docs/                   # 설계 문서
 ```
@@ -329,10 +386,10 @@ pytest tests/test_before.py  # 특정 파일만
 
 | Scope | 용도 |
 |-------|------|
-| `calendar` | 미팅 조회·생성·설명 업데이트 |
+| `calendar` | 미팅 조회·생성·설명 업데이트·extendedProperties 패치 |
 | `drive` | Contacts·회의록·company_knowledge.md 읽기/쓰기 |
 | `gmail.readonly` | 이메일 맥락 검색, 이메일 주소 추출 |
 | `gmail.send` | 외부용 회의록 이메일 발송 |
 | `documents.readonly` | Google Meet 트랜스크립트 읽기 |
-| `contacts.readonly` | Google 주소록 참석자 이메일 조회 (신규 등록자부터 적용) |
+| `contacts.readonly` | Google 주소록 참석자 이메일 조회 (신규 등록자부터 적용, 기존 사용자는 `/재등록` 필요) |
 | `meetings.space.created` | Google Meet 트랜스크립션 자동 활성화 |

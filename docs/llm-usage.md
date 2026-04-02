@@ -448,6 +448,6 @@ JSON으로만 응답해줘:
 
 | 프롬프트 | 위치 | 현황 |
 |---------|------|------|
-| `briefing_summary_prompt` | `prompts/briefing.py` | 정의만 있고 호출 없음. 브리핑 메시지는 LLM 없이 `build_briefing_message()`로 Slack blocks 직접 조합. |
+| `briefing_summary_prompt` | `prompts/briefing.py` | 정의만 있고 호출 없음. 브리핑 메시지는 LLM 없이 `build_meeting_header_block()`, `build_company_research_block()`, `build_persons_block()`, `build_context_block()`으로 Slack blocks 직접 조합 (2026-04-02 비동기화 리팩토링). |
 | `minutes_from_transcript_prompt` | `prompts/briefing.py` | `minutes_internal_prompt`의 하위 호환 래퍼. 직접 호출 없음. |
 | `minutes_from_notes_prompt` | `prompts/briefing.py` | `minutes_internal_prompt`의 하위 호환 래퍼. 직접 호출 없음. |
