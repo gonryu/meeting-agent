@@ -337,8 +337,8 @@ def list_reservations(slack_client, user_id: str):
     if member_id:
         items = [i for i in items if i.get("memberId") == member_id]
 
-    # 예약 완료(531)·사용 완료(534) 항목만 표시
-    active = [i for i in items if i.get("reservationState") in (531, 534)]
+    # 예약 완료(531) 항목만 표시 (사용완료 534 제외)
+    active = [i for i in items if i.get("reservationState") == 531]
     if not active:
         _post(slack_client, user_id, "📋 이번 달 예약 내역이 없습니다.")
         return
