@@ -86,6 +86,9 @@ def _parse_datetime_range(text: str) -> tuple[datetime, datetime] | None:
         m_ = int(p.group(3)) if p.group(3) else 0
         if ampm == "오후" and h < 12:
             h += 12
+        elif ampm == "" and 1 <= h <= 8:
+            # 오전/오후 미지정 + 업무시간 범위 밖(1~8시) → 오후로 간주
+            h += 12
         hours.append((h, m_))
 
     if not hours:
@@ -333,7 +336,7 @@ def book_room(slack_client, user_id: str, text: str,
         {"type": "divider"},
     ]
     for room in batch:
-        blocks.append(_room_block(room, start_dt, end_dt))
+        blocks.append(_room_block(room, start_dt, end_dt, meeting_title="회의"))
     blocks.append(_nav_buttons(page, has_next=len(all_candidates) > 3, nav_value=nav_value))
     _post(slack_client, user_id,
           f"드림플러스 회의실 추천 ({date_str})", blocks=blocks,
