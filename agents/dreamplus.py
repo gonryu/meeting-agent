@@ -180,7 +180,8 @@ def _room_block(room: dict, start_dt: datetime, end_dt: datetime,
     total_pt = room.get("_total_point", room.get("point", 0) * duration_min // 30)
     pt_str = f"{total_pt:,}pt" if total_pt else "무료"
     time_str = f"{start_dt.strftime('%H:%M')}~{end_dt.strftime('%H:%M')}"
-    value = f"{room['roomCode']}|{start_dt.isoformat()}|{end_dt.isoformat()}|{meeting_title}"
+    room_name = room.get("roomName", "")
+    value = f"{room['roomCode']}|{start_dt.isoformat()}|{end_dt.isoformat()}|{meeting_title}|{room_name}"
     return {
         "type": "section",
         "text": {
@@ -351,11 +352,12 @@ def confirm_room_booking(slack_client, body: dict):
     value = body["actions"][0]["value"]
 
     try:
-        parts = value.split("|", 3)
+        parts = value.split("|", 4)
         room_code = int(parts[0])
         start_dt = datetime.fromisoformat(parts[1])
         end_dt = datetime.fromisoformat(parts[2])
         meeting_title = parts[3] if len(parts) > 3 else "회의"
+        room_name = parts[4] if len(parts) > 4 else f"드림플러스 Room {room_code}"
     except Exception:
         _post(slack_client, user_id, "⚠️ 예약 정보를 파싱하지 못했습니다.")
         return
@@ -375,8 +377,22 @@ def confirm_room_booking(slack_client, body: dict):
         return
 
     time_str = f"{start_dt.strftime('%m/%d %H:%M')}~{end_dt.strftime('%H:%M')}"
+    location_str = f"드림플러스 강남 {room_name}"
     _post(slack_client, user_id,
-          f"✅ 드림플러스 회의실 예약 완료!\n*roomCode {room_code}* | {time_str} | {meeting_title}")
+          f"✅ 드림플러스 회의실 예약 완료!\n*{room_name}* | {time_str} | {meeting_title}")
+
+    # 최근 생성된 캘린더 이벤트에 장소 업데이트
+    try:
+        from agents.before import _meeting_drafts
+        import tools.calendar as cal
+        draft = _meeting_drafts.get(user_id)
+        if draft and draft.get("event_id"):
+            creds = user_store.get_credentials(user_id)
+            cal.update_event(creds, draft["event_id"], location=location_str)
+            _post(slack_client, user_id,
+                  f"📍 캘린더 일정 장소가 *{location_str}* 으로 업데이트되었습니다.")
+    except Exception as e:
+        log.warning(f"캘린더 location 업데이트 실패: {e}")
 
 
 # ── /회의실조회 ───────────────────────────────────────────────

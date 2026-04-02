@@ -274,7 +274,7 @@ def enable_meet_transcription(creds: Credentials, conference_id: str) -> bool:
 def update_event(creds: Credentials, event_id: str, *,
                  summary: str = None, start_dt: datetime = None,
                  end_dt: datetime = None, attendee_emails: list[str] = None,
-                 description: str = None) -> dict:
+                 description: str = None, location: str = None) -> dict:
     """캘린더 이벤트 부분 업데이트 (patch). None인 필드는 변경하지 않음."""
     body = {}
     if summary is not None:
@@ -287,6 +287,8 @@ def update_event(creds: Credentials, event_id: str, *,
         body["attendees"] = [{"email": e} for e in attendee_emails]
     if description is not None:
         body["description"] = description
+    if location is not None:
+        body["location"] = location
     return _service(creds).events().patch(
         calendarId="primary",
         eventId=event_id,

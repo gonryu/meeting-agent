@@ -1128,9 +1128,7 @@ def _create_calendar_event(slack_client, user_id: str, info: dict, company: str 
         if company:
             event.setdefault("extendedProperties", {}).setdefault("private", {})["company"] = company
 
-        run_briefing(slack_client, user_id, event, channel=channel, thread_ts=thread_ts)
-
-        # 드림플러스 회의실 자동 추천 (계정 미설정 시 스킵)
+        # 드림플러스 회의실 자동 추천 먼저 (계정 미설정 시 스킵)
         attendee_count = len(attendee_emails) + 1  # 참석자 + 주최자
         threading.Thread(
             target=dreamplus_agent.auto_book_room,
@@ -1144,6 +1142,14 @@ def _create_calendar_event(slack_client, user_id: str, info: dict, company: str 
                 channel=channel,
                 thread_ts=thread_ts,
             ),
+            daemon=True,
+        ).start()
+
+        # 업체 리서치/브리핑은 백그라운드에서 나중에 실행
+        threading.Thread(
+            target=run_briefing,
+            args=(slack_client, user_id, event),
+            kwargs=dict(channel=channel, thread_ts=thread_ts),
             daemon=True,
         ).start()
 
