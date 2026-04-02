@@ -33,6 +33,7 @@ _gemini = genai.Client(api_key=os.getenv("GOOGLE_API_KEY"))
 _GEMINI_MODEL = "gemini-2.0-flash"
 _claude = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
 _CLAUDE_MODEL = "claude-haiku-4-5"
+_CLAUDE_MINUTES_MODEL = "claude-sonnet-4-5"  # 회의록 생성 전용
 
 # ── 세션 파일 저장 경로 ──────────────────────────────────────
 _SESSIONS_DIR = Path(__file__).parent.parent / ".sessions"
@@ -187,6 +188,16 @@ def _generate(prompt: str) -> str:
             messages=[{"role": "user", "content": prompt}],
         )
         return msg.content[0].text.strip()
+
+
+def _generate_minutes(prompt: str) -> str:
+    """회의록 생성 전용 — Claude Sonnet 사용"""
+    msg = _claude.messages.create(
+        model=_CLAUDE_MINUTES_MODEL,
+        max_tokens=8192,
+        messages=[{"role": "user", "content": prompt}],
+    )
+    return msg.content[0].text.strip()
 
 
 def _get_creds_and_config(user_id: str):
@@ -603,7 +614,7 @@ def _generate_and_post_minutes(slack_client, *, user_id: str, title: str,
     # ── 내부용 생성 (외부용은 '저장 및 완료' 후 생성) ──
     _post(slack_client, user_id=user_id, text=f"✍️ *{title}* 내부용 회의록 생성 중...")
     try:
-        internal_body = _generate(
+        internal_body = _generate_minutes(
             minutes_internal_prompt(title, meeting_date, attendees,
                                     transcript_text, notes_text)
         )
@@ -818,7 +829,7 @@ def finalize_minutes(slack_client, user_id: str):
     # ── 외부용 생성 (확정된 내부용 기준) ──
     _post(slack_client, user_id=user_id, text=f"✍️ *{title}* 외부용 회의록 생성 중...")
     try:
-        external_body = _generate(
+        external_body = _generate_minutes(
             minutes_external_prompt(title, meeting_date, attendees, internal_body)
         )
     except Exception as e:
@@ -920,7 +931,7 @@ def handle_minutes_edit_reply(slack_client, user_id: str, edit_text: str):
         f"수정된 전체 회의록을 동일한 마크다운 형식으로 반환해줘."
     )
     try:
-        new_internal = _generate(edit_prompt)
+        new_internal = _generate_minutes(edit_prompt)
     except Exception as e:
         log.error(f"회의록 수정 실패: {e}")
         _post(slack_client, user_id=user_id, text=f"⚠️ 회의록 수정 실패: {e}")

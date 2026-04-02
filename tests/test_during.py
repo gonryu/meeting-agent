@@ -217,7 +217,7 @@ class TestEndSession:
         self._init_session(event_id=None)
 
         with _mock_store(), \
-             patch("agents.during._generate", return_value="## 회의 요약\n내용"), \
+             patch("agents.during._generate_minutes", return_value="## 회의 요약\n내용"), \
              patch("agents.during.drive") as mock_drive:
             mock_drive.save_minutes.return_value = "file_id"
             end_session(_slack(), _TEST_USER)
@@ -282,7 +282,7 @@ class TestEndSession:
             return f"## 회의 요약\n생성 결과 {gen_call_count['n']}"
 
         with _mock_store(), \
-             patch("agents.during._generate", side_effect=fake_generate), \
+             patch("agents.during._generate_minutes", side_effect=fake_generate), \
              patch("agents.during.drive") as mock_drive:
             mock_drive.save_minutes.return_value = "file_id"
             end_session(slack, _TEST_USER)
@@ -304,7 +304,7 @@ class TestEndSession:
         slack = _slack()
 
         with _mock_store(), \
-             patch("agents.during._generate", return_value="## 회의 요약\n내용"), \
+             patch("agents.during._generate_minutes", return_value="## 회의 요약\n내용"), \
              patch("agents.during.drive") as mock_drive:
             mock_drive.save_minutes.return_value = "saved_file_id"
             end_session(slack, _TEST_USER)
@@ -320,7 +320,7 @@ class TestEndSession:
         self._init_session(event_id=None)
 
         with _mock_store(), \
-             patch("agents.during._generate", return_value="## 회의 요약\n내용"), \
+             patch("agents.during._generate_minutes", return_value="## 회의 요약\n내용"), \
              patch("agents.during.drive") as mock_drive:
             mock_drive.save_minutes.return_value = "file_id"
             end_session(_slack(), _TEST_USER)
@@ -336,7 +336,7 @@ class TestEndSession:
         slack = _slack()
 
         with _mock_store(), \
-             patch("agents.during._generate", return_value="## 회의 요약\n내용 있음"), \
+             patch("agents.during._generate_minutes", return_value="## 회의 요약\n내용 있음"), \
              patch("agents.during.drive") as mock_drive:
             mock_drive.save_minutes.return_value = "file_id"
             end_session(slack, _TEST_USER)
@@ -351,7 +351,7 @@ class TestEndSession:
         slack = _slack()
 
         with _mock_store(), \
-             patch("agents.during._generate", return_value="## 회의 요약\n없음"), \
+             patch("agents.during._generate_minutes", return_value="## 회의 요약\n없음"), \
              patch("agents.during.drive") as mock_drive:
             mock_drive.save_minutes.return_value = "file_id"
             end_session(slack, _TEST_USER)
@@ -364,7 +364,7 @@ class TestEndSession:
         slack = _slack()
 
         with _mock_store(), \
-             patch("agents.during._generate", side_effect=Exception("LLM 오류")), \
+             patch("agents.during._generate_minutes", side_effect=Exception("LLM 오류")), \
              patch("agents.during.drive") as mock_drive:
             mock_drive.save_minutes.return_value = "file_id"
             end_session(slack, _TEST_USER)
@@ -377,7 +377,7 @@ class TestEndSession:
         self._init_session(event_id=None)
 
         with _mock_store(), \
-             patch("agents.during._generate", side_effect=Exception("LLM 오류")), \
+             patch("agents.during._generate_minutes", side_effect=Exception("LLM 오류")), \
              patch("agents.during.drive") as mock_drive:
             mock_drive.save_minutes.return_value = "file_id"
             end_session(_slack(), _TEST_USER)
@@ -411,7 +411,7 @@ class TestCheckTranscripts:
              patch("agents.during.cal") as mock_cal, \
              patch("agents.during.drive") as mock_drive, \
              patch("agents.during.docs") as mock_docs, \
-             patch("agents.during._generate", return_value="## 회의 요약\n내용"):
+             patch("agents.during._generate_minutes", return_value="## 회의 요약\n내용"):
             mock_cal.get_recently_ended_meetings.return_value = [meeting]
             mock_drive.find_meet_transcript.return_value = transcript_file
             mock_drive.save_minutes.return_value = "file_id"
@@ -476,7 +476,7 @@ class TestCheckTranscripts:
              patch("agents.during.cal") as mock_cal, \
              patch("agents.during.drive") as mock_drive, \
              patch("agents.during.docs") as mock_docs, \
-             patch("agents.during._generate", side_effect=fake_generate):
+             patch("agents.during._generate_minutes", side_effect=fake_generate):
             mock_cal.get_recently_ended_meetings.return_value = [meeting]
             mock_drive.find_meet_transcript.return_value = {"id": "doc1", "name": "LG Transcript"}
             mock_drive.save_minutes.return_value = "file_id"
@@ -532,7 +532,7 @@ class TestCheckTranscripts:
         with _mock_store(), \
              patch("agents.during.cal") as mock_cal, \
              patch("agents.during.drive") as mock_drive, \
-             patch("agents.during._generate", return_value="## 회의 요약\nfallback"):
+             patch("agents.during._generate_minutes", return_value="## 회의 요약\nfallback"):
             mock_cal.get_recently_ended_meetings.return_value = []
             mock_drive.save_minutes.return_value = "file_id"
 
@@ -728,7 +728,7 @@ class TestSessionPersistence:
         assert (isolated_sessions_dir / f"active_{_TEST_USER}.json").exists()
 
         with _mock_store(), \
-             patch("agents.during._generate", return_value="## 회의 요약\n내용"), \
+             patch("agents.during._generate_minutes", return_value="## 회의 요약\n내용"), \
              patch("agents.during.drive") as mock_drive:
             mock_drive.save_minutes.return_value = "file_id"
             end_session(_slack(), _TEST_USER)
@@ -784,7 +784,7 @@ class TestSessionPersistence:
              patch("agents.during.cal") as mock_cal, \
              patch("agents.during.drive") as mock_drive, \
              patch("agents.during.docs") as mock_docs, \
-             patch("agents.during._generate", return_value="## 회의 요약\n내용"):
+             patch("agents.during._generate_minutes", return_value="## 회의 요약\n내용"):
             mock_cal.get_recently_ended_meetings.return_value = [meeting]
             mock_drive.find_meet_transcript.return_value = {"id": "doc1", "name": "Transcript"}
             mock_drive.save_minutes.return_value = "file_id"
@@ -812,7 +812,7 @@ class TestSessionPersistence:
         with _mock_store(), \
              patch("agents.during.cal") as mock_cal, \
              patch("agents.during.drive") as mock_drive, \
-             patch("agents.during._generate", return_value="## 회의 요약\nfallback"):
+             patch("agents.during._generate_minutes", return_value="## 회의 요약\nfallback"):
             mock_cal.get_recently_ended_meetings.return_value = []
             mock_drive.save_minutes.return_value = "file_id"
             check_transcripts(_slack())
