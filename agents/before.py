@@ -1283,6 +1283,10 @@ def update_meeting_from_text(slack_client, user_id: str, user_message: str,
         except Exception as e:
             log.warning(f"날짜/시간 파싱 실패: {e}")
 
+    if "location" in changed_fields:
+        patch_kwargs["location"] = updated_info.get("location", "")
+        change_summary_lines.append(f"장소 → *{patch_kwargs['location']}*")
+
     if "participants" in changed_fields:
         new_names = updated_info.get("participants", [])
         new_emails = list(attendee_emails)  # 기존 유지 후 추가

@@ -89,7 +89,8 @@ JSON 형식으로만 답변 (다른 텍스트 없이):
   "participant_emails": {{"이름1": "email@example.com"}},
   "company": "외부 기관/업체명 또는 null",
   "title": "미팅 제목",
-  "agenda": "어젠다 (없으면 빈 문자열)"
+  "agenda": "어젠다 (없으면 빈 문자열)",
+  "location": "장소 (없으면 빈 문자열)"
 }}
 
 추출 규칙:
@@ -121,7 +122,7 @@ def merge_meeting_prompt(existing_info: dict, new_message: str) -> str:
 새 메시지: "{new_message}"
 
 판단 규칙:
-- 일정 관련 정보(제목, 참석자, 어젠다, 날짜, 시간, 소요시간 등)를 제공하는 메시지면 is_update: true
+- 일정 관련 정보(제목, 참석자, 어젠다, 날짜, 시간, 소요시간, 장소 등)를 제공하는 메시지면 is_update: true
 - 전혀 다른 주제("브리핑 해줘", "회의실 예약해줘", "회사 알아봐줘" 등)면 is_update: false
 
 JSON으로만 반환 (설명 없이):
@@ -135,7 +136,8 @@ JSON으로만 반환 (설명 없이):
     "participant_emails": {{}},
     "company": null,
     "title": "미팅 제목",
-    "agenda": ""
+    "agenda": "",
+    "location": ""
   }},
   "changed_fields": ["변경된 필드명 목록"]
 }}
