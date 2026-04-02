@@ -213,8 +213,9 @@ def login(email: str, password: str) -> tuple[str, str]:
     if not jwt:
         raise RuntimeError("jwtToken을 응답에서 찾을 수 없습니다.")
 
-    log.info(f"Dreamplus 로그인 성공: {email}")
-    return jwt, pub_key_b64
+    member_id = body["data"].get("id", 0)
+    log.info(f"Dreamplus 로그인 성공: {email} (memberId={member_id})")
+    return jwt, pub_key_b64, member_id
 
 
 # ── 회의실 API ────────────────────────────────────────────────

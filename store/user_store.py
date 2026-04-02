@@ -210,10 +210,8 @@ def get_dreamplus_credentials(slack_user_id: str) -> tuple[str, str] | None:
     return email, password
 
 
-def get_dreamplus_jwt(slack_user_id: str) -> tuple[str, str] | None:
-    """캐시된 (jwt, public_key) 반환. 없거나 만료면 None.
-    jwt와 public_key를 함께 저장 (취소/크레딧에 public_key 필요).
-    """
+def get_dreamplus_jwt(slack_user_id: str) -> tuple[str, str, int] | None:
+    """캐시된 (jwt, public_key, member_id) 반환. 없거나 만료면 None."""
     with _conn() as conn:
         row = conn.execute(
             "SELECT dreamplus_jwt, dreamplus_jwt_exp FROM users WHERE slack_user_id = ?",
@@ -222,28 +220,27 @@ def get_dreamplus_jwt(slack_user_id: str) -> tuple[str, str] | None:
     if not row or not row["dreamplus_jwt"]:
         return None
     if row["dreamplus_jwt_exp"]:
-        from datetime import timezone
         try:
             exp = datetime.fromisoformat(row["dreamplus_jwt_exp"])
             if datetime.now() >= exp:
                 return None
         except Exception:
             return None
-    # jwt_exp 컬럼에 "jwt|||public_key" 형태로 저장
     stored = row["dreamplus_jwt"]
-    if "|||" in stored:
-        jwt, pub_key = stored.split("|||", 1)
-        return jwt, pub_key
-    return stored, ""
+    parts = stored.split("|||")
+    jwt = parts[0]
+    pub_key = parts[1] if len(parts) > 1 else ""
+    member_id = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 0
+    return jwt, pub_key, member_id
 
 
 def save_dreamplus_jwt(slack_user_id: str, jwt: str, public_key: str,
-                       exp_dt: datetime = None) -> None:
-    """JWT와 공개키를 함께 캐시 저장. exp_dt 기본값 = 6시간 후."""
+                       member_id: int = 0, exp_dt: datetime = None) -> None:
+    """JWT, 공개키, memberId를 함께 캐시 저장. exp_dt 기본값 = 6시간 후."""
     from datetime import timedelta
     if exp_dt is None:
         exp_dt = datetime.now() + timedelta(hours=6)
-    stored = f"{jwt}|||{public_key}"
+    stored = f"{jwt}|||{public_key}|||{member_id}"
     with _conn() as conn:
         conn.execute(
             "UPDATE users SET dreamplus_jwt = ?, dreamplus_jwt_exp = ? WHERE slack_user_id = ?",

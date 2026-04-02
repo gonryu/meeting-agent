@@ -25,8 +25,8 @@ _MODAL_CALLBACK = "dreamplus_settings_modal"
 
 # ── 인증 헬퍼 ─────────────────────────────────────────────────
 
-def _get_session(user_id: str) -> tuple[str, str]:
-    """(jwt, public_key) 반환. 캐시 우선, 만료/없음 시 재로그인.
+def _get_session(user_id: str) -> tuple[str, str, int]:
+    """(jwt, public_key, member_id) 반환. 캐시 우선, 만료/없음 시 재로그인.
     드림플러스 자격증명 미설정 시 ValueError.
     """
     cached = user_store.get_dreamplus_jwt(user_id)
@@ -38,9 +38,9 @@ def _get_session(user_id: str) -> tuple[str, str]:
         raise ValueError("드림플러스 계정이 설정되지 않았습니다. `/드림플러스설정`으로 먼저 설정해주세요.")
 
     email, password = creds
-    jwt, pub_key = dp.login(email, password)
-    user_store.save_dreamplus_jwt(user_id, jwt, pub_key)
-    return jwt, pub_key
+    jwt, pub_key, member_id = dp.login(email, password)
+    user_store.save_dreamplus_jwt(user_id, jwt, pub_key, member_id)
+    return jwt, pub_key, member_id
 
 
 def _post(slack_client, user_id: str, text: str, blocks=None):
@@ -221,7 +221,7 @@ def handle_settings_modal(slack_client, body: dict):
 def book_room(slack_client, user_id: str, text: str):
     """/회의실예약 {자연어} — 가용 회의실 추천 후 선택 버튼 발송"""
     try:
-        jwt, pub_key = _get_session(user_id)
+        jwt, pub_key, member_id = _get_session(user_id)
     except ValueError as e:
         _post(slack_client, user_id, f"⚠️ {e}")
         return
@@ -295,7 +295,7 @@ def confirm_room_booking(slack_client, body: dict):
         return
 
     try:
-        jwt, pub_key = _get_session(user_id)
+        jwt, pub_key, member_id = _get_session(user_id)
         dp.make_reservation(jwt, room_code, start_dt, end_dt, meeting_title)
     except ValueError as e:
         _post(slack_client, user_id, f"⚠️ {e}")
@@ -318,7 +318,7 @@ def confirm_room_booking(slack_client, body: dict):
 def list_reservations(slack_client, user_id: str):
     """/회의실조회 — 이번 달 내 예약 목록"""
     try:
-        jwt, pub_key = _get_session(user_id)
+        jwt, pub_key, member_id = _get_session(user_id)
     except ValueError as e:
         _post(slack_client, user_id, f"⚠️ {e}")
         return
@@ -332,6 +332,10 @@ def list_reservations(slack_client, user_id: str):
     except Exception as e:
         _post(slack_client, user_id, f"❌ 예약 조회 실패: {e}")
         return
+
+    # 내 예약만 필터링 (member_id 기준, 0이면 전체)
+    if member_id:
+        items = [i for i in items if i.get("memberId") == member_id]
 
     # 예약 완료(531)·사용 완료(534) 항목만 표시
     active = [i for i in items if i.get("reservationState") in (531, 534)]
@@ -395,7 +399,7 @@ def confirm_cancel(slack_client, body: dict):
     reservation_id = int(body["actions"][0]["value"])
 
     try:
-        jwt, pub_key = _get_session(user_id)
+        jwt, pub_key, member_id = _get_session(user_id)
         # 환불 정보 먼저 확인
         refund = dp.get_refund_info(jwt, reservation_id)
         refund_pt = refund.get("refund", 0)
@@ -420,7 +424,7 @@ def confirm_cancel(slack_client, body: dict):
 def show_credits(slack_client, user_id: str):
     """/크레딧조회 — 드림플러스 잔여 포인트"""
     try:
-        jwt, pub_key = _get_session(user_id)
+        jwt, pub_key, member_id = _get_session(user_id)
         data = dp.get_credits(jwt, pub_key)
     except ValueError as e:
         _post(slack_client, user_id, f"⚠️ {e}")
@@ -460,7 +464,7 @@ def auto_book_room(slack_client, *, user_id: str, start_dt: datetime,
         return  # 계정 미설정 → 조용히 스킵
 
     try:
-        jwt, pub_key = _get_session(user_id)
+        jwt, pub_key, member_id = _get_session(user_id)
         rooms = dp.get_rooms(jwt)
     except Exception as e:
         log.warning(f"auto_book_room 회의실 조회 실패 (스킵): {e}")
