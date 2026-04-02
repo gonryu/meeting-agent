@@ -214,8 +214,9 @@ def login(email: str, password: str) -> tuple[str, str]:
         raise RuntimeError("jwtToken을 응답에서 찾을 수 없습니다.")
 
     member_id = body["data"].get("id", 0)
-    log.info(f"Dreamplus 로그인 성공: {email} (memberId={member_id})")
-    return jwt, pub_key_b64, member_id
+    company_id = body["data"].get("companyId", 0)
+    log.info(f"Dreamplus 로그인 성공: {email} (memberId={member_id}, companyId={company_id})")
+    return jwt, pub_key_b64, member_id, company_id
 
 
 # ── 회의실 API ────────────────────────────────────────────────
@@ -285,7 +286,9 @@ def get_reservations(jwt: str, date_str: str = None,
             },
             "searchType": "startTime",
         }
-    body = _check(_post("/api2/meetingroom/reservations", payload, jwt=jwt))
+    raw = _post("/api2/meetingroom/reservations", payload, jwt=jwt)
+    log.info(f"[get_reservations] raw={raw}")
+    body = _check(raw)
     return body.get("list") or []
 
 
@@ -301,8 +304,17 @@ def cancel_reservation(jwt: str, public_key_b64: str, reservation_id: int) -> bo
     API: DELETE /api2/meetingroom/reservation
     Body: ek/ed 암호화된 {"id": reservation_id}
     """
+    # 암호화 없이 시도
+    raw = _delete("/api2/meetingroom/reservation", {"id": reservation_id}, jwt=jwt)
+    log.info(f"[cancel_reservation] plain id={reservation_id} raw={raw}")
+    if raw.get("result") is not False:
+        _check(raw)
+        return True
+    # 실패 시 ek/ed 암호화 시도
     encrypted = _encrypt_ek_ed({"id": reservation_id}, public_key_b64)
-    _check(_delete("/api2/meetingroom/reservation", encrypted, jwt=jwt))
+    raw = _delete("/api2/meetingroom/reservation", encrypted, jwt=jwt)
+    log.info(f"[cancel_reservation] encrypted id={reservation_id} raw={raw}")
+    _check(raw)
     return True
 
 
