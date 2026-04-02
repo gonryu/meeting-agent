@@ -187,6 +187,16 @@ def handle_message(event, client):
                 ).start()
                 return
 
+        # 일정 드래프트 스레드 답글 감지 (DM)
+        if thread_ts and user_id:
+            from agents.before import _meeting_drafts
+            draft = _meeting_drafts.get(user_id)
+            if draft and (thread_ts == draft.get("reply_ts") or thread_ts == draft.get("thread_ts")):
+                handled = update_meeting_from_text(client, user_id=user_id, user_message=text,
+                                                   channel=channel, thread_ts=thread_ts)
+                if handled:
+                    return
+
         _route_message(text, client, user_id=user_id)
 
     elif thread_ts and user_id and channel_type != "im":
@@ -253,18 +263,6 @@ def _route_message(text: str, client, user_id: str, channel: str = None, thread_
     params = intent_data.get("params", {})
     log.info(f"인텐트 분류: {intent} / params: {params}")
 
-    # 일정 드래프트 업데이트 — 봇 답글 스레드에 달린 메시지만 허용
-    if intent != "create_meeting" and has_meeting_draft(user_id):
-        from agents.before import _meeting_drafts
-        draft = _meeting_drafts.get(user_id)
-        draft_reply_ts = draft.get("reply_ts") if draft else None
-        draft_thread_ts = draft.get("thread_ts") if draft else None
-        # DM 스레드: thread_ts == reply_ts / 채널 스레드: thread_ts == draft.thread_ts (기존 동작)
-        if thread_ts and draft and (thread_ts == draft_reply_ts or thread_ts == draft_thread_ts):
-            handled = update_meeting_from_text(client, user_id=user_id, user_message=text,
-                                               channel=channel, thread_ts=thread_ts)
-            if handled:
-                return
 
     if intent == "briefing":
         run_briefing(client, user_id=user_id, channel=channel, thread_ts=thread_ts)
