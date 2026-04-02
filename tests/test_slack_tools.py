@@ -7,16 +7,16 @@ from tools.slack_tools import format_time, build_briefing_message
 
 class TestFormatTime:
     def test_afternoon(self):
-        assert format_time("2026-03-24T15:30:00+09:00") == "오후 3:30"
+        assert format_time("2026-03-24T15:30:00+09:00") == "3/24(화) 오후 3:30"
 
     def test_morning(self):
-        assert format_time("2026-03-24T09:05:00+09:00") == "오전 9:05"
+        assert format_time("2026-03-24T09:05:00+09:00") == "3/24(화) 오전 9:05"
 
     def test_noon(self):
-        assert format_time("2026-03-24T12:00:00+09:00") == "오후 12:00"
+        assert format_time("2026-03-24T12:00:00+09:00") == "3/24(화) 오후 12:00"
 
     def test_midnight(self):
-        assert format_time("2026-03-24T00:00:00+09:00") == "오전 0:00"
+        assert format_time("2026-03-24T00:00:00+09:00") == "3/24(화) 오전 0:00"
 
     def test_all_day_event(self):
         """날짜만 있으면 '월/일 종일' 반환"""
@@ -32,7 +32,7 @@ class TestFormatTime:
 
     def test_minute_zero_padding(self):
         """분 두 자리 패딩 (예: :05)"""
-        assert format_time("2026-03-24T14:05:00+09:00") == "오후 2:05"
+        assert format_time("2026-03-24T14:05:00+09:00") == "3/24(화) 오후 2:05"
 
 
 # ── build_briefing_message ────────────────────────────────────
@@ -122,7 +122,7 @@ class TestBuildBriefingMessage:
             service_connections=[],
             previous_context={"trello": [], "emails": emails},
         ))
-        assert "안녕하세요 파트너십" in text
+        assert "Re: 미팅" in text
 
     def test_location_shown(self):
         """미팅 장소 있으면 표시"""

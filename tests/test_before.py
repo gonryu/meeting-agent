@@ -61,7 +61,7 @@ class TestHandleAgendaReply:
             handle_agenda_reply(slack, "ts123", "1. 파트너십 논의\n2. 계약 검토")
 
         mock_cal.update_event_description.assert_called_once_with(
-            _MOCK_CREDS, "event_abc", "[어젠다]\n1. 파트너십 논의\n2. 계약 검토"
+            _MOCK_CREDS, "event_abc", "1. 파트너십 논의\n2. 계약 검토"
         )
 
     def test_registered_thread_deleted_after_update(self):
@@ -180,8 +180,10 @@ class TestRunBriefing:
             mock_drive.get_company_names.return_value = []
             run_briefing(slack, user_id=_TEST_USER_ID)
 
-        slack.chat_postMessage.assert_called_once()
-        assert "없습니다" in slack.chat_postMessage.call_args[1]["text"]
+        # 인트로 메시지 + "미팅 없음" 메시지 = 2회 호출
+        calls = slack.chat_postMessage.call_args_list
+        no_meeting_calls = [c for c in calls if "없습니다" in c[1].get("text", "")]
+        assert len(no_meeting_calls) == 1
 
     def test_returns_thread_ts_list(self):
         """2개 이벤트 → thread_ts 2개 반환"""

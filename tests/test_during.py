@@ -18,11 +18,13 @@ with patch("google.genai.Client"), \
         start_session,
         add_note,
         end_session,
+        finalize_minutes,
         get_minutes_list,
         check_transcripts,
         _active_sessions,
         _completed_notes,
         _processed_events,
+        _pending_minutes,
     )
 
 
@@ -165,13 +167,16 @@ class TestAddNote:
         assert "time" in note
         assert ":" in note["time"]  # HH:MM 형식
 
-    def test_no_session_sends_warning(self):
-        """세션 없으면 경고 메시지"""
+    def test_no_session_auto_starts(self):
+        """세션 없으면 자동으로 세션 시작 후 노트 추가"""
         slack = _slack()
-        add_note(slack, _TEST_USER, "노트 내용")
+        with _mock_store(), patch("agents.during.cal") as mock_cal:
+            mock_cal.get_upcoming_meetings.return_value = []
+            add_note(slack, _TEST_USER, "노트 내용")
 
-        text = slack.chat_postMessage.call_args[1]["text"]
-        assert "세션" in text or "시작" in text
+        assert _TEST_USER in _active_sessions
+        assert len(_active_sessions[_TEST_USER]["notes"]) == 1
+        assert _active_sessions[_TEST_USER]["notes"][0]["text"] == "노트 내용"
 
     def test_empty_note_rejected(self):
         """빈 노트는 거부"""
@@ -200,6 +205,7 @@ class TestEndSession:
         _active_sessions.clear()
         _completed_notes.clear()
         _processed_events.clear()
+        _pending_minutes.clear()
 
     def _init_session(self, notes=None, event_id=None):
         _active_sessions[_TEST_USER] = {
@@ -225,39 +231,36 @@ class TestEndSession:
         assert _TEST_USER not in _active_sessions
 
     def test_session_removed_after_end_with_event(self):
-        """이벤트 있는 세션: 종료 후 _active_sessions에서 삭제, _completed_notes에 저장"""
+        """이벤트 있는 세션: 종료 후 _active_sessions에서 삭제, 백그라운드 스레드 실행"""
         self._init_session(event_id="evt_kakao")
         slack = _slack()
 
         with _mock_store(), \
-             patch("agents.during.threading.Thread"):  # 즉시 폴링 스레드 차단
+             patch("agents.during.threading.Thread") as mock_thread:  # 백그라운드 스레드 차단
             end_session(slack, _TEST_USER)
 
         assert _TEST_USER not in _active_sessions
-        assert "evt_kakao" in _completed_notes
-        assert _completed_notes["evt_kakao"]["user_id"] == _TEST_USER
+        # 백그라운드 스레드가 _generate_from_session_end로 실행됨
+        mock_thread.assert_called_once()
+        call_kwargs = mock_thread.call_args[1]["kwargs"]
+        assert call_kwargs["event_id"] == "evt_kakao"
+        assert call_kwargs["user_id"] == _TEST_USER
 
-    def test_deferred_to_poller_when_event_id_known(self):
-        """event_id 있으면 즉시 LLM 생성 안 하고 _completed_notes에 저장 후 즉시 폴링 트리거"""
+    def test_background_thread_when_event_id_known(self):
+        """event_id 있으면 _generate_from_session_end를 백그라운드 스레드로 실행"""
         self._init_session(event_id="evt123")
         slack = _slack()
 
         with _mock_store(), \
-             patch("agents.during._generate") as mock_gen, \
              patch("agents.during.threading.Thread") as mock_thread:
             end_session(slack, _TEST_USER)
 
-        # LLM 생성 호출 없어야 함 (폴러에 위임)
-        mock_gen.assert_not_called()
-        # 노트가 _completed_notes에 저장됨
-        assert "evt123" in _completed_notes
-        data = _completed_notes["evt123"]
-        assert data["title"] == "카카오 미팅"
-        assert len(data["notes"]) == 2
-        # 즉시 폴링 스레드가 실행됨
+        # 백그라운드 스레드가 실행됨
         mock_thread.assert_called_once()
-        call_kwargs = mock_thread.call_args[1]
-        assert call_kwargs.get("kwargs", {}).get("min_minutes_ago") == 0
+        call_kwargs = mock_thread.call_args[1]["kwargs"]
+        assert call_kwargs["title"] == "카카오 미팅"
+        assert len(call_kwargs["notes"]) == 2
+        assert call_kwargs["event_id"] == "evt123"
 
     def test_deferred_sends_wait_message(self):
         """event_id 있는 경우 트랜스크립트 대기 안내 메시지 발송"""
@@ -272,23 +275,20 @@ class TestEndSession:
         assert "트랜스크립트" in text or "90분" in text
 
     def test_immediate_generation_when_no_event_id(self):
-        """event_id 없으면 즉시 내부용+외부용 생성"""
+        """event_id 없으면 즉시 내부용 생성 후 검토 대기 (draft)"""
         self._init_session(event_id=None)
         slack = _slack()
-        gen_call_count = {"n": 0}
-
-        def fake_generate(prompt):
-            gen_call_count["n"] += 1
-            return f"## 회의 요약\n생성 결과 {gen_call_count['n']}"
 
         with _mock_store(), \
-             patch("agents.during._generate_minutes", side_effect=fake_generate), \
+             patch("agents.during._generate_minutes", return_value="## 회의 요약\n내용"), \
              patch("agents.during.drive") as mock_drive:
-            mock_drive.save_minutes.return_value = "file_id"
+            mock_drive.create_draft_doc.return_value = "draft_doc_id"
             end_session(slack, _TEST_USER)
 
-        # 내부용 + 외부용 = 2회 이상 LLM 호출
-        assert gen_call_count["n"] >= 2
+        # 내부용 회의록이 _pending_minutes에 초안으로 저장됨
+        assert _TEST_USER in _pending_minutes
+        assert _pending_minutes[_TEST_USER]["title"] == "카카오 미팅"
+        assert "## 회의 요약" in _pending_minutes[_TEST_USER]["internal_body"]
 
     def test_no_session_sends_warning(self):
         """세션 없으면 경고 메시지"""
@@ -299,15 +299,21 @@ class TestEndSession:
         assert "세션" in text
 
     def test_internal_and_external_saved_to_drive(self):
-        """내부용·외부용 2개 Drive 저장"""
+        """finalize_minutes에서 내부용·외부용 2개 Drive 저장"""
         self._init_session(event_id=None)
         slack = _slack()
 
         with _mock_store(), \
              patch("agents.during._generate_minutes", return_value="## 회의 요약\n내용"), \
-             patch("agents.during.drive") as mock_drive:
+             patch("agents.during.drive") as mock_drive, \
+             patch("agents.during.after"):
+            mock_drive.create_draft_doc.return_value = "draft_doc_id"
             mock_drive.save_minutes.return_value = "saved_file_id"
+            mock_drive.delete_file.return_value = None
+            # end_session creates the draft
             end_session(slack, _TEST_USER)
+            # finalize_minutes saves to Drive
+            finalize_minutes(slack, _TEST_USER)
 
         # 내부용 + 외부용 = 2번 저장
         assert mock_drive.save_minutes.call_count == 2
@@ -331,15 +337,22 @@ class TestEndSession:
             assert "2026" in fn
 
     def test_internal_and_external_posted_to_slack(self):
-        """내부용·외부용 회의록이 Slack으로 각각 발송됨"""
+        """finalize_minutes에서 내부용·외부용 회의록이 Slack으로 발송됨"""
         self._init_session(event_id=None)
         slack = _slack()
 
         with _mock_store(), \
              patch("agents.during._generate_minutes", return_value="## 회의 요약\n내용 있음"), \
-             patch("agents.during.drive") as mock_drive:
+             patch("agents.during.drive") as mock_drive, \
+             patch("agents.during.after"):
+            mock_drive.create_draft_doc.return_value = "draft_doc_id"
             mock_drive.save_minutes.return_value = "file_id"
+            mock_drive.delete_file.return_value = None
             end_session(slack, _TEST_USER)
+            # Reset call list to only check finalize messages
+            slack.chat_postMessage.reset_mock()
+            slack.chat_postMessage.return_value = {"ts": "111.222"}
+            finalize_minutes(slack, _TEST_USER)
 
         all_texts = " ".join(c[1]["text"] for c in slack.chat_postMessage.call_args_list)
         assert "내부용" in all_texts
@@ -358,33 +371,34 @@ class TestEndSession:
 
         assert _TEST_USER not in _active_sessions
 
-    def test_llm_failure_still_saves_to_drive(self):
-        """LLM 생성 실패해도 Drive 저장 호출됨"""
+    def test_llm_failure_still_creates_draft(self):
+        """LLM 생성 실패해도 fallback 초안이 생성됨"""
         self._init_session(event_id=None)
         slack = _slack()
 
         with _mock_store(), \
              patch("agents.during._generate_minutes", side_effect=Exception("LLM 오류")), \
              patch("agents.during.drive") as mock_drive:
-            mock_drive.save_minutes.return_value = "file_id"
+            mock_drive.create_draft_doc.return_value = "draft_doc_id"
             end_session(slack, _TEST_USER)
 
-        # Drive 저장은 호출되어야 함 (내부용은 저장, 외부용도 시도)
-        assert mock_drive.save_minutes.call_count >= 1
+        # fallback 초안이 _pending_minutes에 저장됨
+        assert _TEST_USER in _pending_minutes
+        assert "생성 실패" in _pending_minutes[_TEST_USER]["internal_body"]
 
-    def test_llm_failure_raw_notes_in_saved_content(self):
-        """LLM 실패 시 저장 내용에 원본 노트 포함"""
+    def test_llm_failure_raw_notes_in_draft_content(self):
+        """LLM 실패 시 초안 내용에 원본 노트 포함"""
         self._init_session(event_id=None)
 
         with _mock_store(), \
              patch("agents.during._generate_minutes", side_effect=Exception("LLM 오류")), \
              patch("agents.during.drive") as mock_drive:
-            mock_drive.save_minutes.return_value = "file_id"
+            mock_drive.create_draft_doc.return_value = "draft_doc_id"
             end_session(_slack(), _TEST_USER)
 
-        # 내부용 저장 내용에 원본 노트 포함
-        all_contents = " ".join(str(c[0][3]) for c in mock_drive.save_minutes.call_args_list)
-        assert "DID 연동 논의" in all_contents
+        # fallback 초안에 원본 노트 내용 포함
+        draft = _pending_minutes[_TEST_USER]
+        assert "DID 연동 논의" in draft["internal_body"] or "DID 연동 논의" in draft["notes_text"]
 
 
 # ── check_transcripts ─────────────────────────────────────────
@@ -394,9 +408,10 @@ class TestCheckTranscripts:
         _active_sessions.clear()
         _completed_notes.clear()
         _processed_events.clear()
+        _pending_minutes.clear()
 
-    def test_transcript_found_generates_minutes(self):
-        """트랜스크립트 발견 시 회의록 생성"""
+    def test_transcript_found_generates_draft(self):
+        """트랜스크립트 발견 시 회의록 초안 생성"""
         slack = _slack()
         meeting = {
             "id": "evt1",
@@ -414,13 +429,14 @@ class TestCheckTranscripts:
              patch("agents.during._generate_minutes", return_value="## 회의 요약\n내용"):
             mock_cal.get_recently_ended_meetings.return_value = [meeting]
             mock_drive.find_meet_transcript.return_value = transcript_file
-            mock_drive.save_minutes.return_value = "file_id"
+            mock_drive.create_draft_doc.return_value = "draft_doc_id"
             mock_docs.read_document.return_value = "트랜스크립트 내용..."
 
             check_transcripts(slack)
 
-        # Drive 저장 호출 (내부용 + 외부용)
-        assert mock_drive.save_minutes.call_count == 2
+        # 내부용 회의록이 _pending_minutes에 초안으로 저장됨
+        assert _TEST_USER in _pending_minutes
+        assert _pending_minutes[_TEST_USER]["title"] == "카카오 미팅"
 
     def test_no_transcript_skipped(self):
         """트랜스크립트 없으면 회의록 생성 안 함"""
@@ -690,6 +706,7 @@ class TestSessionPersistence:
         _active_sessions.clear()
         _completed_notes.clear()
         _processed_events.clear()
+        _pending_minutes.clear()
 
     def test_active_session_saved_to_file(self, isolated_sessions_dir):
         """start_session 호출 시 세션 파일 생성"""
@@ -735,8 +752,8 @@ class TestSessionPersistence:
 
         assert not (isolated_sessions_dir / f"active_{_TEST_USER}.json").exists()
 
-    def test_completed_note_saved_on_end_with_event(self, isolated_sessions_dir):
-        """event_id 있는 세션 종료 시 active 삭제 + completed 파일 생성"""
+    def test_active_file_deleted_on_end_with_event(self, isolated_sessions_dir):
+        """event_id 있는 세션 종료 시 active 파일 삭제 + 백그라운드 스레드 실행"""
         event_id = "evt_persist"
         _active_sessions[_TEST_USER] = {
             "title": "폴러 위임 테스트",
@@ -747,18 +764,16 @@ class TestSessionPersistence:
         during._save_active_session(_TEST_USER)
 
         with _mock_store(), \
-             patch("agents.during.threading.Thread"):  # 즉시 폴링 스레드 차단
+             patch("agents.during.threading.Thread") as mock_thread:  # 백그라운드 스레드 차단
             end_session(_slack(), _TEST_USER)
 
         # active 파일 삭제됨
         assert not (isolated_sessions_dir / f"active_{_TEST_USER}.json").exists()
-        # completed 파일 생성됨
-        completed_file = isolated_sessions_dir / f"completed_{event_id}.json"
-        assert completed_file.exists()
-        data = json.loads(completed_file.read_text(encoding="utf-8"))
-        assert data["title"] == "폴러 위임 테스트"
-        assert len(data["notes"]) == 1
-        assert "stored_at" in data  # datetime이 ISO 문자열로 직렬화됨
+        # 백그라운드 스레드가 올바른 인자로 실행됨
+        mock_thread.assert_called_once()
+        call_kwargs = mock_thread.call_args[1]["kwargs"]
+        assert call_kwargs["title"] == "폴러 위임 테스트"
+        assert len(call_kwargs["notes"]) == 1
 
     def test_completed_note_file_deleted_after_transcript_processing(self, isolated_sessions_dir):
         """폴러가 트랜스크립트 처리 후 completed 파일 삭제"""
