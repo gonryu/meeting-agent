@@ -1,13 +1,12 @@
 # 테스트 가이드
 
-> 최종 갱신: 2026-04-01
-> 총 테스트 수: 149개 (전체 통과) — After Agent, STT, 회의록 검토 단계 테스트 미추가
+> 최종 갱신: 2026-04-02
+> 총 테스트 수: 142개 (전체 통과) — 업체명 자동추출 테스트 제거, 회의록 초안 검토 흐름 반영, Claude Sonnet mock 적용
 
 > ⚠️ 주요 미추가 테스트 항목:
 > - `test_stt.py`: Deepgram API 호출 (mocking), is_audio() MIME 판별
-> - `test_during.py` 추가: `_pending_minutes` 상태, `finalize_minutes()`, `cancel_minutes()`, `handle_minutes_edit_reply()`
-> - `test_during.py` 추가: `/미팅시작` 캘린더 매칭 우선순위 (진행 중 > 30분 내 > 제목)
-> - `test_before.py` 추가: `merge_meeting_prompt()`, `update_meeting_from_text()`
+> - `test_during.py` 추가: `finalize_minutes()`, `cancel_minutes()`, `handle_minutes_edit_reply()`
+> - `test_before.py` 추가: `update_meeting_from_text()`, `_register_briefing_draft()`
 
 ---
 
@@ -47,9 +46,9 @@ pytest tests/ -x
 | `test_drive_minutes.py` | `tools/drive.py` (Minutes/Transcript) | 3 | 8 |
 | `test_oauth.py` | `server/oauth.py` | 2 | 9 |
 | `test_user_store.py` | `store/user_store.py` | 5 | 12 |
-| `test_before.py` | `agents/before.py` | 4 | 20 |
+| `test_before.py` | `agents/before.py` | 3 | 13 |
 | `test_during.py` | `agents/during.py` | 8 | 45 |
-| **합계** | | **30** | **149** |
+| **합계** | | **29** | **142** |
 
 ---
 
@@ -115,16 +114,13 @@ with patch("agents.during.threading.Thread") as mock_thread:
 
 # 스레드가 올바른 인자로 생성되었는지 검증
 mock_thread.assert_called_once()
-call_kwargs = mock_thread.call_args[1]
-assert call_kwargs.get("kwargs", {}).get("min_minutes_ago") == 0
-assert call_kwargs.get("daemon") is True
-# 스레드 start()도 호출됐는지 확인
-mock_thread.return_value.start.assert_called_once()
+call_kwargs = mock_thread.call_args[1]["kwargs"]
+assert call_kwargs["event_id"] == "evt123"
+assert call_kwargs["title"] == "카카오 미팅"
 ```
 
 > **적용 대상 테스트**: `event_id`가 있는 세션 종료 시나리오 — `test_session_removed_after_end_with_event`,
-> `test_deferred_sends_wait_message`, `test_deferred_to_poller_when_event_id_known`,
-> `test_completed_note_saved_on_end_with_event` 등
+> `test_deferred_sends_wait_message`, `test_background_thread_when_event_id_known` 등
 
 ### 3.5 DB 격리 (autouse 픽스처)
 

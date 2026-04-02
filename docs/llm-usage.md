@@ -1,6 +1,6 @@
 # LLM 사용 현황
 
-> 최종 갱신: 2026-04-02 (`help` 인텐트 추가, 미팅 파싱 프롬프트에 location 필드 추가, 프롬프트 외부 템플릿 파일 분리 반영)
+> 최종 갱신: 2026-04-02 | 회의록 생성 Claude Sonnet 전환, 업체명 자동추출 제거, 통합 스레드 업데이트
 
 ---
 
@@ -10,6 +10,7 @@
 |------|------|------|
 | 기본 | Gemini `gemini-2.0-flash` | Google Search 도구 포함 |
 | 폴백 | Claude `claude-haiku-4-5` | Gemini 실패(429 등) 시 자동 전환 |
+| 회의록 생성·수정 전용 | Claude `claude-sonnet-4-5` | `agents/during.py` `_generate_minutes()`, Gemini 폴백 없음 |
 | 명함 OCR 전용 | Claude `claude-haiku-4-5` (Vision) | `agents/card.py` 단독 사용, Gemini 미사용 |
 
 ---
@@ -20,6 +21,7 @@
 |------|----------|------|------|
 | `_search(prompt)` | Before | Gemini + GoogleSearch / Claude + web_search | 웹 검색이 필요한 경우 |
 | `_generate(prompt)` | Before, During, After | Gemini / Claude (검색 없음) | 텍스트 생성·분석만 필요한 경우 |
+| `_generate_minutes(prompt)` | During | Claude Sonnet 직접 호출 | 회의록 생성·수정 전용 (Gemini 폴백 없음) |
 | `ocr_business_card(image_bytes)` | Card | Claude Haiku Vision (직접 호출) | 명함 이미지 OCR + 구조화 |
 
 > **STT (음성→텍스트)**: LLM 미사용. Deepgram REST API (`nova-2`, `tools/stt.py`) 별도 처리.
@@ -153,25 +155,10 @@ JSON 형식으로만 답변 (다른 텍스트 없이):
 
 ---
 
-### 3.5 업체명 추출
+### ~~3.5 업체명 추출~~ (제거됨)
 
-- **위치**: `agents/before.py` → `_extract_company_with_llm()`
-- **함수**: `_generate`
-- **프롬프트**: 인라인 정의
-
-```
-캘린더 이벤트 제목에서 외부 업체명만 추출해줘.
-
-제목: "{summary}"
-
-규칙:
-- 외부 업체명이 있으면 그 이름만 반환 (예: 삼성전자, 카카오, 네이버)
-- 사내 일정(팀 회의, 스탠드업, 외근, 점심, 사무실 등)이면 null 반환
-- 불확실하면 null 반환
-- 업체명 또는 null 만 반환, 설명 없이
-```
-
-응답 검증: 30자 초과 또는 `"null"` → `None` 반환
+> 2026-04-02: `_extract_company_with_llm()`, `_extract_company_name()`, `_get_internal_products_from_knowledge()` 함수 제거.
+> 업체명은 `extendedProperties.private.company`로만 식별 (일정 생성 시 사용자가 명시하거나 스레드에서 설정).
 
 ---
 
@@ -211,7 +198,7 @@ JSON 형식으로만 답변 (다른 텍스트 없이):
 ### 4.1 내부용 회의록 생성 (1차 호출)
 
 - **위치**: `agents/during.py` → `_generate_and_post_minutes()`
-- **함수**: `_generate`
+- **함수**: `_generate_minutes` (Claude `claude-sonnet-4-5` 직접 호출)
 - **프롬프트**: `prompts/briefing.py` → `minutes_internal_prompt(meeting_title, meeting_date, attendees, transcript, notes_text)`
 - **입력**: 트랜스크립트 (있으면) + 수동 노트 (있으면) 조합
 
@@ -244,7 +231,7 @@ JSON 형식으로만 답변 (다른 텍스트 없이):
 ### 4.2 외부용 회의록 생성 (2차 호출)
 
 - **위치**: `agents/during.py` → `finalize_minutes()` — `'저장 및 완료'` 확정 후 생성
-- **함수**: `_generate`
+- **함수**: `_generate_minutes` (Claude `claude-sonnet-4-5` 직접 호출)
 - **프롬프트**: `prompts/briefing.py` → `minutes_external_prompt(meeting_title, meeting_date, attendees, internal_minutes)`
 - **입력**: 최종 확정된 내부용 회의록 전문 (직접 편집 내용 반영 후)
 
@@ -275,7 +262,7 @@ JSON 형식으로만 답변 (다른 텍스트 없이):
 ### 4.3 회의록 수정 요청 재생성 (검토 단계)
 
 - **위치**: `agents/during.py` → `handle_minutes_edit_reply()`
-- **함수**: `_generate` (1회 — 내부용만)
+- **함수**: `_generate_minutes` (Claude Sonnet, 1회 — 내부용만)
 - **트리거**: `[✏️ 수정 요청]` 버튼 클릭 후 스레드 답글
 
 ```
@@ -440,7 +427,7 @@ JSON으로만 응답해줘:
 | `service_connection.md` | `service_connection_prompt()` | `{{knowledge}}`, `{{company_info}}` |
 | `briefing_summary.md` | `briefing_summary_prompt()` | `{{company_name}}`, `{{company_news}}`, `{{person_info}}`, `{{service_connections}}`, `{{email_context}}` |
 
-인라인 프롬프트로 유지되는 함수: `parse_meeting_prompt`, `merge_meeting_prompt`, `update_knowledge_prompt`, `extract_action_items_prompt`, `extract_company_prompt`
+인라인 프롬프트로 유지되는 함수: `parse_meeting_prompt`, `merge_meeting_prompt`, `update_knowledge_prompt`, `extract_action_items_prompt`
 
 ---
 

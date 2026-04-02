@@ -1,6 +1,6 @@
 # During 에이전트 설계 문서
 
-> 최종 갱신: 2026-04-02 | After Agent 트리거 시점 명확화 (finalize_minutes → trigger_after_meeting, attendees_raw 포함)
+> 최종 갱신: 2026-04-02 | 회의록 생성에 Claude Sonnet 사용, After Agent 트리거 시점 명확화
 
 ---
 
@@ -9,7 +9,7 @@
 During 에이전트는 미팅 진행 중 회의록을 자동 수집 또는 수동으로 작성하고, 종료 후 LLM으로 구조화된 회의록을 생성합니다.
 
 - **파일 경로**: `agents/during.py`
-- **LLM**: Gemini `gemini-2.0-flash` (우선) → Claude `claude-haiku-4-5` (폴백)
+- **LLM**: 회의록 생성·수정은 Claude `claude-sonnet-4-5` 직접 호출 (`_generate_minutes`), 기타는 Gemini `gemini-2.0-flash` → Claude `claude-haiku-4-5` 폴백
 - **STT**: Deepgram REST API (`nova-2` 모델, `tools/stt.py`)
 - **입력 방식**: Google Meet 트랜스크립트 자동 수집 (방식 A) + 수동 Slack 노트 (방식 B) + 음성 파일 STT (방식 C)
   - 방식 A·B는 독립적으로 동작하며, 동일 미팅이면 **결합하여** 회의록 생성
