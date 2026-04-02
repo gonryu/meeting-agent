@@ -333,14 +333,16 @@ def list_reservations(slack_client, user_id: str):
         _post(slack_client, user_id, f"❌ 예약 조회 실패: {e}")
         return
 
-    # 내 예약만 필터링 (member_id 기준, 0이면 전체)
-    if member_id:
-        items = [i for i in items if i.get("memberId") == member_id]
+    # 내 예약만 필터링
+    if not member_id:
+        _post(slack_client, user_id, "⚠️ 사용자 정보를 확인할 수 없습니다. 잠시 후 다시 시도해주세요.")
+        return
+    items = [i for i in items if i.get("memberId") == member_id]
 
     # 예약 완료(531) 항목만 표시 (사용완료 534 제외)
     active = [i for i in items if i.get("reservationState") == 531]
     if not active:
-        _post(slack_client, user_id, "📋 이번 달 예약 내역이 없습니다.")
+        _post(slack_client, user_id, "📋 예약된 회의실이 없습니다.")
         return
 
     _STATES = {531: "예약완료", 532: "취소", 534: "사용완료"}
