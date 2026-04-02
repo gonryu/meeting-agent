@@ -79,9 +79,9 @@ _pending_agenda: dict[str, list] = _load_pending_agenda()
 
 
 def _post(slack_client, *, user_id: str, channel=None, thread_ts=None,
-          text=None, blocks=None) -> dict:
+          text=None, blocks=None, unfurl_links=False) -> dict:
     """channel 기본값을 user_id(DM)로 적용한 chat_postMessage 헬퍼"""
-    kwargs = {"channel": channel or user_id}
+    kwargs = {"channel": channel or user_id, "unfurl_links": unfurl_links}
     if thread_ts:
         kwargs["thread_ts"] = thread_ts
     if blocks is not None:
