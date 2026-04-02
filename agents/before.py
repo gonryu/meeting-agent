@@ -1111,10 +1111,11 @@ def _create_calendar_event(slack_client, user_id: str, info: dict, company: str 
         msg = f"✅ 미팅이 생성되었습니다.\n*{info.get('title', '미팅')}* — {time_str}\n참석자: {attendee_display}"
         if company:
             msg += f"\n업체: {company}"
-        msg += "\n_제목, 참석자, 어젠다를 추가로 알려주시면 업데이트해드릴게요._"
-        _post(slack_client, user_id=user_id, channel=channel, thread_ts=thread_ts, text=msg)
+        msg += "\n_이 메시지에 스레드 답글로 제목, 참석자, 어젠다를 알려주시면 업데이트해드릴게요._"
+        resp = _post(slack_client, user_id=user_id, channel=channel, thread_ts=thread_ts, text=msg)
+        reply_ts = resp.get("ts") if resp else None
 
-        # 드래프트 저장 (후속 메시지로 업데이트 가능)
+        # 드래프트 저장 — reply_ts 스레드 답글만 업데이트 허용
         _meeting_drafts[user_id] = {
             "info": dict(info),
             "company": company,
@@ -1122,6 +1123,7 @@ def _create_calendar_event(slack_client, user_id: str, info: dict, company: str 
             "attendee_emails": list(attendee_emails),
             "channel": channel,
             "thread_ts": thread_ts,
+            "reply_ts": reply_ts,
             "created_at": datetime.now().isoformat(),
         }
 
