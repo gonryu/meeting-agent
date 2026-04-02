@@ -329,16 +329,20 @@ def _route_message(text: str, client, user_id: str, channel: str = None, thread_
         update_company_knowledge(client, user_id=user_id)
 
     elif intent == "dreamplus_book":
-        dreamplus_agent.book_room(client, user_id=user_id, text=params.get("text", text))
+        dreamplus_agent.book_room(client, user_id=user_id, text=params.get("text", text),
+                                  channel=channel, thread_ts=thread_ts)
 
     elif intent == "dreamplus_list":
-        dreamplus_agent.list_reservations(client, user_id=user_id)
+        dreamplus_agent.list_reservations(client, user_id=user_id,
+                                          channel=channel, thread_ts=thread_ts)
 
     elif intent == "dreamplus_cancel":
-        dreamplus_agent.cancel_room(client, user_id=user_id, text=params.get("text", text))
+        dreamplus_agent.cancel_room(client, user_id=user_id, text=params.get("text", text),
+                                    channel=channel, thread_ts=thread_ts)
 
     elif intent == "dreamplus_credits":
-        dreamplus_agent.show_credits(client, user_id=user_id)
+        dreamplus_agent.show_credits(client, user_id=user_id,
+                                     channel=channel, thread_ts=thread_ts)
 
     elif intent == "dreamplus_settings":
         # 자연어로 설정 요청 시 — trigger_id가 없으므로 안내 메시지

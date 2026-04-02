@@ -43,10 +43,13 @@ def _get_session(user_id: str) -> tuple[str, str, int]:
     return jwt, pub_key, member_id
 
 
-def _post(slack_client, user_id: str, text: str, blocks=None):
-    kwargs = {"channel": user_id, "text": text}
+def _post(slack_client, user_id: str, text: str, blocks=None,
+          channel: str = None, thread_ts: str = None):
+    kwargs = {"channel": channel or user_id, "text": text}
     if blocks:
         kwargs["blocks"] = blocks
+    if thread_ts:
+        kwargs["thread_ts"] = thread_ts
     slack_client.chat_postMessage(**kwargs)
 
 
@@ -263,19 +266,21 @@ def handle_settings_modal(slack_client, body: dict):
 
 # ── /회의실예약 ───────────────────────────────────────────────
 
-def book_room(slack_client, user_id: str, text: str):
+def book_room(slack_client, user_id: str, text: str,
+              channel: str = None, thread_ts: str = None):
     """/회의실예약 {자연어} — 가용 회의실 추천 후 선택 버튼 발송"""
     try:
         jwt, pub_key, member_id = _get_session(user_id)
     except ValueError as e:
-        _post(slack_client, user_id, f"⚠️ {e}")
+        _post(slack_client, user_id, f"⚠️ {e}", channel=channel, thread_ts=thread_ts)
         return
 
     result = _parse_datetime_range(text)
     if not result:
         _post(slack_client, user_id,
               "⚠️ 시간을 인식하지 못했습니다.\n"
-              "예: `내일 오후 2시~3시 4명`, `오늘 14시 2시간 8층 6인실`")
+              "예: `내일 오후 2시~3시 4명`, `오늘 14시 2시간 8층 6인실`",
+              channel=channel, thread_ts=thread_ts)
         return
     start_dt, end_dt = result
     attendee_count = _parse_attendee_count(text)
@@ -286,10 +291,12 @@ def book_room(slack_client, user_id: str, text: str):
         rooms = dp.get_rooms(jwt)
     except dp.TokenExpiredError:
         user_store.save_dreamplus_jwt(user_id, "", "")
-        _post(slack_client, user_id, "⚠️ 세션이 만료되었습니다. 다시 시도해주세요.")
+        _post(slack_client, user_id, "⚠️ 세션이 만료되었습니다. 다시 시도해주세요.",
+              channel=channel, thread_ts=thread_ts)
         return
     except Exception as e:
-        _post(slack_client, user_id, f"❌ 회의실 목록 조회 실패: {e}")
+        _post(slack_client, user_id, f"❌ 회의실 목록 조회 실패: {e}",
+              channel=channel, thread_ts=thread_ts)
         return
 
     recommended = _recommend_rooms(rooms, attendee_count, start_dt, end_dt,
@@ -297,7 +304,8 @@ def book_room(slack_client, user_id: str, text: str):
                                    preferred_capacity=preferred_capacity)
     if not recommended:
         _post(slack_client, user_id,
-              f"😔 {attendee_count}인 이상 수용 가능한 회의실을 찾지 못했습니다.")
+              f"😔 {attendee_count}인 이상 수용 가능한 회의실을 찾지 못했습니다.",
+              channel=channel, thread_ts=thread_ts)
         return
 
     date_str = start_dt.strftime("%m월 %d일")
@@ -333,7 +341,8 @@ def book_room(slack_client, user_id: str, text: str):
         }],
     })
     _post(slack_client, user_id,
-          f"드림플러스 회의실 추천 ({date_str})", blocks=blocks)
+          f"드림플러스 회의실 추천 ({date_str})", blocks=blocks,
+          channel=channel, thread_ts=thread_ts)
 
 
 def confirm_room_booking(slack_client, body: dict):
@@ -372,34 +381,39 @@ def confirm_room_booking(slack_client, body: dict):
 
 # ── /회의실조회 ───────────────────────────────────────────────
 
-def list_reservations(slack_client, user_id: str):
+def list_reservations(slack_client, user_id: str,
+                      channel: str = None, thread_ts: str = None):
     """/회의실조회 — 이번 달 내 예약 목록"""
     try:
         jwt, pub_key, member_id = _get_session(user_id)
     except ValueError as e:
-        _post(slack_client, user_id, f"⚠️ {e}")
+        _post(slack_client, user_id, f"⚠️ {e}", channel=channel, thread_ts=thread_ts)
         return
 
     try:
         items = dp.get_reservations(jwt)
     except dp.TokenExpiredError:
         user_store.save_dreamplus_jwt(user_id, "", "")
-        _post(slack_client, user_id, "⚠️ 세션이 만료되었습니다. 다시 시도해주세요.")
+        _post(slack_client, user_id, "⚠️ 세션이 만료되었습니다. 다시 시도해주세요.",
+              channel=channel, thread_ts=thread_ts)
         return
     except Exception as e:
-        _post(slack_client, user_id, f"❌ 예약 조회 실패: {e}")
+        _post(slack_client, user_id, f"❌ 예약 조회 실패: {e}",
+              channel=channel, thread_ts=thread_ts)
         return
 
     # 내 예약만 필터링
     if not member_id:
-        _post(slack_client, user_id, "⚠️ 사용자 정보를 확인할 수 없습니다. 잠시 후 다시 시도해주세요.")
+        _post(slack_client, user_id, "⚠️ 사용자 정보를 확인할 수 없습니다. 잠시 후 다시 시도해주세요.",
+              channel=channel, thread_ts=thread_ts)
         return
     items = [i for i in items if i.get("memberId") == member_id]
 
     # 예약 완료(531) 항목만 표시 (사용완료 534 제외)
     active = [i for i in items if i.get("reservationState") == 531]
     if not active:
-        _post(slack_client, user_id, "📋 예약된 회의실이 없습니다.")
+        _post(slack_client, user_id, "📋 예약된 회의실이 없습니다.",
+              channel=channel, thread_ts=thread_ts)
         return
 
     _STATES = {531: "예약완료", 532: "취소", 534: "사용완료"}
@@ -442,7 +456,8 @@ def list_reservations(slack_client, user_id: str):
             section["accessory"] = cancel_btn
         blocks.append(section)
 
-    _post(slack_client, user_id, "드림플러스 예약 내역", blocks=blocks)
+    _post(slack_client, user_id, "드림플러스 예약 내역", blocks=blocks,
+          channel=channel, thread_ts=thread_ts)
 
 
 # ── 다음 회의실 추천 ─────────────────────────────────────────
@@ -547,9 +562,10 @@ def next_rooms(slack_client, body: dict):
 
 # ── /회의실취소 ───────────────────────────────────────────────
 
-def cancel_room(slack_client, user_id: str, text: str):
+def cancel_room(slack_client, user_id: str, text: str,
+                channel: str = None, thread_ts: str = None):
     """/회의실취소 — 예약 목록 표시 후 선택 취소 (버튼은 list_reservations에서 처리)"""
-    list_reservations(slack_client, user_id)
+    list_reservations(slack_client, user_id, channel=channel, thread_ts=thread_ts)
 
 
 def confirm_cancel(slack_client, body: dict):
@@ -580,35 +596,40 @@ def confirm_cancel(slack_client, body: dict):
 
 # ── /크레딧조회 ───────────────────────────────────────────────
 
-def show_credits(slack_client, user_id: str):
+def show_credits(slack_client, user_id: str,
+                 channel: str = None, thread_ts: str = None):
     """/크레딧조회 — 드림플러스 잔여 포인트"""
     try:
         jwt, pub_key, member_id = _get_session(user_id)
         data = dp.get_credits(jwt, pub_key)
     except ValueError as e:
-        _post(slack_client, user_id, f"⚠️ {e}")
+        _post(slack_client, user_id, f"⚠️ {e}", channel=channel, thread_ts=thread_ts)
         return
     except dp.TokenExpiredError:
         user_store.save_dreamplus_jwt(user_id, "", "")
-        _post(slack_client, user_id, "⚠️ 세션이 만료되었습니다. 다시 시도해주세요.")
+        _post(slack_client, user_id, "⚠️ 세션이 만료되었습니다. 다시 시도해주세요.",
+              channel=channel, thread_ts=thread_ts)
         return
     except RuntimeError as e:
         msg = str(e)
         if "시스템 오류" in msg:
             _post(slack_client, user_id,
                   "⚠️ 드림플러스 포인트 조회 API가 현재 지원되지 않습니다.\n"
-                  "잔여 포인트는 드림플러스 앱 또는 웹사이트에서 직접 확인해주세요.")
+                  "잔여 포인트는 드림플러스 앱 또는 웹사이트에서 직접 확인해주세요.",
+                  channel=channel, thread_ts=thread_ts)
         else:
-            _post(slack_client, user_id, f"❌ 크레딧 조회 실패: {msg}")
+            _post(slack_client, user_id, f"❌ 크레딧 조회 실패: {msg}",
+                  channel=channel, thread_ts=thread_ts)
         return
     except Exception as e:
-        _post(slack_client, user_id, f"❌ 크레딧 조회 실패: {e}")
+        _post(slack_client, user_id, f"❌ 크레딧 조회 실패: {e}",
+              channel=channel, thread_ts=thread_ts)
         return
 
-    # 응답 구조에 따라 포인트 필드 탐색
     balance = (data.get("balance") or data.get("point") or
                data.get("totalPoint") or data.get("remainPoint") or 0)
-    _post(slack_client, user_id, f"💳 드림플러스 잔여 포인트: *{balance:,} pt*")
+    _post(slack_client, user_id, f"💳 드림플러스 잔여 포인트: *{balance:,} pt*",
+          channel=channel, thread_ts=thread_ts)
 
 
 # ── 미팅 생성 연동 (auto_book_room) ──────────────────────────
