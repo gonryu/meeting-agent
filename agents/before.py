@@ -1,6 +1,4 @@
 """Before 에이전트 — 미팅 준비 오케스트레이터"""
-import functools
-import hashlib
 import json
 import os
 import re
@@ -443,6 +441,7 @@ def run_briefing(slack_client, user_id: str, event: dict = None,
     브리핑 실행. event가 None이면 오늘 캘린더 전체 조회.
     Returns: 발송된 메시지 ts 목록
     """
+    _cleanup_old_drafts()
     creds = user_store.get_credentials(user_id)
     user = user_store.get_user(user_id)
     contacts_folder_id = user["contacts_folder_id"]
@@ -478,23 +477,6 @@ def run_briefing(slack_client, user_id: str, event: dict = None,
               text="📅 앞으로 24시간 내 미팅이 없습니다.")
         return []
 
-    try:
-        company_names = drive.get_company_names(creds, contacts_folder_id)
-    except Exception:
-        company_names = []
-
-    # company_knowledge.md에서 자사 제품/서비스명 추출 (LRU 캐시 적용)
-    internal_products: frozenset = frozenset()
-    try:
-        knowledge_file_id = user.get("knowledge_file_id")
-        if knowledge_file_id:
-            knowledge_text = drive.get_company_knowledge(creds, knowledge_file_id)
-            if knowledge_text:
-                khash = hashlib.md5(knowledge_text.encode()).hexdigest()
-                internal_products = _get_internal_products_from_knowledge(khash, knowledge_text)
-    except Exception as e:
-        log.warning(f"내부 제품명 사전 로드 실패: {e}")
-
     sent_threads = []
     research_queue: list[tuple[dict, str]] = []  # (meeting, company_name)
 
@@ -502,15 +484,10 @@ def run_briefing(slack_client, user_id: str, event: dict = None,
     for ev in events:
         meeting = cal.parse_event(ev)
 
-        # 미팅 생성 시 LLM이 추출한 company가 extendedProperties에 주입된 경우 우선 사용
-        injected_company = (
+        # extendedProperties에 명시된 업체명만 사용 (자동 추출 없음)
+        company_name = (
             ev.get("extendedProperties", {}).get("private", {}).get("company")
         )
-        if injected_company:
-            company_name = injected_company
-            log.info(f"extendedProperties에서 company 사용: {company_name}")
-        else:
-            company_name = _extract_company_name(meeting, company_names, internal_products)
 
         if company_name:
             ts = _send_briefing(slack_client, user_id, meeting, company_name,
@@ -533,121 +510,6 @@ def run_briefing(slack_client, user_id: str, event: dict = None,
 
     user_store.update_last_active(user_id)
     return sent_threads
-
-
-_PUBLIC_EMAIL_DOMAINS = {
-    "gmail.com", "googlemail.com",
-    "naver.com", "daum.net", "hanmail.net",
-    "yahoo.com", "yahoo.co.kr", "hotmail.com", "outlook.com",
-    "icloud.com", "me.com", "mac.com",
-    "nate.com", "empas.com",
-}
-
-@functools.lru_cache(maxsize=8)
-def _get_internal_products_from_knowledge(knowledge_hash: str, knowledge_text: str) -> frozenset:
-    """company_knowledge.md에서 자사 제품/서비스/기술명 추출 (내용 해시 기준 LRU 캐시).
-
-    knowledge_hash는 캐시 키로만 사용되며, 실제 추출은 knowledge_text로 수행.
-    """
-    prompt = f"""아래는 우리 회사의 서비스/제품 소개 문서입니다.
-이 문서에서 언급된 우리 회사의 **제품명, 서비스명, 브랜드명, 기술명**을 모두 추출해줘.
-
-문서:
-{knowledge_text[:2000]}
-
-규칙:
-- 자사 제품/서비스/기술 이름만 추출 (예: ParaSta, ParametaChain 등)
-- 한 줄에 하나씩 이름만 반환
-- 없으면 "없음" 반환"""
-    try:
-        result = _generate(prompt).strip()
-        names = {
-            line.strip().lower()
-            for line in result.splitlines()
-            if line.strip() and line.strip().lower() not in ("없음", "none", "")
-        }
-        log.info(f"내부 제품/서비스명 추출: {names}")
-        return frozenset(names)
-    except Exception as e:
-        log.warning(f"내부 제품명 추출 실패: {e}")
-        return frozenset()
-
-
-def _extract_company_name(meeting: dict, known_companies: list[str] = None,
-                          internal_products: frozenset = frozenset()) -> str | None:
-    """업체명 추출 (참석자 도메인 → Contacts 제목 매칭 → Gemini NLP)
-
-    1순위: 외부 도메인 참석자 확인 (외부 미팅 여부 판별)
-      - 단, 제목에서 Contacts 업체명이 발견되면 그 이름을 우선 반환 (한국어 정식명 사용)
-    2순위: 제목 ∋ known_companies
-    3순위: LLM 추출
-    """
-    summary = meeting.get("summary", "")
-    is_external = False
-
-    for attendee in meeting.get("attendees", []):
-        email = attendee.get("email", "")
-        domain = email.split("@")[-1] if "@" in email else ""
-        if domain and domain not in cal.INTERNAL_DOMAINS and domain not in _PUBLIC_EMAIL_DOMAINS:
-            is_external = True
-            break
-
-    if is_external:
-        # 제목에 Contacts 업체명이 있으면 정식명(한국어) 우선 반환
-        if known_companies:
-            summary_lower = summary.lower()
-            for company in known_companies:
-                if company.lower() in summary_lower:
-                    return company
-        # 없으면 도메인 기반 이름 반환
-        for attendee in meeting.get("attendees", []):
-            email = attendee.get("email", "")
-            domain = email.split("@")[-1] if "@" in email else ""
-            if domain and domain not in cal.INTERNAL_DOMAINS and domain not in _PUBLIC_EMAIL_DOMAINS:
-                company = domain.split(".")[0]
-                if company and company.lower() not in internal_products:
-                    return company
-
-    if known_companies:
-        summary_lower = summary.lower()
-        for company in known_companies:
-            if company.lower() in summary_lower:
-                return company
-
-    if summary:
-        return _extract_company_with_llm(summary, internal_products)
-
-    return None
-
-
-def _extract_company_with_llm(summary: str, internal_products: frozenset = frozenset()) -> str | None:
-    """LLM으로 미팅 제목에서 외부 업체명 추출"""
-    exclude_hint = ""
-    if internal_products:
-        names = ", ".join(sorted(internal_products))
-        exclude_hint = f"\n- 자사 제품/서비스/기술명({names})은 업체명이 아니므로 null 반환"
-
-    prompt = f"""캘린더 이벤트 제목에서 외부 업체명만 추출해줘.
-
-제목: "{summary}"
-
-규칙:
-- 외부 업체명이 있으면 그 이름만 반환 (예: 삼성전자, 카카오, 네이버)
-- 사내 일정(팀 회의, 스탠드업, 외근, 점심, 사무실 등)이면 null 반환{exclude_hint}
-- 불확실하면 null 반환
-- 업체명 또는 null 만 반환, 설명 없이"""
-    try:
-        result = _generate(prompt).strip()
-        if result.lower() in ("null", "없음", "none", ""):
-            return None
-        if len(result) > 30 or "\n" in result:
-            return None
-        # 자사 제품/서비스명이면 null 처리
-        if result.lower() in internal_products:
-            return None
-        return result
-    except Exception:
-        return None
 
 
 def _extract_company_content_sections(company_content: str) -> tuple[list[str], list[str], list[str], list[dict]]:
@@ -843,6 +705,52 @@ def _run_all_briefing_research(
         _run_briefing_research(slack_client, user_id, meeting, company_name, channel, thread_ts)
 
 
+def _meeting_to_info(meeting: dict, company_name: str = None) -> dict:
+    """Calendar 이벤트를 merge_meeting_prompt가 기대하는 info dict로 변환"""
+    start_str = meeting.get("start_time", "")
+    end_str = meeting.get("end_time", "")
+    try:
+        start_dt = datetime.fromisoformat(start_str)
+        date_str = start_dt.strftime("%Y-%m-%d")
+        time_str = start_dt.strftime("%H:%M")
+    except Exception:
+        date_str, time_str = "", ""
+    try:
+        duration = int((datetime.fromisoformat(end_str) - datetime.fromisoformat(start_str)).total_seconds() / 60)
+    except Exception:
+        duration = 60
+    attendees = meeting.get("attendees", [])
+    return {
+        "date": date_str,
+        "time": time_str,
+        "duration_minutes": duration,
+        "participants": [a.get("name", "") for a in attendees if a.get("name")],
+        "participant_emails": {a["name"]: a["email"] for a in attendees if a.get("name") and a.get("email")},
+        "company": company_name,
+        "title": meeting.get("summary", ""),
+        "agenda": meeting.get("description", ""),
+        "location": meeting.get("location", ""),
+    }
+
+
+def _register_briefing_draft(msg_ts: str, user_id: str, meeting: dict,
+                              company_name: str = None, channel: str = None):
+    """브리핑 스레드를 _meeting_drafts에 등록하여 스레드 답글로 일정 수정 가능하게 함"""
+    attendees = meeting.get("attendees", [])
+    _meeting_drafts[msg_ts] = {
+        "user_id": user_id,
+        "event_id": meeting["id"],
+        "info": _meeting_to_info(meeting, company_name),
+        "company": company_name,
+        "attendee_emails": [a["email"] for a in attendees if a.get("email")],
+        "channel": channel,
+        "reply_ts": None,
+        "source": "briefing",
+        "created_at": datetime.now().isoformat(),
+    }
+    _save_meeting_drafts()
+
+
 def _send_briefing(slack_client, user_id: str, meeting: dict, company_name: str,
                    channel: str = None, thread_ts: str = None) -> str | None:
     """미팅 기본 정보 블록만 즉시 발송. Returns: 발송된 메시지 ts
@@ -859,6 +767,7 @@ def _send_briefing(slack_client, user_id: str, meeting: dict, company_name: str,
         msg_ts = resp["ts"]
         _pending_agenda[msg_ts] = [meeting["id"], user_id]
         _save_pending_agenda(_pending_agenda)
+        _register_briefing_draft(msg_ts, user_id, meeting, company_name, channel)
         return msg_ts
 
     except Exception as e:
@@ -896,6 +805,7 @@ def _send_internal_briefing(slack_client, user_id: str, meeting: dict,
         msg_ts = resp["ts"]
         _pending_agenda[msg_ts] = [meeting["id"], user_id]
         _save_pending_agenda(_pending_agenda)
+        _register_briefing_draft(msg_ts, user_id, meeting, None, channel)
         return msg_ts
     except Exception as e:
         _post(slack_client, user_id=user_id, channel=channel, thread_ts=thread_ts,
@@ -933,11 +843,9 @@ def handle_agenda_reply(slack_client, thread_ts: str, text: str):
 # ── 자연어 미팅 생성 ─────────────────────────────────────────
 
 def create_meeting_from_text(slack_client, user_id: str, user_message: str,
-                             channel: str = None, thread_ts: str = None):
+                             channel: str = None, thread_ts: str = None,
+                             user_msg_ts: str = None):
     """자연어 요청으로 Calendar 미팅 생성"""
-    # 새 일정 생성 시 기존 드래프트 초기화
-    _meeting_drafts.pop(user_id, None)
-
     try:
         raw = _generate(parse_meeting_prompt(user_message))
     except Exception as e:
@@ -1008,7 +916,8 @@ def create_meeting_from_text(slack_client, user_id: str, user_message: str,
         _post(slack_client, user_id=user_id, channel=channel, thread_ts=thread_ts,
               text=f"⚠️ *{', '.join(missing_names)}*의 이메일을 찾지 못했습니다. 해당 참석자 없이 일정을 생성합니다.")
 
-    _create_calendar_event(slack_client, user_id, info, company, attendee_emails, channel, thread_ts)
+    _create_calendar_event(slack_client, user_id, info, company, attendee_emails,
+                           channel, thread_ts, user_msg_ts=user_msg_ts)
 
 
 def _find_email_candidates(user_id: str, name: str, slack_client) -> list[str]:
@@ -1084,9 +993,74 @@ def _find_email(user_id: str, name: str, slack_client) -> str | None:
 _pending_meetings: dict[str, dict] = {}
 
 # ── 일정 드래프트 상태 ────────────────────────────────────────
-# user_id → {info, company, event_id, channel, thread_ts, created_at}
-_meeting_drafts: dict[str, dict] = {}
-_DRAFT_TTL_SECONDS = 7200  # 2시간 후 만료
+# thread_ts → {user_id, info, company, event_id, channel, reply_ts, source, created_at, ...}
+_MEETING_DRAFTS_FILE = os.path.join(os.path.dirname(__file__), "..", "data", "meeting_drafts.json")
+
+
+def _load_meeting_drafts() -> dict:
+    try:
+        with open(_MEETING_DRAFTS_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+
+def _save_meeting_drafts():
+    try:
+        os.makedirs(os.path.dirname(_MEETING_DRAFTS_FILE), exist_ok=True)
+        with open(_MEETING_DRAFTS_FILE, "w", encoding="utf-8") as f:
+            json.dump(_meeting_drafts, f, ensure_ascii=False)
+    except Exception as e:
+        log.warning(f"meeting_drafts 저장 실패: {e}")
+
+
+_meeting_drafts: dict[str, dict] = _load_meeting_drafts()
+
+
+def _migrate_pending_agenda():
+    """기존 _pending_agenda 항목을 _meeting_drafts로 마이그레이션 (1회성)"""
+    migrated = False
+    for ts, entry in list(_pending_agenda.items()):
+        if ts not in _meeting_drafts and isinstance(entry, list) and len(entry) == 2:
+            event_id, user_id = entry
+            _meeting_drafts[ts] = {
+                "user_id": user_id,
+                "event_id": event_id,
+                "info": {"title": "", "agenda": "", "date": "", "time": "",
+                         "duration_minutes": 60, "participants": [],
+                         "participant_emails": {}, "company": None, "location": ""},
+                "company": None,
+                "attendee_emails": [],
+                "channel": None,
+                "reply_ts": None,
+                "source": "briefing",
+                "created_at": datetime.now().isoformat(),
+            }
+            migrated = True
+    if migrated:
+        _save_meeting_drafts()
+        log.info(f"pending_agenda → meeting_drafts 마이그레이션 완료: {len(_pending_agenda)}건")
+
+
+def _cleanup_old_drafts(max_days: int = 7):
+    """오래된 드래프트 정리"""
+    now = datetime.now()
+    to_remove = []
+    for ts, draft in _meeting_drafts.items():
+        try:
+            created = datetime.fromisoformat(draft.get("created_at", ""))
+            if (now - created).days > max_days:
+                to_remove.append(ts)
+        except Exception:
+            pass
+    for ts in to_remove:
+        del _meeting_drafts[ts]
+    if to_remove:
+        _save_meeting_drafts()
+        log.info(f"오래된 드래프트 {len(to_remove)}건 정리")
+
+
+_migrate_pending_agenda()
 
 
 def _post_email_selection(slack_client, user_id: str, selection: dict,
@@ -1124,7 +1098,8 @@ def _post_email_selection(slack_client, user_id: str, selection: dict,
 
 
 def _create_calendar_event(slack_client, user_id: str, info: dict, company: str | None,
-                           attendee_emails: list[str], channel: str = None, thread_ts: str = None):
+                           attendee_emails: list[str], channel: str = None,
+                           thread_ts: str = None, user_msg_ts: str = None):
     """Calendar 이벤트 생성, 브리핑 실행, 드림플러스 회의실 예약 제안"""
     from agents import dreamplus as dreamplus_agent
     if not info.get("date") or not info.get("time"):
@@ -1164,21 +1139,32 @@ def _create_calendar_event(slack_client, user_id: str, info: dict, company: str 
         msg += "\n_이 메시지에 스레드 답글로 제목, 참석자, 어젠다를 알려주시면 업데이트해드릴게요._"
         resp = _post(slack_client, user_id=user_id, channel=channel, thread_ts=thread_ts, text=msg)
         reply_ts = resp.get("ts") if resp else None
+        # Slack이 반환하는 실제 thread_ts (스레드 내 답글이면 부모 ts)
+        resp_thread_ts = (resp.get("message") or resp or {}).get("thread_ts")
 
-        # 드래프트 저장 — reply_ts 스레드 답글만 업데이트 허용
-        _meeting_drafts[user_id] = {
+        # 드래프트 저장 — 관련 thread_ts 모두 키로 등록
+        draft_data = {
+            "user_id": user_id,
             "info": dict(info),
             "company": company,
             "event_id": event_id,
             "attendee_emails": list(attendee_emails),
             "channel": channel,
-            "thread_ts": thread_ts,
             "reply_ts": reply_ts,
+            "source": "create",
             "created_at": datetime.now().isoformat(),
         }
+        all_ts_keys = {reply_ts, thread_ts, resp_thread_ts, user_msg_ts} - {None}
+        for ts_key in all_ts_keys:
+            _meeting_drafts[ts_key] = draft_data if ts_key == reply_ts else dict(draft_data)
+        _save_meeting_drafts()
 
         if company:
-            event.setdefault("extendedProperties", {}).setdefault("private", {})["company"] = company
+            try:
+                cal.update_event(creds, event_id,
+                                 extended_properties={"private": {"company": company}})
+            except Exception as e:
+                log.warning(f"업체명 extendedProperties 저장 실패: {e}")
 
         # 드림플러스 회의실 자동 추천 먼저 (계정 미설정 시 스킵)
         attendee_count = len(attendee_emails) + 1  # 참석자 + 주최자
@@ -1235,16 +1221,9 @@ def handle_email_selection(slack_client, body: dict):
 
 # ── 일정 드래프트 업데이트 ──────────────────────────────────────
 
-def has_meeting_draft(user_id: str) -> bool:
-    """유효한(만료 안 된) 일정 드래프트가 있는지 확인"""
-    draft = _meeting_drafts.get(user_id)
-    if not draft:
-        return False
-    created = datetime.fromisoformat(draft["created_at"])
-    if (datetime.now() - created).total_seconds() > _DRAFT_TTL_SECONDS:
-        del _meeting_drafts[user_id]
-        return False
-    return True
+def has_meeting_draft(thread_ts: str) -> bool:
+    """해당 스레드에 일정 드래프트가 있는지 확인"""
+    return thread_ts in _meeting_drafts if thread_ts else False
 
 
 def update_meeting_from_text(slack_client, user_id: str, user_message: str,
@@ -1252,13 +1231,13 @@ def update_meeting_from_text(slack_client, user_id: str, user_message: str,
     """기존 드래프트에 새 메시지를 병합하여 캘린더 이벤트 업데이트.
     Returns: True if the message was handled as a meeting update, False otherwise.
     """
-    draft = _meeting_drafts.get(user_id)
+    draft = _meeting_drafts.get(thread_ts)
     if not draft:
         return False
 
-    # 채널 응답은 항상 원래 일정 생성 스레드에 달기
+    # 채널 응답은 항상 원래 스레드에 달기
     reply_channel = draft.get("channel") or channel
-    reply_thread_ts = draft.get("thread_ts") or thread_ts
+    reply_thread_ts = thread_ts
 
     # LLM으로 병합 판단
     try:
@@ -1288,7 +1267,7 @@ def update_meeting_from_text(slack_client, user_id: str, user_message: str,
 
     # 드래프트 정보 업데이트
     draft["info"] = updated_info
-    draft["created_at"] = datetime.now().isoformat()  # TTL 리셋
+    _save_meeting_drafts()
 
     event_id = draft.get("event_id")
     creds = None

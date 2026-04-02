@@ -16,7 +16,6 @@ with patch("google.genai.Client"), \
      patch("tools.gmail._service"):
     import agents.before as before
     from agents.before import (
-        _extract_company_name,
         handle_agenda_reply,
         _find_email,
         run_briefing,
@@ -44,86 +43,6 @@ def _mock_store():
     mock.get_credentials.return_value = _MOCK_CREDS
     mock.get_user.return_value = _MOCK_USER
     return patch("agents.before.user_store", mock)
-
-
-# ── _extract_company_name ─────────────────────────────────────
-
-class TestExtractCompanyName:
-    def test_external_attendee_domain(self):
-        """외부 참석자 이메일 도메인에서 업체명 추출"""
-        meeting = {
-            "summary": "파트너 미팅",
-            "attendees": [{"email": "user@kakao.com", "name": "김민환"}],
-        }
-        result = _extract_company_name(meeting, [])
-        assert result == "kakao"
-
-    def test_internal_domain_skipped(self):
-        """내부 도메인은 건너뜀"""
-        meeting = {
-            "summary": "팀 회의",
-            "attendees": [{"email": "user@parametacorp.com", "name": "홍길동"}],
-        }
-        with patch("agents.before._generate", return_value="null"):
-            result = _extract_company_name(meeting, [])
-        assert result is None
-
-    def test_known_company_in_title(self):
-        """제목에 known_companies 업체명 포함 → 반환"""
-        meeting = {"summary": "카카오 파트너십 논의", "attendees": []}
-        result = _extract_company_name(meeting, ["카카오"])
-        assert result == "카카오"
-
-    def test_gemini_fallback_called(self):
-        """참석자 없고 known_companies 없으면 Gemini 호출"""
-        meeting = {"summary": "외부 미팅", "attendees": []}
-        with patch("agents.before._generate", return_value="네이버") as mock_gen:
-            result = _extract_company_name(meeting, [])
-        mock_gen.assert_called_once()
-        assert result == "네이버"
-
-    def test_gemini_returns_null(self):
-        """Gemini가 null 반환 → None"""
-        meeting = {"summary": "팀 스탠드업", "attendees": []}
-        with patch("agents.before._generate", return_value="null"):
-            result = _extract_company_name(meeting, [])
-        assert result is None
-
-    def test_gemini_long_response_rejected(self):
-        """Gemini 응답이 30자 초과 → None"""
-        meeting = {"summary": "외부 미팅", "attendees": []}
-        long_response = "이것은 업체명이 아닌 설명문입니다 매우 길기 때문에 거부되어야 합니다"  # 31자 초과
-        assert len(long_response) > 30
-        with patch("agents.before._generate", return_value=long_response):
-            result = _extract_company_name(meeting, [])
-        assert result is None
-
-    def test_public_email_domain_falls_through_to_title(self):
-        """공개 이메일 서비스 도메인(naver.com)은 업체명으로 취급하지 않고 제목 매칭으로 넘어감"""
-        meeting = {
-            "summary": "카카오 미팅",
-            "attendees": [{"email": "user@naver.com", "name": "이름"}],
-        }
-        result = _extract_company_name(meeting, ["카카오"])
-        assert result == "카카오"  # 공개 도메인 스킵 → 제목에서 추출
-
-    def test_known_company_title_beats_domain(self):
-        """외부 도메인 참석자가 있더라도 제목에 Contacts 업체명이 있으면 한국어 정식명 반환"""
-        meeting = {
-            "summary": "한화투자증권 미팅",
-            "attendees": [{"email": "user@hanwhainvestment.com", "name": "홍길동"}],
-        }
-        result = _extract_company_name(meeting, ["한화투자증권"])
-        assert result == "한화투자증권"  # 도메인 기반 "hanwhainvestment" 대신 정식명 반환
-
-    def test_domain_fallback_when_no_title_match(self):
-        """제목에 Contacts 업체명 없으면 도메인 기반 이름 반환"""
-        meeting = {
-            "summary": "파트너 미팅",
-            "attendees": [{"email": "user@hanwhainvestment.com", "name": "홍길동"}],
-        }
-        result = _extract_company_name(meeting, ["카카오"])
-        assert result == "hanwhainvestment"  # Contacts에 없으므로 도메인 사용
 
 
 # ── handle_agenda_reply ───────────────────────────────────────

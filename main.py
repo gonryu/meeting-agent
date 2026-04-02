@@ -19,15 +19,14 @@ import uvicorn
 
 from agents.before import (
     run_briefing,
-    handle_agenda_reply,
     create_meeting_from_text,
-    has_meeting_draft,
     update_meeting_from_text,
     update_company_knowledge,
     research_company,
     research_person,
     generate_text,
     _pending_agenda,
+    _meeting_drafts,
 )
 from agents.during import (
     start_session,
@@ -112,10 +111,17 @@ def handle_mention(event, say, client):
     parent_ts = event.get("thread_ts")   # 스레드 답장이면 부모 메시지 ts
     thread_ts = parent_ts or event.get("ts")
 
-    # 브리핑 스레드에 @멘션으로 답장한 경우 → 어젠다 등록
-    log.info(f"handle_mention: parent_ts={parent_ts} pending_keys={list(_pending_agenda.keys())[:5]}")
-    if parent_ts and parent_ts in _pending_agenda:
-        handle_agenda_reply(client, parent_ts, text)
+    # 스레드 답장 → 일정 업데이트 (브리핑·일정생성 공통)
+    log.info(f"handle_mention: parent_ts={parent_ts} draft_keys={list(_meeting_drafts.keys())[:5]}")
+    if parent_ts and parent_ts in _meeting_drafts:
+        if _check_registered(client, user_id, channel):
+            threading.Thread(
+                target=update_meeting_from_text,
+                args=(client,),
+                kwargs=dict(user_id=user_id, user_message=text,
+                            channel=channel, thread_ts=parent_ts),
+                daemon=True,
+            ).start()
         return
 
     if not text:
@@ -167,9 +173,19 @@ def handle_message(event, client):
     channel = event.get("channel")
     channel_type = event.get("channel_type")
 
-    log.info(f"handle_message: channel_type={channel_type} thread_ts={thread_ts} pending_keys={list(_pending_agenda.keys())[:5]}")
-    if thread_ts and thread_ts in _pending_agenda:
-        handle_agenda_reply(client, thread_ts, text)
+    log.info(f"handle_message: channel_type={channel_type} thread_ts={thread_ts} draft_keys={list(_meeting_drafts.keys())[:5]}")
+
+    # 스레드 답글 → 일정 업데이트 (브리핑·일정생성 공통)
+    if thread_ts and thread_ts in _meeting_drafts:
+        if not _check_registered(client, user_id):
+            return
+        threading.Thread(
+            target=update_meeting_from_text,
+            args=(client,),
+            kwargs=dict(user_id=user_id, user_message=text,
+                        channel=channel, thread_ts=thread_ts),
+            daemon=True,
+        ).start()
         return
 
     if channel_type == "im":
@@ -187,26 +203,7 @@ def handle_message(event, client):
                 ).start()
                 return
 
-        # 일정 드래프트 스레드 답글 감지 (DM)
-        if thread_ts and user_id:
-            from agents.before import _meeting_drafts
-            draft = _meeting_drafts.get(user_id)
-            if draft and (thread_ts == draft.get("reply_ts") or thread_ts == draft.get("thread_ts")):
-                handled = update_meeting_from_text(client, user_id=user_id, user_message=text,
-                                                   channel=channel, thread_ts=thread_ts)
-                if handled:
-                    return
-
-        _route_message(text, client, user_id=user_id)
-
-    elif thread_ts and user_id and channel_type != "im":
-        # 채널 스레드 일반 답글 — 해당 스레드가 일정 드래프트 스레드면 업데이트 처리
-        from agents.before import _meeting_drafts
-        draft = _meeting_drafts.get(user_id)
-        if draft and draft.get("thread_ts") == thread_ts:
-            if _check_registered(client, user_id):
-                update_meeting_from_text(client, user_id=user_id, user_message=text,
-                                         channel=channel, thread_ts=thread_ts)
+        _route_message(text, client, user_id=user_id, user_msg_ts=event.get("ts"))
 
 
 _HELP_TEXT = """*🤖 ParaMee 사용 가이드*
@@ -291,7 +288,8 @@ def _classify_intent(text: str) -> dict:
         return {"intent": "unknown", "params": {}}
 
 
-def _route_message(text: str, client, user_id: str, channel: str = None, thread_ts: str = None):
+def _route_message(text: str, client, user_id: str, channel: str = None,
+                   thread_ts: str = None, user_msg_ts: str = None):
     log.info(f"메시지 라우팅 ({user_id}): {text}")
 
     intent_data = _classify_intent(text)
@@ -305,7 +303,8 @@ def _route_message(text: str, client, user_id: str, channel: str = None, thread_
 
     elif intent == "create_meeting":
         create_meeting_from_text(client, user_id=user_id, user_message=text,
-                                 channel=channel, thread_ts=thread_ts)
+                                 channel=channel, thread_ts=thread_ts,
+                                 user_msg_ts=user_msg_ts)
 
     elif intent == "start_session":
         title = params.get("title", "").strip() or "미팅"
