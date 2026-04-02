@@ -110,17 +110,36 @@ def _parse_attendee_count(text: str) -> int:
     return int(m.group(1)) if m else 2
 
 
+def _parse_preferred_floor(text: str) -> int | None:
+    """'8층', '2층' 등에서 층수 추출. 없으면 None."""
+    m = re.search(r"(\d+)\s*층", text)
+    return int(m.group(1)) if m else None
+
+
+def _parse_preferred_capacity(text: str) -> int | None:
+    """'4인실', '8인 회의실', '수용인원 6' 등에서 희망 수용인원 추출. 없으면 None."""
+    m = re.search(r"(\d+)\s*인\s*(?:실|회의실|짜리)", text)
+    if m:
+        return int(m.group(1))
+    m = re.search(r"수용\s*인원\s*(\d+)", text)
+    if m:
+        return int(m.group(1))
+    return None
+
+
 # ── 회의실 추천 로직 ──────────────────────────────────────────
 
-_FLOOR_PRIORITY = {8: 0, 2: 1, 3: 2}  # 8층 > 2층 > 3층 > 나머지
+_FLOOR_PRIORITY = {8: 0, 2: 1, 3: 2}  # 기본 층 우선순위: 8층 > 2층 > 3층 > 나머지
 
 def _recommend_rooms(rooms: list[dict], attendee_count: int,
-                     start_dt: datetime, end_dt: datetime) -> list[dict]:
+                     start_dt: datetime, end_dt: datetime,
+                     preferred_floor: int | None = None,
+                     preferred_capacity: int | None = None) -> list[dict]:
     """수용인원 >= attendee_count인 회의실 중 최대 3개 추천.
 
     정렬 기준:
-    1. 층 우선순위: 8층 → 2층 → 3층 → 나머지
-    2. 4인 회의실 우선 (maxMember == 4이면 앞으로)
+    1. preferred_floor 지정 시 해당 층 최우선, 없으면 기본 우선순위(8>2>3)
+    2. preferred_capacity 지정 시 해당 수용인원과 가장 가까운 방 우선, 없으면 4인 우선
     3. 포인트 낮은 순
     """
     effective_count = max(attendee_count, 1)
@@ -129,10 +148,21 @@ def _recommend_rooms(rooms: list[dict], attendee_count: int,
 
     def sort_key(r):
         floor = r.get("floor", 99)
-        floor_rank = _FLOOR_PRIORITY.get(floor, 3)
         capacity = r.get("maxMember", 99)
-        not_4person = 0 if capacity == 4 else 1  # 4인 우선
-        return (floor_rank, not_4person, r.get("point", 0))
+
+        # 층 우선순위
+        if preferred_floor is not None:
+            floor_rank = 0 if floor == preferred_floor else 1
+        else:
+            floor_rank = _FLOOR_PRIORITY.get(floor, 3)
+
+        # 수용인원 우선순위
+        if preferred_capacity is not None:
+            cap_rank = abs(capacity - preferred_capacity)
+        else:
+            cap_rank = 0 if capacity == 4 else 1  # 기본: 4인 우선
+
+        return (floor_rank, cap_rank, r.get("point", 0))
 
     candidates.sort(key=sort_key)
     for r in candidates:
@@ -244,10 +274,13 @@ def book_room(slack_client, user_id: str, text: str):
     result = _parse_datetime_range(text)
     if not result:
         _post(slack_client, user_id,
-              "⚠️ 시간을 인식하지 못했습니다.\n예: `/회의실예약 내일 오후 2시~3시 4명`")
+              "⚠️ 시간을 인식하지 못했습니다.\n"
+              "예: `내일 오후 2시~3시 4명`, `오늘 14시 2시간 8층 6인실`")
         return
     start_dt, end_dt = result
     attendee_count = _parse_attendee_count(text)
+    preferred_floor = _parse_preferred_floor(text)
+    preferred_capacity = _parse_preferred_capacity(text)
 
     try:
         rooms = dp.get_rooms(jwt)
@@ -259,15 +292,22 @@ def book_room(slack_client, user_id: str, text: str):
         _post(slack_client, user_id, f"❌ 회의실 목록 조회 실패: {e}")
         return
 
-    recommended = _recommend_rooms(rooms, attendee_count, start_dt, end_dt)
+    recommended = _recommend_rooms(rooms, attendee_count, start_dt, end_dt,
+                                   preferred_floor=preferred_floor,
+                                   preferred_capacity=preferred_capacity)
     if not recommended:
         _post(slack_client, user_id,
               f"😔 {attendee_count}인 이상 수용 가능한 회의실을 찾지 못했습니다.")
         return
 
     date_str = start_dt.strftime("%m월 %d일")
+    cond_str = f"{attendee_count}인 이상"
+    if preferred_floor:
+        cond_str += f" · {preferred_floor}층"
+    if preferred_capacity:
+        cond_str += f" · {preferred_capacity}인실 우선"
     shown = ",".join(str(r["roomCode"]) for r in recommended)
-    next_value = f"{start_dt.isoformat()}|{end_dt.isoformat()}|{text}|{attendee_count}|{shown}"
+    next_value = f"{start_dt.isoformat()}|{end_dt.isoformat()}|{text}|{attendee_count}|{shown}|{preferred_floor or ''}|{preferred_capacity or ''}"
     blocks = [
         {
             "type": "section",
@@ -275,7 +315,7 @@ def book_room(slack_client, user_id: str, text: str):
                 "type": "mrkdwn",
                 "text": (
                     f"🏢 *{date_str} {start_dt.strftime('%H:%M')}~{end_dt.strftime('%H:%M')}* "
-                    f"({attendee_count}인 이상) 가용 회의실"
+                    f"({cond_str}) 가용 회의실"
                 ),
             },
         },
@@ -413,12 +453,14 @@ def next_rooms(slack_client, body: dict):
     value = body["actions"][0]["value"]
 
     try:
-        parts = value.split("|", 4)
+        parts = value.split("|")
         start_dt = datetime.fromisoformat(parts[0])
         end_dt = datetime.fromisoformat(parts[1])
         meeting_title = parts[2]
         attendee_count = int(parts[3]) if parts[3].isdigit() else 2
         shown_codes = set(int(c) for c in parts[4].split(",") if c.isdigit()) if len(parts) > 4 else set()
+        preferred_floor = int(parts[5]) if len(parts) > 5 and parts[5].isdigit() else None
+        preferred_capacity = int(parts[6]) if len(parts) > 6 and parts[6].isdigit() else None
     except Exception:
         _post(slack_client, user_id, "⚠️ 다음 추천을 불러오지 못했습니다.")
         return
@@ -433,12 +475,13 @@ def next_rooms(slack_client, body: dict):
         _post(slack_client, user_id, f"❌ 회의실 목록 조회 실패: {e}")
         return
 
-    all_candidates = _recommend_rooms(rooms, attendee_count, start_dt, end_dt)
+    all_candidates = _recommend_rooms(rooms, attendee_count, start_dt, end_dt,
+                                      preferred_floor=preferred_floor,
+                                      preferred_capacity=preferred_capacity)
     # 이미 보여준 회의실 제외
     remaining = [r for r in all_candidates if r["roomCode"] not in shown_codes]
 
     if not remaining:
-        # 기존 메시지 업데이트
         try:
             slack_client.chat_update(
                 channel=body["container"]["channel_id"],
@@ -455,9 +498,17 @@ def next_rooms(slack_client, body: dict):
 
     next_batch = remaining[:3]
     new_shown = shown_codes | {r["roomCode"] for r in next_batch}
-    next_value = f"{start_dt.isoformat()}|{end_dt.isoformat()}|{meeting_title}|{attendee_count}|{','.join(str(c) for c in new_shown)}"
+    next_value = (
+        f"{start_dt.isoformat()}|{end_dt.isoformat()}|{meeting_title}|{attendee_count}"
+        f"|{','.join(str(c) for c in new_shown)}|{preferred_floor or ''}|{preferred_capacity or ''}"
+    )
 
     date_str = start_dt.strftime("%m월 %d일")
+    cond_str = f"{attendee_count}인 이상"
+    if preferred_floor:
+        cond_str += f" · {preferred_floor}층"
+    if preferred_capacity:
+        cond_str += f" · {preferred_capacity}인실 우선"
     blocks = [
         {
             "type": "section",
@@ -465,7 +516,7 @@ def next_rooms(slack_client, body: dict):
                 "type": "mrkdwn",
                 "text": (
                     f"🏢 *{date_str} {start_dt.strftime('%H:%M')}~{end_dt.strftime('%H:%M')}* "
-                    f"({attendee_count}인 이상) 다음 추천 회의실"
+                    f"({cond_str}) 다음 추천 회의실"
                 ),
             },
         },
