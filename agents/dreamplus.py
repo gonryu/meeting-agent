@@ -170,7 +170,7 @@ def _recommend_rooms(rooms: list[dict], attendee_count: int,
     candidates.sort(key=sort_key)
     for r in candidates:
         r["_total_point"] = r.get("point", 0) * duration_slots
-    return candidates[:3]
+    return candidates  # 전체 반환, 잘라내기는 호출부에서
 
 
 def _room_block(room: dict, start_dt: datetime, end_dt: datetime,
@@ -301,7 +301,7 @@ def book_room(slack_client, user_id: str, text: str,
 
     recommended = _recommend_rooms(rooms, attendee_count, start_dt, end_dt,
                                    preferred_floor=preferred_floor,
-                                   preferred_capacity=preferred_capacity)
+                                   preferred_capacity=preferred_capacity)[:3]
     if not recommended:
         _post(slack_client, user_id,
               f"😔 {attendee_count}인 이상 수용 가능한 회의실을 찾지 못했습니다.",
@@ -650,7 +650,7 @@ def auto_book_room(slack_client, *, user_id: str, start_dt: datetime,
         log.warning(f"auto_book_room 회의실 조회 실패 (스킵): {e}")
         return
 
-    recommended = _recommend_rooms(rooms, attendee_count, start_dt, end_dt)
+    recommended = _recommend_rooms(rooms, attendee_count, start_dt, end_dt)[:3]
     if not recommended:
         return
 
