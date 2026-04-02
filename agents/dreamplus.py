@@ -112,14 +112,29 @@ def _parse_attendee_count(text: str) -> int:
 
 # ── 회의실 추천 로직 ──────────────────────────────────────────
 
+_FLOOR_PRIORITY = {8: 0, 2: 1, 3: 2}  # 8층 > 2층 > 3층 > 나머지
+
 def _recommend_rooms(rooms: list[dict], attendee_count: int,
                      start_dt: datetime, end_dt: datetime) -> list[dict]:
-    """수용인원 >= attendee_count인 회의실 중 포인트 낮은 순으로 최대 3개 추천.
-    같은 포인트면 층 낮은 순.
+    """수용인원 >= attendee_count인 회의실 중 최대 3개 추천.
+
+    정렬 기준:
+    1. 층 우선순위: 8층 → 2층 → 3층 → 나머지
+    2. 4인 회의실 우선 (maxMember == 4이면 앞으로)
+    3. 포인트 낮은 순
     """
+    effective_count = max(attendee_count, 1)
     duration_slots = max(1, int((end_dt - start_dt).total_seconds() / 1800))
-    candidates = [r for r in rooms if r.get("maxMember", 0) >= attendee_count]
-    candidates.sort(key=lambda r: (r.get("point", 0), r.get("floor", 99)))
+    candidates = [r for r in rooms if r.get("maxMember", 0) >= effective_count]
+
+    def sort_key(r):
+        floor = r.get("floor", 99)
+        floor_rank = _FLOOR_PRIORITY.get(floor, 3)
+        capacity = r.get("maxMember", 99)
+        not_4person = 0 if capacity == 4 else 1  # 4인 우선
+        return (floor_rank, not_4person, r.get("point", 0))
+
+    candidates.sort(key=sort_key)
     for r in candidates:
         r["_total_point"] = r.get("point", 0) * duration_slots
     return candidates[:3]
