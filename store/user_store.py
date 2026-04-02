@@ -241,7 +241,7 @@ def save_dreamplus_jwt(slack_user_id: str, jwt: str, public_key: str,
     """JWT, 공개키, memberId, companyId를 함께 캐시 저장. exp_dt 기본값 = 6시간 후."""
     from datetime import timedelta
     if exp_dt is None:
-        exp_dt = datetime.now() + timedelta(hours=6)
+        exp_dt = datetime.now() + timedelta(minutes=30)
     stored = f"{jwt}|||{public_key}|||{member_id}|||{company_id}"
     with _conn() as conn:
         conn.execute(

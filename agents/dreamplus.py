@@ -405,15 +405,14 @@ def list_reservations(slack_client, user_id: str,
 
     try:
         items = dp.get_reservations(jwt, company_id=company_id or None)
-    except dp.TokenExpiredError:
-        user_store.save_dreamplus_jwt(user_id, "", "")
-        _post(slack_client, user_id, "⚠️ 세션이 만료되었습니다. 다시 시도해주세요.",
-              channel=channel, thread_ts=thread_ts)
-        return
-    except Exception as e:
-        _post(slack_client, user_id, f"❌ 예약 조회 실패: {e}",
-              channel=channel, thread_ts=thread_ts)
-        return
+    except (dp.TokenExpiredError, RuntimeError):
+        try:
+            jwt, pub_key, member_id, company_id = _get_session(user_id, force_refresh=True)
+            items = dp.get_reservations(jwt, company_id=company_id or None)
+        except Exception as e:
+            _post(slack_client, user_id, f"❌ 예약 조회 실패: {e}",
+                  channel=channel, thread_ts=thread_ts)
+            return
 
     # 내 예약만 필터링
     if not member_id:
@@ -602,17 +601,23 @@ def confirm_cancel(slack_client, body: dict):
 
     try:
         jwt, pub_key, member_id, company_id = _get_session(user_id)
-        # 환불 정보 먼저 확인
-        refund = dp.get_refund_info(jwt, reservation_id)
-        refund_pt = refund.get("refund", 0)
-        dp.cancel_reservation(jwt, pub_key, reservation_id)
     except ValueError as e:
         _post(slack_client, user_id, f"⚠️ {e}")
         return
-    except dp.TokenExpiredError:
-        user_store.save_dreamplus_jwt(user_id, "", "")
-        _post(slack_client, user_id, "⚠️ 세션이 만료되었습니다. 다시 시도해주세요.")
-        return
+
+    try:
+        refund = dp.get_refund_info(jwt, reservation_id)
+        refund_pt = refund.get("refund", 0)
+        dp.cancel_reservation(jwt, pub_key, reservation_id)
+    except (dp.TokenExpiredError, RuntimeError):
+        try:
+            jwt, pub_key, member_id, company_id = _get_session(user_id, force_refresh=True)
+            refund = dp.get_refund_info(jwt, reservation_id)
+            refund_pt = refund.get("refund", 0)
+            dp.cancel_reservation(jwt, pub_key, reservation_id)
+        except Exception as e:
+            _post(slack_client, user_id, f"❌ 취소 실패: {e}")
+            return
     except Exception as e:
         _post(slack_client, user_id, f"❌ 취소 실패: {e}")
         return
