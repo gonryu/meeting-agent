@@ -65,6 +65,7 @@ def _post(path: str, data: dict, jwt: str = None) -> dict:
         json=data,
         headers=headers,
         timeout=_TIMEOUT,
+        verify=False,
     )
     resp.raise_for_status()
     # 일부 API는 빈 body 반환
@@ -81,6 +82,7 @@ def _delete(path: str, data: dict, jwt: str) -> dict:
         json=data,
         headers=headers,
         timeout=_TIMEOUT,
+        verify=False,
     )
     resp.raise_for_status()
     if not resp.content.strip():
@@ -96,6 +98,7 @@ def _get(path: str, jwt: str = None) -> dict:
         f"{_BASE}{path}",
         headers=headers,
         timeout=_TIMEOUT,
+        verify=False,
     )
     resp.raise_for_status()
     return resp.json()
@@ -161,6 +164,7 @@ def get_public_key() -> str:
         data=b"",
         headers=_HEADERS,
         timeout=_TIMEOUT,
+        verify=False,
     )
     resp.raise_for_status()
     body = resp.json()
@@ -197,6 +201,7 @@ def login(email: str, password: str) -> tuple[str, str]:
         json=payload,
         headers=_HEADERS,
         timeout=_TIMEOUT,
+        verify=False,
     )
     resp.raise_for_status()
     body = resp.json()
