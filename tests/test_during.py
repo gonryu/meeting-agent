@@ -21,10 +21,13 @@ with patch("google.genai.Client"), \
         finalize_minutes,
         get_minutes_list,
         check_transcripts,
+        handle_event_selection,
+        handle_event_title_reply,
         _active_sessions,
         _completed_notes,
         _processed_events,
         _pending_minutes,
+        _pending_inputs,
     )
 
 
@@ -135,6 +138,7 @@ class TestAddNote:
     def setup_method(self):
         _active_sessions.clear()
         _completed_notes.clear()
+        _pending_inputs.clear()
 
     def _init_session(self):
         _active_sessions[_TEST_USER] = {
@@ -167,16 +171,72 @@ class TestAddNote:
         assert "time" in note
         assert ":" in note["time"]  # HH:MM 형식
 
-    def test_no_session_auto_starts(self):
-        """세션 없으면 자동으로 세션 시작 후 노트 추가"""
+    def test_no_session_single_event_auto_starts(self):
+        """세션 없고 캘린더 이벤트 1개 → 자동 세션 시작 + 노트 추가"""
+        slack = _slack()
+        now = datetime.now(KST)
+        mock_event = {
+            "id": "evt_auto",
+            "summary": "자동 감지 미팅",
+            "start": {"dateTime": (now - timedelta(minutes=10)).isoformat()},
+            "end": {"dateTime": (now + timedelta(minutes=50)).isoformat()},
+            "attendees": [],
+        }
+        with _mock_store(), patch("agents.during.cal") as mock_cal:
+            mock_cal.get_upcoming_meetings.return_value = [mock_event]
+            mock_cal.parse_event.return_value = {
+                "id": "evt_auto",
+                "summary": "자동 감지 미팅",
+                "start_time": (now - timedelta(minutes=10)).isoformat(),
+                "location": "", "meet_link": "", "description": "",
+                "attendees": [],
+            }
+            add_note(slack, _TEST_USER, "노트 내용")
+
+        assert _TEST_USER in _active_sessions
+        assert _active_sessions[_TEST_USER]["title"] == "자동 감지 미팅"
+        assert len(_active_sessions[_TEST_USER]["notes"]) == 1
+        assert _active_sessions[_TEST_USER]["notes"][0]["text"] == "노트 내용"
+
+    def test_no_session_no_event_queues_input(self):
+        """세션 없고 캘린더 이벤트 0개 → 대기 큐에 저장 + 선택 UI 발송"""
         slack = _slack()
         with _mock_store(), patch("agents.during.cal") as mock_cal:
             mock_cal.get_upcoming_meetings.return_value = []
             add_note(slack, _TEST_USER, "노트 내용")
 
-        assert _TEST_USER in _active_sessions
-        assert len(_active_sessions[_TEST_USER]["notes"]) == 1
-        assert _active_sessions[_TEST_USER]["notes"][0]["text"] == "노트 내용"
+        assert _TEST_USER not in _active_sessions
+        assert _TEST_USER in _pending_inputs
+        assert len(_pending_inputs[_TEST_USER]["inputs"]) == 1
+        assert _pending_inputs[_TEST_USER]["inputs"][0]["content"] == "노트 내용"
+
+    def test_no_session_multiple_events_queues_input(self):
+        """세션 없고 캘린더 이벤트 여러 개 → 선택 요청 + 대기 큐"""
+        slack = _slack()
+        now = datetime.now(KST)
+        events = []
+        for i in range(2):
+            events.append({
+                "id": f"evt_{i}",
+                "summary": f"미팅 {i}",
+                "start": {"dateTime": (now - timedelta(minutes=5)).isoformat()},
+                "end": {"dateTime": (now + timedelta(minutes=55)).isoformat()},
+                "attendees": [],
+            })
+        with _mock_store(), patch("agents.during.cal") as mock_cal:
+            mock_cal.get_upcoming_meetings.return_value = events
+            mock_cal.parse_event.side_effect = lambda ev: {
+                "id": ev["id"],
+                "summary": ev["summary"],
+                "start_time": ev["start"]["dateTime"],
+                "location": "", "meet_link": "", "description": "",
+                "attendees": [],
+            }
+            add_note(slack, _TEST_USER, "노트 내용")
+
+        assert _TEST_USER not in _active_sessions
+        assert _TEST_USER in _pending_inputs
+        assert len(_pending_inputs[_TEST_USER]["events"]) == 2
 
     def test_empty_note_rejected(self):
         """빈 노트는 거부"""
@@ -876,3 +936,169 @@ class TestSessionPersistence:
         assert "evt_rec" in _completed_notes
         assert _completed_notes["evt_rec"]["title"] == "복구 완료 미팅"
         assert isinstance(_completed_notes["evt_rec"]["stored_at"], datetime)
+
+
+# ── 이벤트 선택 / 자동 감지 ──────────────────────────────────
+
+class TestEventSelection:
+    """캘린더 이벤트 자동 감지 및 선택 흐름 테스트"""
+
+    def setup_method(self):
+        _active_sessions.clear()
+        _completed_notes.clear()
+        _processed_events.clear()
+        _pending_minutes.clear()
+        _pending_inputs.clear()
+
+    def test_handle_event_selection_starts_session(self):
+        """이벤트 선택 시 세션 시작 + 대기 입력 추가"""
+        now = datetime.now(KST)
+        event = {
+            "id": "evt_sel",
+            "summary": "선택된 미팅",
+            "start_time": (now - timedelta(minutes=10)).isoformat(),
+            "_end_time": (now + timedelta(minutes=50)).isoformat(),
+            "location": "", "meet_link": "", "description": "",
+            "attendees": [],
+        }
+        _pending_inputs[_TEST_USER] = {
+            "inputs": [{"type": "note", "content": "대기 중 노트"}],
+            "events": [event],
+        }
+
+        slack = _slack()
+        with _mock_store(), patch("agents.during.cal") as mock_cal:
+            mock_cal.get_upcoming_meetings.return_value = []
+            handle_event_selection(slack, _TEST_USER, selected_event_id="evt_sel")
+
+        assert _TEST_USER in _active_sessions
+        assert _active_sessions[_TEST_USER]["title"] == "선택된 미팅"
+        assert _active_sessions[_TEST_USER]["event_id"] == "evt_sel"
+        assert len(_active_sessions[_TEST_USER]["notes"]) == 1
+        assert _active_sessions[_TEST_USER]["notes"][0]["text"] == "대기 중 노트"
+        assert _TEST_USER not in _pending_inputs
+
+    def test_handle_event_selection_new_meeting(self):
+        """'새 미팅' 선택 시 제목으로 세션 시작"""
+        _pending_inputs[_TEST_USER] = {
+            "inputs": [{"type": "note", "content": "메모 내용"}],
+            "events": [],
+        }
+        slack = _slack()
+        with _mock_store(), patch("agents.during.cal") as mock_cal:
+            mock_cal.get_upcoming_meetings.return_value = []
+            handle_event_selection(slack, _TEST_USER, selected_event_id=None,
+                                   custom_title="직접 입력한 제목")
+
+        assert _TEST_USER in _active_sessions
+        assert _active_sessions[_TEST_USER]["title"] == "직접 입력한 제목"
+        assert len(_active_sessions[_TEST_USER]["notes"]) == 1
+
+    def test_handle_event_title_reply(self):
+        """스레드 답글로 제목 입력 시 세션 시작"""
+        _pending_inputs[_TEST_USER] = {
+            "inputs": [{"type": "audio", "content": "STT 변환 텍스트"}],
+            "events": [],
+            "prompt_ts": "111.222",
+        }
+        slack = _slack()
+        with _mock_store(), patch("agents.during.cal") as mock_cal:
+            mock_cal.get_upcoming_meetings.return_value = []
+            handle_event_title_reply(slack, _TEST_USER, "KISA 보안 미팅")
+
+        assert _TEST_USER in _active_sessions
+        assert _active_sessions[_TEST_USER]["title"] == "KISA 보안 미팅"
+
+    def test_multiple_inputs_queued(self):
+        """이벤트 선택 대기 중 추가 입력이 큐에 쌓임"""
+        slack = _slack()
+        with _mock_store(), patch("agents.during.cal") as mock_cal:
+            mock_cal.get_upcoming_meetings.return_value = []
+            # 첫 입력 → 대기 큐 생성
+            add_note(slack, _TEST_USER, "첫 번째 메모")
+            assert _TEST_USER in _pending_inputs
+            assert len(_pending_inputs[_TEST_USER]["inputs"]) == 1
+
+            # 두 번째 입력 → 큐에 추가
+            add_note(slack, _TEST_USER, "두 번째 메모")
+            assert len(_pending_inputs[_TEST_USER]["inputs"]) == 2
+
+    def test_pending_inputs_cleared_after_selection(self):
+        """이벤트 선택 후 대기 큐 정리"""
+        _pending_inputs[_TEST_USER] = {
+            "inputs": [
+                {"type": "note", "content": "메모1"},
+                {"type": "audio", "content": "음성 변환"},
+            ],
+            "events": [],
+        }
+        slack = _slack()
+        with _mock_store(), patch("agents.during.cal") as mock_cal:
+            mock_cal.get_upcoming_meetings.return_value = []
+            handle_event_selection(slack, _TEST_USER, selected_event_id=None,
+                                   custom_title="수동 미팅")
+
+        assert _TEST_USER not in _pending_inputs
+        assert len(_active_sessions[_TEST_USER]["notes"]) == 2
+
+    def test_nearest_event_shown_when_no_ongoing(self):
+        """진행 중 이벤트 없을 때 가장 가까운 이벤트를 보여주고 확인 요청"""
+        slack = _slack()
+        now = datetime.now(KST)
+        # 1시간 전에 끝난 이벤트
+        past_event = {
+            "id": "evt_past",
+            "summary": "아까 끝난 미팅",
+            "start": {"dateTime": (now - timedelta(hours=2)).isoformat()},
+            "end": {"dateTime": (now - timedelta(hours=1)).isoformat()},
+            "attendees": [],
+        }
+        # 2시간 후 시작 이벤트
+        future_event = {
+            "id": "evt_future",
+            "summary": "나중 미팅",
+            "start": {"dateTime": (now + timedelta(hours=2)).isoformat()},
+            "end": {"dateTime": (now + timedelta(hours=3)).isoformat()},
+            "attendees": [],
+        }
+        with _mock_store(), patch("agents.during.cal") as mock_cal:
+            mock_cal.get_upcoming_meetings.return_value = [past_event, future_event]
+            mock_cal.parse_event.side_effect = lambda ev: {
+                "id": ev["id"],
+                "summary": ev["summary"],
+                "start_time": ev["start"]["dateTime"],
+                "location": "", "meet_link": "", "description": "",
+                "attendees": [],
+            }
+            add_note(slack, _TEST_USER, "메모")
+
+        # 세션은 시작 안 됨 (확인 대기 중)
+        assert _TEST_USER not in _active_sessions
+        assert _TEST_USER in _pending_inputs
+        # 가장 가까운 이벤트가 1개로 저장됨
+        assert len(_pending_inputs[_TEST_USER]["events"]) == 1
+        # 가장 가까운 이벤트 = 1시간 전 끝난 이벤트 (거리 60분 vs 120분)
+        assert _pending_inputs[_TEST_USER]["events"][0]["id"] == "evt_past"
+        # Slack에 확인 UI 발송됨
+        call_args = slack.chat_postMessage.call_args_list
+        any_confirm = any("맞나요" in str(c) or "가장 가까운" in str(c) for c in call_args)
+        assert any_confirm
+
+    def test_generate_minutes_now_alias(self):
+        """generate_minutes_now는 end_session의 별칭"""
+        from agents.during import generate_minutes_now
+        slack = _slack()
+        _active_sessions[_TEST_USER] = {
+            "title": "별칭 테스트", "started_at": "2026-04-08 14:00",
+            "notes": [{"time": "14:05", "text": "내용"}],
+            "event_id": None, "event_summary": None, "event_time_str": None,
+        }
+        with _mock_store(), \
+             patch("agents.during._generate_minutes", return_value="## 회의 요약\n내용"), \
+             patch("agents.during.drive") as mock_drive:
+            mock_drive.save_minutes.return_value = "file_id"
+            generate_minutes_now(slack, _TEST_USER)
+
+        # 세션이 종료되고 회의록 초안이 생성됨
+        assert _TEST_USER not in _active_sessions
+        assert _TEST_USER in _pending_minutes

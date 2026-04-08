@@ -125,13 +125,25 @@ JSON으로만 반환 (설명 없이):
 
 def minutes_internal_prompt(meeting_title: str, meeting_date: str, attendees: str,
                              transcript: str, notes_text: str) -> str:
-    """내부용 회의록 — prompts/templates/minutes_internal.md 템플릿 사용"""
+    """내부용 회의록 — prompts/templates/minutes_internal.md 템플릿 사용.
+
+    transcript가 이미 전처리된 상태(원본 또는 요약)로 전달됩니다.
+    """
     sources = []
+    if transcript and notes_text:
+        sources.append(
+            "[입력 소스 안내]\n"
+            "트랜스크립트와 수동 노트가 모두 제공됩니다.\n"
+            "- 트랜스크립트: 실제 발언 기록으로, 논의 내용의 1차 소스입니다. 발언자와 맥락을 충실히 반영하세요.\n"
+            "- 수동 노트: 참석자가 직접 기록한 핵심 사항입니다. 트랜스크립트에 없는 보충 정보로 활용하세요.\n"
+            "- 두 소스가 충돌하면 트랜스크립트를 우선합니다."
+        )
+    sources.append("")
     if transcript:
-        sources.append(f"[트랜스크립트]\n{transcript[:40000]}")
+        sources.append(f"[트랜스크립트]\n{transcript}")
     if notes_text:
         sources.append(f"[수동 노트]\n{notes_text}")
-    sources_block = "\n\n".join(sources) if sources else "(자료 없음)"
+    sources_block = "\n\n".join(sources).strip() if any(s.strip() for s in sources) else "(자료 없음)"
 
     template = _load_template("minutes_internal.md")
     return (template
