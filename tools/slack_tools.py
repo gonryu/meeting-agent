@@ -95,7 +95,8 @@ def format_time(iso_str: str) -> str:
         return iso_str
 
 
-def build_meeting_header_block(meeting: dict, company_name: str) -> list[dict]:
+def build_meeting_header_block(meeting: dict, company_name: str,
+                               attendee_names: list[str] | None = None) -> list[dict]:
     """미팅 기본 정보 블록 (즉시 발송용). 리서치 없이 Calendar 정보만으로 구성."""
     time_str = format_time(meeting.get("start_time", ""))
     meet_link = meeting.get("meet_link", "")
@@ -109,6 +110,8 @@ def build_meeting_header_block(meeting: dict, company_name: str) -> list[dict]:
         f"*📋 {meeting.get('summary', company_name)} ({company_name}) — {time_str} ({link_text}){location_str}*",
         "",
     ]
+    if attendee_names:
+        lines.append(f"👥  *참석자*: {', '.join(attendee_names)}")
     if agenda:
         lines.append("📝  *어젠다*")
         for line in agenda.splitlines():

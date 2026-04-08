@@ -134,6 +134,100 @@ def _generate(prompt: str) -> str:
         return resp.content[0].text.strip()
 
 
+# ── 이메일→이름 변환 ─────────────────────────────────────────
+
+# Slack 멤버 캐시 (email → display_name). 프로세스 수명 동안 유지.
+_slack_email_name_cache: dict[str, str] = {}
+_slack_cache_loaded = False
+
+
+def _load_slack_email_cache(slack_client):
+    """Slack users.list를 한 번 호출하여 email→이름 캐시 구축"""
+    global _slack_cache_loaded
+    if _slack_cache_loaded:
+        return
+    try:
+        resp = slack_client.users_list()
+        for member in resp.get("members", []):
+            if member.get("deleted") or member.get("is_bot"):
+                continue
+            profile = member.get("profile", {})
+            email = profile.get("email", "").lower()
+            name = (profile.get("display_name") or profile.get("real_name") or "").strip()
+            if email and name:
+                _slack_email_name_cache[email] = name
+        _slack_cache_loaded = True
+    except Exception as e:
+        log.warning(f"Slack email→name 캐시 로드 실패: {e}")
+
+
+def _resolve_attendee_names(attendees: list[dict], user_id: str, slack_client) -> list[str]:
+    """참석자 목록의 이메일을 이름으로 변환.
+    우선순위: Calendar displayName → Slack 프로필 → Google 주소록 → 이메일 표시
+    """
+    _load_slack_email_cache(slack_client)
+
+    creds = None
+    try:
+        creds = user_store.get_credentials(user_id)
+    except Exception:
+        pass
+
+    names: list[str] = []
+    for a in attendees:
+        email = a.get("email", "")
+        display = a.get("name", "").strip()
+
+        # 1순위: 캘린더 displayName
+        if display:
+            names.append(display)
+            continue
+
+        # 2순위: Slack 프로필
+        slack_name = _slack_email_name_cache.get(email.lower())
+        if slack_name:
+            names.append(slack_name)
+            continue
+
+        # 3순위: Google 주소록 (이메일로 역검색)
+        if creds:
+            try:
+                contact_name = _find_name_in_contacts(creds, email)
+                if contact_name:
+                    names.append(contact_name)
+                    continue
+            except Exception:
+                pass
+
+        # 못 찾으면 이메일 그대로
+        names.append(email)
+
+    return names
+
+
+def _find_name_in_contacts(creds, email: str) -> str | None:
+    """Google 주소록(People API)에서 이메일로 이름 검색"""
+    try:
+        from googleapiclient.discovery import build as gapi_build
+        svc = gapi_build("people", "v1", credentials=creds)
+        result = svc.people().searchContacts(
+            query=email,
+            readMask="names,emailAddresses",
+            pageSize=3,
+        ).execute()
+        for item in result.get("results", []):
+            person = item.get("person", {})
+            person_emails = [e.get("value", "").lower()
+                             for e in person.get("emailAddresses", [])]
+            if email.lower() in person_emails:
+                name_list = person.get("names", [])
+                if name_list:
+                    return name_list[0].get("displayName", "")
+    except Exception:
+        pass
+    return None
+
+
 # ── 리서치 ──────────────────────────────────────────────────
 
 def _get_creds_and_config(user_id: str):
@@ -273,13 +367,8 @@ def research_company(user_id: str, company_name: str, force: bool = False) -> tu
 
     today = datetime.now().strftime("%Y-%m-%d")
 
-    # 1단계: ParaScope 봇 조회
+    # 1단계: ParaScope 봇 조회 (보류 — 2026-04-08)
     parascope_section = ""
-    parascope_text = _query_parascope(company_name)
-    if parascope_text:
-        parascope_body = _to_bullet_lines(parascope_text)
-        parascope_section = f"## ParaScope 브리핑\n- last_searched: {today}\n{parascope_body}\n"
-        log.info(f"ParaScope 브리핑 수집 완료: {company_name}")
 
     # 2단계: Gmail 이메일 맥락 수집
     email_section = ""
@@ -446,9 +535,12 @@ def get_previous_context(user_id: str, company_name: str, person_names: list[str
 
 def run_briefing(slack_client, user_id: str, event: dict = None,
                  channel: str = None, thread_ts: str = None,
-                 days: int = 1) -> list[str]:
+                 days: int = 1,
+                 start_date: str = None, end_date: str = None,
+                 period_text: str = None) -> list[str]:
     """
-    브리핑 실행. event가 None이면 오늘 캘린더 전체 조회.
+    브리핑 실행. event가 None이면 캘린더 조회.
+    start_date/end_date가 지정되면 해당 범위 조회, 아니면 days 기준.
     Returns: 발송된 메시지 ts 목록
     """
     _cleanup_old_drafts()
@@ -457,12 +549,13 @@ def run_briefing(slack_client, user_id: str, event: dict = None,
     contacts_folder_id = user["contacts_folder_id"]
 
     # 브리핑 기간 텍스트 (인트로 메시지 + 미팅 없음 메시지용)
-    if days == 1:
-        period_text = "향후 24시간"
-    elif days == 7:
-        period_text = "이번 주"
-    else:
-        period_text = f"향후 {days}일"
+    if not period_text:
+        if days == 1:
+            period_text = "향후 24시간"
+        elif days == 7:
+            period_text = "이번 주"
+        else:
+            period_text = f"향후 {days}일"
 
     if event:
         events = [event]
@@ -480,15 +573,10 @@ def run_briefing(slack_client, user_id: str, event: dict = None,
         _post(slack_client, user_id=user_id, channel=channel, thread_ts=thread_ts,
               text=f"📅 {display_name}님의 {period_text} 일정을 보여드리겠습니다.")
 
-        events = cal.get_upcoming_meetings(creds, days=days, from_now=True)
-        import sys
-        from datetime import datetime
-        from zoneinfo import ZoneInfo
-        _now = datetime.now(ZoneInfo("Asia/Seoul"))
-        print(f"[DEBUG] get_upcoming_meetings 결과: {len(events)}개, now={_now.isoformat()}", flush=True, file=sys.stderr)
-        for _ev in events:
-            _s = _ev.get("start", {}).get("dateTime") or _ev.get("start", {}).get("date", "")
-            print(f"[DEBUG] 이벤트: '{_ev.get('summary','')}' start={_s}", flush=True, file=sys.stderr)
+        if start_date and end_date:
+            events = cal.get_upcoming_meetings(creds, start_date=start_date, end_date=end_date)
+        else:
+            events = cal.get_upcoming_meetings(creds, days=days, from_now=True)
 
     if not events:
         _post(slack_client, user_id=user_id, channel=channel, thread_ts=thread_ts,
@@ -748,7 +836,8 @@ def _meeting_to_info(meeting: dict, company_name: str = None) -> dict:
         "duration_minutes": duration,
         "participants": [a.get("name", "") for a in attendees if a.get("name")],
         "participant_emails": {a["name"]: a["email"] for a in attendees if a.get("name") and a.get("email")},
-        "company": company_name,
+        "company_candidates": [company_name] if company_name else [],
+        "company_confirmed": bool(company_name),
         "title": meeting.get("summary", ""),
         "agenda": meeting.get("description", ""),
         "location": meeting.get("location", ""),
@@ -781,7 +870,9 @@ def _send_briefing(slack_client, user_id: str, meeting: dict, company_name: str,
     여러 업체가 있을 때 섞이지 않도록 스레드를 여기서 시작하지 않는다.
     """
     try:
-        header_blocks = build_meeting_header_block(meeting, company_name)
+        attendee_names = _resolve_attendee_names(
+            meeting.get("attendees", []), user_id, slack_client)
+        header_blocks = build_meeting_header_block(meeting, company_name, attendee_names)
         resp = _post(slack_client, user_id=user_id, channel=channel, thread_ts=thread_ts,
                      blocks=header_blocks, text=f"{company_name} 미팅 브리핑")
         if not resp:
@@ -806,7 +897,8 @@ def _send_internal_briefing(slack_client, user_id: str, meeting: dict,
         meet_link = meeting.get("meet_link", "")
         link_text = f"<{meet_link}|Google Meet>" if meet_link else "미팅"
         location = meeting.get("location", "")
-        attendees = [a.get("name") or a.get("email", "") for a in meeting.get("attendees", [])]
+        attendee_names = _resolve_attendee_names(
+            meeting.get("attendees", []), user_id, slack_client)
         agenda = meeting.get("description", "").strip()
 
         location_str = f" · 📍{location}" if location else ""
@@ -814,8 +906,8 @@ def _send_internal_briefing(slack_client, user_id: str, meeting: dict,
             "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
             f"*📋 {meeting['summary']} — {time_str} ({link_text}){location_str}*",
         ]
-        if attendees:
-            lines.append(f"👥  *참석자*: {', '.join(attendees)}")
+        if attendee_names:
+            lines.append(f"👥  *참석자*: {', '.join(attendee_names)}")
         if agenda:
             lines.append(f"📝  *어젠다*: {agenda}")
         else:
@@ -1068,7 +1160,8 @@ def _migrate_pending_agenda():
                 "event_id": event_id,
                 "info": {"title": "", "agenda": "", "date": "", "time": "",
                          "duration_minutes": 60, "participants": [],
-                         "participant_emails": {}, "company": None, "location": ""},
+                         "participant_emails": {}, "company_candidates": [],
+                         "company_confirmed": False, "location": ""},
                 "company": None,
                 "attendee_emails": [],
                 "channel": None,
@@ -1390,6 +1483,14 @@ def update_meeting_from_text(slack_client, user_id: str, user_message: str,
     reply_channel = draft.get("channel") or channel
     reply_thread_ts = thread_ts
 
+    # 확정된 업체명을 draft["info"]에 반영 (LLM이 기존 업체를 인식하도록)
+    if draft.get("company"):
+        existing_companies = [c.strip() for c in draft["company"].split(",") if c.strip()]
+        draft["info"]["company_candidates"] = existing_companies
+        draft["info"]["company_confirmed"] = True
+    # 레거시 company 필드 제거 (LLM 스키마에 없어 혼동 유발)
+    draft["info"].pop("company", None)
+
     # LLM으로 병합 판단
     try:
         raw = _generate(merge_meeting_prompt(draft["info"], user_message))
@@ -1459,12 +1560,28 @@ def update_meeting_from_text(slack_client, user_id: str, user_message: str,
         patch_kwargs["location"] = updated_info.get("location", "")
         change_summary_lines.append(f"장소 → *{patch_kwargs['location']}*")
 
-    if "company" in changed_fields:
-        new_company = updated_info.get("company")
-        if isinstance(new_company, str) and new_company.lower() not in ("null", "none", ""):
-            draft["company"] = new_company
-            patch_kwargs["extended_properties"] = {"private": {"company": new_company}}
-            change_summary_lines.append(f"업체 → *{new_company}*")
+    if "company" in changed_fields or "company_candidates" in changed_fields:
+        new_candidates = updated_info.get("company_candidates", [])
+        new_confirmed = updated_info.get("company_confirmed", False)
+        # 하위 호환: company 필드 직접 반환 시
+        if not new_candidates and updated_info.get("company"):
+            raw_co = updated_info["company"]
+            if isinstance(raw_co, str) and raw_co.lower() not in ("null", "none", ""):
+                new_candidates = [raw_co]
+                new_confirmed = True
+        if new_candidates and new_confirmed:
+            company = ", ".join(new_candidates)
+            draft["company"] = company
+            patch_kwargs["extended_properties"] = {"private": {"company": company}}
+            change_summary_lines.append(f"업체 → *{company}*")
+        elif new_candidates and not new_confirmed:
+            # 기존 확정 업체와 새 후보를 합쳐서 확인 요청
+            existing = [c.strip() for c in (draft.get("company") or "").split(",") if c.strip()]
+            all_candidates = list(dict.fromkeys(existing + new_candidates))
+            _post_company_confirmation(
+                slack_client, user_id, all_candidates,
+                event_id=event_id, channel=reply_channel, thread_ts=reply_thread_ts,
+            )
 
     if "participants" in changed_fields:
         new_names = updated_info.get("participants", [])

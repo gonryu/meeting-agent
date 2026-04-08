@@ -21,18 +21,27 @@ def _service(creds: Credentials):
     return build("calendar", "v3", credentials=creds)
 
 
-def get_upcoming_meetings(creds: Credentials, days: int = 1, from_now: bool = False) -> list[dict]:
+def get_upcoming_meetings(creds: Credentials, days: int = 1, from_now: bool = False,
+                          start_date: str = None, end_date: str = None) -> list[dict]:
     """캘린더 이벤트 조회.
 
     Args:
-        days: 조회 범위 (일 수). from_now=True 시 현재 시각 기준, False 시 오늘 자정 기준.
+        days: 조회 범위 (일 수). start_date/end_date 미지정 시 사용.
         from_now: True면 지금 이 순간부터 days*24h 이내 이벤트 반환.
+        start_date: 조회 시작일 "YYYY-MM-DD" (지정 시 days/from_now 무시)
+        end_date: 조회 종료일 "YYYY-MM-DD" (해당 날짜 자정까지 포함)
     """
     from zoneinfo import ZoneInfo
     kst = ZoneInfo("Asia/Seoul")
     now_kst = datetime.now(kst)
 
-    if from_now:
+    if start_date and end_date:
+        time_min = datetime.fromisoformat(f"{start_date}T00:00:00+09:00")
+        # 현재 시각 이전 이벤트는 제외 (과거 이벤트 필터링)
+        if time_min < now_kst:
+            time_min = now_kst
+        time_max = datetime.fromisoformat(f"{end_date}T23:59:59+09:00")
+    elif from_now:
         time_min = now_kst
         time_max = now_kst + timedelta(days=days)
     else:

@@ -133,8 +133,11 @@ JSON으로만 반환 (설명 없이):
 - "참석자 추가해줘 홍길동" → participants에 홍길동 추가 (기존 유지)
 - "참석자는 홍길동이야" → participants를 [홍길동]으로 대체
 - participants는 개인 이름만, 업체명 제외
-- company_candidates: 새로 감지된 업체명이 있으면 배열에 추가. "업체는 XXX" 명시적 언급이면 company_confirmed: true
-- 업체 관련 언급 없으면 기존 값 유지
+- company_candidates 누적 규칙 (participants와 동일 패턴):
+  - "업체 추가해줘 NewCo" → 기존 company_candidates에 NewCo 추가 (기존 유지), company_confirmed: true
+  - "업체는 NewCo야" → company_candidates를 [NewCo]로 대체, company_confirmed: true
+  - 업체 관련 언급 없으면 기존 값 유지
+- changed_fields에 업체가 변경되면 "company_candidates"를 포함
 - is_update가 false면 updated_info는 기존 드래프트 그대로, changed_fields는 []
 """
 

@@ -92,6 +92,12 @@ Gemini `gemini-2.0-flash`가 기본, 오류(429 등) 시 Claude `claude-haiku-4-
 1. **즉시**: 모든 미팅의 헤더 블록을 순서대로 발송 (`_send_briefing` → `build_meeting_header_block`)
 2. **백그라운드**: 단일 스레드에서 업체별 순차 처리 (`_run_all_briefing_research` → `_run_briefing_research`) — 다중 업체 결과 섞임 방지
 
+**브리핑 기간 파싱**: 인텐트 분류 시 LLM이 자연어 기간을 `start_date`/`end_date` (YYYY-MM-DD) + `period_text` (표시용)로 변환합니다. "이번주", "다음주", "이번달", "앞으로 N일" 등 지원. 주 기준은 일~토. `get_upcoming_meetings()`에 `start_date`/`end_date` 전달 시 해당 범위 조회 (과거 이벤트는 현재 시각 기준 필터링).
+
+**브리핑 참석자 표시**: `_resolve_attendee_names()`가 이메일→이름 변환 (Calendar displayName → Slack 프로필 → Google 주소록 → 이메일 폴백). Slack email→name 캐시는 프로세스 수명 동안 유지.
+
+**ParaScope 연동**: `_query_parascope()` 함수가 구현되어 있으나 호출부 비활성화 상태 (보류 중).
+
 ### Google OAuth — 스코프 주의사항
 
 스코프는 두 파일에서 관리합니다:
@@ -186,4 +192,5 @@ Gemini `gemini-2.0-flash`가 기본, 오류(429 등) 시 Claude `claude-haiku-4-
 - SSL 검증: 사내 방화벽 환경 대응으로 일부 외부 API 호출에 `verify=False` 사용 중
 - 명시적인 커밋과 푸시 명령이 있을때에만 커밋과 푸시를 수행함
 - `tools/calendar.py`의 `create_event()`는 `location` 파라미터를 지원함 (자연어 미팅 생성 시 장소 설정)
+- 일정 드래프트 스레드에서 업체명은 참석자와 동일한 누적 패턴: "업체 추가해줘 X" → 기존 유지 + 추가, "업체는 X야" → 대체. `draft["company"]`는 쉼표 구분 문자열, LLM 호출 전 `company_candidates` 배열로 동기화됨
 
