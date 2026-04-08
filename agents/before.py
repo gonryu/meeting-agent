@@ -747,8 +747,10 @@ def _run_briefing_research(
     """백그라운드 스레드: 업체·인물 리서치 후 순차적으로 Slack에 발송."""
     try:
         # 1. 업체 리서치
-        _post(slack_client, user_id=user_id, channel=channel, thread_ts=thread_ts,
+        _ch = channel or user_id
+        progress_resp = _post(slack_client, user_id=user_id, channel=channel, thread_ts=thread_ts,
               text=f"🔍 *{company_name}* 업체 리서치 중...")
+        progress_ts = progress_resp.get("ts") if progress_resp else None
         company_content = ""
         try:
             company_content, _ = research_company(user_id, company_name)
@@ -757,6 +759,13 @@ def _run_briefing_research(
             msg = ("⚠️ Gemini API 할당량 초과. 잠시 후 다시 시도해주세요."
                    if "429" in err else f"⚠️ 업체 리서치 오류: {err[:200]}")
             _post(slack_client, user_id=user_id, channel=channel, thread_ts=thread_ts, text=msg)
+
+        # 진행 메시지 삭제
+        if progress_ts:
+            try:
+                slack_client.chat_delete(channel=_ch, ts=progress_ts)
+            except Exception:
+                pass
 
         news_lines, parascope_lines, connection_lines, drive_emails = \
             _extract_company_content_sections(company_content)
@@ -776,13 +785,20 @@ def _run_briefing_research(
                         if a.get("email", "").split("@")[-1] not in _internal_domains]
         persons_info: list[dict] = []
         for name in person_names[:3]:
-            _post(slack_client, user_id=user_id, channel=channel, thread_ts=thread_ts,
+            progress_resp = _post(slack_client, user_id=user_id, channel=channel, thread_ts=thread_ts,
                   text=f"👤 *{name}* 인물 리서치 중...")
+            progress_ts = progress_resp.get("ts") if progress_resp else None
             try:
                 info, _ = research_person(user_id, name, company_name)
             except Exception:
                 info = ""
             persons_info.append({"name": name, "raw": info})
+            # 진행 메시지 삭제
+            if progress_ts:
+                try:
+                    slack_client.chat_delete(channel=_ch, ts=progress_ts)
+                except Exception:
+                    pass
 
         if persons_info:
             person_blocks = build_persons_block([{"name": p["name"]} for p in persons_info])
@@ -791,12 +807,19 @@ def _run_briefing_research(
                       blocks=person_blocks, text="👤 담당자 정보")
 
         # 3. 이전 맥락 조회
-        _post(slack_client, user_id=user_id, channel=channel, thread_ts=thread_ts,
+        progress_resp = _post(slack_client, user_id=user_id, channel=channel, thread_ts=thread_ts,
               text="📨 이전 커뮤니케이션 맥락 조회 중...")
+        progress_ts = progress_resp.get("ts") if progress_resp else None
         context = get_previous_context(user_id, company_name, person_names)
 
         if not context.get("emails") and drive_emails:
             context = {**context, "emails": drive_emails}
+
+        if progress_ts:
+            try:
+                slack_client.chat_delete(channel=_ch, ts=progress_ts)
+            except Exception:
+                pass
 
         context_blocks = build_context_block(context)
         _post(slack_client, user_id=user_id, channel=channel, thread_ts=thread_ts,
