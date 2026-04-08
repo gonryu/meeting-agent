@@ -92,7 +92,9 @@ Gemini `gemini-2.0-flash`가 기본, 오류(429 등) 시 Claude `claude-haiku-4-
 1. **즉시**: 모든 미팅의 헤더 블록을 순서대로 발송 (`_send_briefing` → `build_meeting_header_block`)
 2. **백그라운드**: 단일 스레드에서 업체별 순차 처리 (`_run_all_briefing_research` → `_run_briefing_research`) — 다중 업체 결과 섞임 방지
 
-**브리핑 기간 파싱**: 인텐트 분류 시 LLM이 자연어 기간을 `start_date`/`end_date` (YYYY-MM-DD) + `period_text` (표시용)로 변환합니다. "이번주", "다음주", "이번달", "앞으로 N일" 등 지원. 주 기준은 일~토. `get_upcoming_meetings()`에 `start_date`/`end_date` 전달 시 해당 범위 조회 (과거 이벤트는 현재 시각 기준 필터링).
+**브리핑 기간 파싱**: 인텐트 분류 시 LLM이 자연어 기간을 `start_date`/`end_date` (YYYY-MM-DD) + `period_text` (표시용)로 자유롭게 변환합니다. 어떤 자연어 기간 표현이든 지원 (이번주, 다음주 월요일, 4월 셋째 주, 앞으로 2주 등). 기간 미지정 시 기본값은 향후 24시간 (`start_date`/`end_date`가 null → `days=1, from_now=True` 폴백). 주 기준은 일~토. "이번주"와 "일주일간"은 다른 범위.
+
+**브리핑 인물 리서치**: `INTERNAL_DOMAINS` (parametacorp.com, iconloop.com) 이메일 참석자는 내부인으로 인물 리서치 대상에서 제외.
 
 **브리핑 참석자 표시**: `_resolve_attendee_names()`가 이메일→이름 변환 (Calendar displayName → Slack 프로필 → Google 주소록 → 이메일 폴백). Slack email→name 캐시는 프로세스 수명 동안 유지.
 

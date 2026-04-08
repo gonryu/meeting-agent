@@ -768,9 +768,12 @@ def _run_briefing_research(
         _post(slack_client, user_id=user_id, channel=channel, thread_ts=thread_ts,
               blocks=company_blocks, text=f"🏢 {company_name} 업체 정보")
 
-        # 2. 인물 리서치 (순차적으로 각 인물 완료 시 발송)
+        # 2. 인물 리서치 (순차적으로 각 인물 완료 시 발송) — 내부 도메인 제외
+        _internal_domains = set(
+            os.getenv("INTERNAL_DOMAINS", "parametacorp.com,iconloop.com").split(","))
         person_names = [a.get("name") or a.get("email", "").split("@")[0]
-                        for a in meeting.get("attendees", [])]
+                        for a in meeting.get("attendees", [])
+                        if a.get("email", "").split("@")[-1] not in _internal_domains]
         persons_info: list[dict] = []
         for name in person_names[:3]:
             _post(slack_client, user_id=user_id, channel=channel, thread_ts=thread_ts,
