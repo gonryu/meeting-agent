@@ -445,7 +445,8 @@ def get_previous_context(user_id: str, company_name: str, person_names: list[str
 # ── 브리핑 생성 ──────────────────────────────────────────────
 
 def run_briefing(slack_client, user_id: str, event: dict = None,
-                 channel: str = None, thread_ts: str = None) -> list[str]:
+                 channel: str = None, thread_ts: str = None,
+                 days: int = 1) -> list[str]:
     """
     브리핑 실행. event가 None이면 오늘 캘린더 전체 조회.
     Returns: 발송된 메시지 ts 목록
@@ -454,6 +455,14 @@ def run_briefing(slack_client, user_id: str, event: dict = None,
     creds = user_store.get_credentials(user_id)
     user = user_store.get_user(user_id)
     contacts_folder_id = user["contacts_folder_id"]
+
+    # 브리핑 기간 텍스트 (인트로 메시지 + 미팅 없음 메시지용)
+    if days == 1:
+        period_text = "향후 24시간"
+    elif days == 7:
+        period_text = "이번 주"
+    else:
+        period_text = f"향후 {days}일"
 
     if event:
         events = [event]
@@ -469,9 +478,9 @@ def run_briefing(slack_client, user_id: str, event: dict = None,
         except Exception:
             display_name = "사용자"
         _post(slack_client, user_id=user_id, channel=channel, thread_ts=thread_ts,
-              text=f"📅 {display_name}님의 향후 24시간 일정을 보여드리겠습니다.")
+              text=f"📅 {display_name}님의 {period_text} 일정을 보여드리겠습니다.")
 
-        events = cal.get_upcoming_meetings(creds, days=1, from_now=True)
+        events = cal.get_upcoming_meetings(creds, days=days, from_now=True)
         import sys
         from datetime import datetime
         from zoneinfo import ZoneInfo
@@ -483,7 +492,7 @@ def run_briefing(slack_client, user_id: str, event: dict = None,
 
     if not events:
         _post(slack_client, user_id=user_id, channel=channel, thread_ts=thread_ts,
-              text="📅 앞으로 24시간 내 미팅이 없습니다.")
+              text=f"📅 {period_text} 내 미팅이 없습니다.")
         return []
 
     sent_threads = []
@@ -493,16 +502,20 @@ def run_briefing(slack_client, user_id: str, event: dict = None,
     for ev in events:
         meeting = cal.parse_event(ev)
 
-        # extendedProperties에 명시된 업체명만 사용 (자동 추출 없음)
-        company_name = (
+        # extendedProperties에 명시된 업체명 (쉼표 구분 복수 업체 가능)
+        company_raw = (
             ev.get("extendedProperties", {}).get("private", {}).get("company")
         )
+        company_names = [c.strip() for c in company_raw.split(",") if c.strip()] if company_raw else []
 
-        if company_name:
-            ts = _send_briefing(slack_client, user_id, meeting, company_name,
+        if company_names:
+            # 첫 번째 업체를 대표로 브리핑 헤더 발송
+            ts = _send_briefing(slack_client, user_id, meeting, ", ".join(company_names),
                                 channel=channel, thread_ts=thread_ts)
             if ts:
-                research_queue.append((meeting, company_name))
+                # 각 업체별로 개별 리서치 큐 등록
+                for cn in company_names:
+                    research_queue.append((meeting, cn))
         else:
             ts = _send_internal_briefing(slack_client, user_id, meeting,
                                          channel=channel, thread_ts=thread_ts)
@@ -883,11 +896,17 @@ def create_meeting_from_text(slack_client, user_id: str, user_message: str,
               text=f"⚠️ JSON 파싱 오류: {e}\n원본 응답: `{raw[:300]}`")
         return
 
-    # 외부 업체/기관명 (company 필드) — 개인 담당자와 분리된 필드
-    company = info.get("company") or None
-    if isinstance(company, str) and company.lower() in ("null", "none", ""):
-        company = None
-    log.info(f"미팅 파싱 결과 — company={company}, participants={info.get('participants')}")
+    # 업체명 추출 (company_candidates / company_confirmed)
+    company_candidates = info.get("company_candidates", [])
+    company_confirmed = info.get("company_confirmed", False)
+    # 하위 호환: 기존 company 필드도 처리
+    if not company_candidates and info.get("company"):
+        old_company = info["company"]
+        if isinstance(old_company, str) and old_company.lower() not in ("null", "none", ""):
+            company_candidates = [old_company]
+            company_confirmed = True
+    company = company_candidates[0] if (company_candidates and company_confirmed) else None
+    log.info(f"미팅 파싱 결과 — candidates={company_candidates}, confirmed={company_confirmed}, participants={info.get('participants')}")
 
     attendee_emails = []
     missing_names = []
@@ -914,9 +933,11 @@ def create_meeting_from_text(slack_client, user_id: str, user_message: str,
             "company": company,
             "channel": channel,
             "thread_ts": thread_ts,
+            "user_msg_ts": user_msg_ts,
             "attendee_emails": attendee_emails,
             "missing_names": missing_names,
             "pending_selections": pending_selections,
+            "stage": "email_select",
         }
         _post_email_selection(slack_client, user_id, pending_selections[0], channel, thread_ts)
         return
@@ -925,8 +946,18 @@ def create_meeting_from_text(slack_client, user_id: str, user_message: str,
         _post(slack_client, user_id=user_id, channel=channel, thread_ts=thread_ts,
               text=f"⚠️ *{', '.join(missing_names)}*의 이메일을 찾지 못했습니다. 해당 참석자 없이 일정을 생성합니다.")
 
-    _create_calendar_event(slack_client, user_id, info, company, attendee_emails,
-                           channel, thread_ts, user_msg_ts=user_msg_ts)
+    # 일정 먼저 생성 (업체명 미확정이어도 진행)
+    created_event_id = _create_calendar_event(
+        slack_client, user_id, info, company, attendee_emails,
+        channel, thread_ts, user_msg_ts=user_msg_ts,
+    )
+
+    # 업체명 후보가 있지만 확정 안 됨 → 일정 생성 후 별도로 확인 요청
+    if company_candidates and not company_confirmed and created_event_id:
+        _post_company_confirmation(
+            slack_client, user_id, company_candidates,
+            event_id=created_event_id, channel=channel, thread_ts=thread_ts,
+        )
 
 
 def _find_email_candidates(user_id: str, name: str, slack_client) -> list[str]:
@@ -1072,6 +1103,112 @@ def _cleanup_old_drafts(max_days: int = 7):
 _migrate_pending_agenda()
 
 
+def _post_company_confirmation(slack_client, user_id: str, candidates: list[str],
+                                event_id: str = None,
+                                channel: str = None, thread_ts: str = None):
+    """업체명 다중 선택 확인 메시지 발송 (체크박스 + 확인 버튼)"""
+    options = [
+        {
+            "text": {"type": "mrkdwn", "text": f"*{name}*"},
+            "value": name,
+        }
+        for name in candidates
+    ]
+    blocks = [
+        {
+            "type": "section",
+            "text": {"type": "mrkdwn",
+                     "text": "🏢 다음 업체가 감지되었습니다. 관련 업체를 선택해주세요:"},
+        },
+        {
+            "type": "actions",
+            "elements": [
+                {
+                    "type": "checkboxes",
+                    "action_id": "company_checkboxes",
+                    "initial_options": options,  # 기본 전체 선택
+                    "options": options,
+                },
+            ],
+        },
+        {
+            "type": "actions",
+            "elements": [
+                {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "확인"},
+                    "value": json.dumps({"event_id": event_id, "candidates": candidates}),
+                    "action_id": "confirm_company_submit",
+                    "style": "primary",
+                },
+                {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "업체 없음 (내부 회의)"},
+                    "value": json.dumps({"event_id": event_id}),
+                    "action_id": "confirm_company_none",
+                },
+            ],
+        },
+    ]
+    _post(slack_client, user_id=user_id, channel=channel, thread_ts=thread_ts,
+          blocks=blocks, text="업체명 확인")
+
+
+def handle_company_confirmation(slack_client, body: dict):
+    """업체 확인/업체 없음 버튼 클릭 → 캘린더 이벤트의 업체(company) 필드 업데이트"""
+    user_id = body["user"]["id"]
+    action = body["actions"][0]
+    action_id = action.get("action_id", "")
+
+    # 체크박스 토글은 무시 (확인 버튼 클릭 시에만 처리)
+    if action_id == "company_checkboxes":
+        return
+
+    try:
+        payload = json.loads(action["value"])
+        event_id = payload.get("event_id")
+    except (KeyError, json.JSONDecodeError):
+        return
+
+    # "업체 없음" 버튼
+    if action_id == "confirm_company_none":
+        slack_client.chat_postMessage(channel=user_id, text="내부 회의로 처리합니다.")
+        return
+
+    # "확인" 버튼 — 체크박스에서 선택된 업체 추출
+    selected = []
+    state_values = body.get("state", {}).get("values", {})
+    for block_values in state_values.values():
+        cb = block_values.get("company_checkboxes")
+        if cb and cb.get("selected_options"):
+            selected = [opt["value"] for opt in cb["selected_options"]]
+            break
+
+    if not selected:
+        slack_client.chat_postMessage(channel=user_id, text="선택된 업체가 없습니다. 내부 회의로 처리합니다.")
+        return
+
+    company = ", ".join(selected)
+
+    # 캘린더 이벤트 extendedProperties에 업체명 저장
+    if event_id:
+        try:
+            creds = user_store.get_credentials(user_id)
+            cal.update_event(creds, event_id,
+                             extended_properties={"private": {"company": company}})
+        except Exception as e:
+            log.warning(f"업체명 extendedProperties 저장 실패: {e}")
+
+        # _meeting_drafts에도 company 반영
+        for ts_key, draft in _meeting_drafts.items():
+            if draft.get("event_id") == event_id:
+                draft["company"] = company
+
+    slack_client.chat_postMessage(
+        channel=user_id, text=f"🏢 업체가 *{company}*(으)로 등록되었습니다."
+    )
+
+
 def _post_email_selection(slack_client, user_id: str, selection: dict,
                           channel: str = None, thread_ts: str = None):
     """이메일 후보 선택 Block Kit 메시지 발송"""
@@ -1189,13 +1326,17 @@ def _create_calendar_event(slack_client, user_id: str, info: dict, company: str 
                 attendee_count=attendee_count,
                 channel=channel,
                 thread_ts=thread_ts,
+                event_id=event_id,
             ),
             daemon=True,
         ).start()
 
+        return event_id
+
     except Exception as e:
         _post(slack_client, user_id=user_id, channel=channel, thread_ts=thread_ts,
               text=f"⚠️ 미팅 생성 실패: {e}")
+        return None
 
 
 def handle_email_selection(slack_client, body: dict):

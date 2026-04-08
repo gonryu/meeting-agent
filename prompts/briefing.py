@@ -46,8 +46,11 @@ def briefing_summary_prompt(
 
 
 def parse_meeting_prompt(user_message: str) -> str:
-    today = datetime.now().strftime("%Y-%m-%d")
-    return f"""다음 메시지에서 미팅 정보를 추출해줘. 오늘 날짜는 {today}이야.
+    from zoneinfo import ZoneInfo
+    now = datetime.now(ZoneInfo("Asia/Seoul"))
+    today = now.strftime("%Y-%m-%d")
+    now_time = now.strftime("%H:%M")
+    return f"""다음 메시지에서 미팅 정보를 추출해줘. 오늘 날짜는 {today}이야. 현재 시각은 {now_time} (KST)이야.
 
 메시지: "{user_message}"
 
@@ -58,7 +61,8 @@ JSON 형식으로만 답변 (다른 텍스트 없이):
   "duration_minutes": 60,
   "participants": ["실제 담당자 개인 이름1", "실제 담당자 개인 이름2"],
   "participant_emails": {{"이름1": "email@example.com"}},
-  "company": "외부 기관/업체명 또는 null",
+  "company_candidates": ["업체명1", "업체명2"],
+  "company_confirmed": false,
   "title": "미팅 제목",
   "agenda": "어젠다 (없으면 빈 문자열)",
   "location": "장소 (없으면 빈 문자열)"
@@ -69,13 +73,20 @@ JSON 형식으로만 답변 (다른 텍스트 없이):
   - 기관명·업체명·약어(KISA, 삼성전자, 카카오 등)는 절대 포함하지 말 것
   - 개인 이름이 없으면 빈 배열 []
   - 이름만 추출 ("김민환(kim@co.com)" → "김민환")
-- company: **"업체는 XXX"**, **"업체명은 XXX"**, **"외부 업체 XXX"** 처럼 명시적으로 언급된 경우만 추출
-  - 메시지에 업체명이 명시되지 않으면 무조건 null (내부 회의)
-  - "KISA 미팅 잡아줘" → null (명시 없음)
-  - "업체는 한국은행이야" → "한국은행"
-  - "한국은행과 미팅, 업체명은 한국은행" → "한국은행"
+- company_candidates: 메시지에서 감지된 외부 기관/업체명 목록 (배열)
+  - "업체는 한국은행이야" → ["한국은행"], company_confirmed: true
+  - "KISA 미팅 잡아줘" → ["KISA"], company_confirmed: false
+  - "한국은행과 미팅, 업체명은 한국은행" → ["한국은행"], company_confirmed: true
+  - "KISA 블록체인특성화사업 평가 사전미팅" → ["KISA"], company_confirmed: false
+  - "내일 3시 홍길동 미팅" → [], company_confirmed: false
+  - 기관명·약어도 업체 후보에 포함 (participants에는 넣지 말 것)
+- company_confirmed: **"업체는 XXX"**, **"업체명은 XXX"** 처럼 명시적 언급이면 true, 아니면 false
 - participant_emails: 메시지에 이메일이 명시된 경우만 포함, 없으면 {{}}
 - "15시" → "15:00", "오후 3시" → "15:00", "오전 10시" → "10:00"
+- "2시간 뒤" → 현재 시각({now_time})에 2시간 추가하여 계산
+- "30분 뒤" / "30분 후" → 현재 시각에 30분 추가
+- "내일 이 시간" → 내일 날짜 + 현재 시각({now_time})
+- 상대 시간 계산 시 날짜가 넘어가면 date도 함께 업데이트
 - 시간 언급 없으면 "09:00"
 - "오늘" → {today}, "내일" → 오늘 날짜 +1일 계산
 - duration 언급 없으면 60
@@ -83,9 +94,12 @@ JSON 형식으로만 답변 (다른 텍스트 없이):
 
 
 def merge_meeting_prompt(existing_info: dict, new_message: str) -> str:
-    today = datetime.now().strftime("%Y-%m-%d")
+    from zoneinfo import ZoneInfo
+    now = datetime.now(ZoneInfo("Asia/Seoul"))
+    today = now.strftime("%Y-%m-%d")
+    now_time = now.strftime("%H:%M")
     existing_json = json.dumps(existing_info, ensure_ascii=False, indent=2)
-    return f"""현재 진행 중인 일정 드래프트가 있어. 사용자의 새 메시지가 이 일정에 대한 추가/수정 정보인지 판단하고, 맞다면 드래프트를 업데이트해줘. 오늘 날짜는 {today}.
+    return f"""현재 진행 중인 일정 드래프트가 있어. 사용자의 새 메시지가 이 일정에 대한 추가/수정 정보인지 판단하고, 맞다면 드래프트를 업데이트해줘. 오늘 날짜는 {today}. 현재 시각은 {now_time} (KST).
 
 현재 드래프트:
 {existing_json}
@@ -105,7 +119,8 @@ JSON으로만 반환 (설명 없이):
     "duration_minutes": 60,
     "participants": [],
     "participant_emails": {{}},
-    "company": null,
+    "company_candidates": [],
+    "company_confirmed": false,
     "title": "미팅 제목",
     "agenda": "",
     "location": ""
@@ -118,7 +133,8 @@ JSON으로만 반환 (설명 없이):
 - "참석자 추가해줘 홍길동" → participants에 홍길동 추가 (기존 유지)
 - "참석자는 홍길동이야" → participants를 [홍길동]으로 대체
 - participants는 개인 이름만, 업체명 제외
-- company: **"업체는 XXX"** 처럼 명시적으로 언급된 경우만 업데이트. 언급 없으면 기존 값 유지
+- company_candidates: 새로 감지된 업체명이 있으면 배열에 추가. "업체는 XXX" 명시적 언급이면 company_confirmed: true
+- 업체 관련 언급 없으면 기존 값 유지
 - is_update가 false면 updated_info는 기존 드래프트 그대로, changed_fields는 []
 """
 

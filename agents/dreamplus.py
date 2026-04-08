@@ -378,18 +378,16 @@ def confirm_room_booking(slack_client, body: dict):
     _post(slack_client, user_id,
           f"✅ 드림플러스 회의실 예약 완료!\n*{room_name}* | {time_str} | {meeting_title}")
 
-    # 최근 생성된 캘린더 이벤트에 장소 업데이트
-    try:
-        from agents.before import _meeting_drafts
-        import tools.calendar as cal
-        draft = _meeting_drafts.get(user_id)
-        if draft and draft.get("event_id"):
+    # 캘린더 이벤트에 장소 업데이트
+    if event_id:
+        try:
+            import tools.calendar as cal
             creds = user_store.get_credentials(user_id)
-            cal.update_event(creds, draft["event_id"], location=location_str)
+            cal.update_event(creds, event_id, location=location_str)
             _post(slack_client, user_id,
                   f"📍 캘린더 일정 장소가 *{location_str}* 으로 업데이트되었습니다.")
-    except Exception as e:
-        log.warning(f"캘린더 location 업데이트 실패: {e}")
+        except Exception as e:
+            log.warning(f"캘린더 location 업데이트 실패: {e}")
 
 
 # ── /회의실조회 ───────────────────────────────────────────────
@@ -668,7 +666,8 @@ def show_credits(slack_client, user_id: str,
 
 def auto_book_room(slack_client, *, user_id: str, start_dt: datetime,
                    end_dt: datetime, title: str, attendee_count: int = 2,
-                   channel: str = None, thread_ts: str = None):
+                   channel: str = None, thread_ts: str = None,
+                   event_id: str = None):
     """미팅 생성 직후 자동 호출 — 회의실 추천 버튼 Slack 발송.
     드림플러스 계정 미설정 또는 오류 시 조용히 스킵.
     """
