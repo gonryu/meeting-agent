@@ -432,7 +432,13 @@ Step 1 (인프라)                    ← 시작점, 모든 Step의 전제
 After Agent는 기존 환경변수를 그대로 사용합니다.
 Gmail 발송 스코프는 OAuth 스코프 추가로 처리되며 별도 API 키가 필요 없습니다.
 
-> 향후 Trello 연동(Phase 4.5) 구현 시에는 `TRELLO_API_KEY`, `TRELLO_TOKEN`, `TRELLO_BOARD_ID` 추가 필요.
+> ✅ Trello 연동 구현 완료. 환경변수: `TRELLO_API_KEY` (앱 공통), `TRELLO_BOARD_ID`. Token은 사용자별 DB 저장.
+>
+> **Trello 등록 흐름 (Step D-2):**
+> 1. `_infer_company_name(title)` — LLM으로 회의 제목에서 업체명 추론
+> 2. `_propose_trello_registration()` — 액션아이템이 있고 업체명 추론 성공 시 Slack 등록/건너뜀 버튼 발송
+> 3. `handle_trello_register()` — 등록 버튼 클릭 → `trello.add_checklist_items()` 호출 (카드 없으면 자동 생성)
+> 4. 체크리스트 항목 포맷: `[담당자] 작업 제목 (기한: YYYY-MM-DD)`
 
 ---
 

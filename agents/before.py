@@ -16,7 +16,7 @@ from slack_sdk import WebClient
 log = logging.getLogger(__name__)
 
 from tools import calendar as cal
-from tools import drive, gmail
+from tools import drive, gmail, trello
 from tools.slack_tools import (
     build_briefing_message,
     build_meeting_header_block,
@@ -430,7 +430,16 @@ def get_previous_context(user_id: str, company_name: str, person_names: list[str
     except Exception as e:
         log.warning(f"회의록 검색 실패: {e}")
 
-    return {"trello": [], "emails": emails[:3], "minutes": minutes}
+    # Trello 카드 컨텍스트 조회 (미완료 체크리스트 항목 + 최근 코멘트)
+    trello_items = []
+    trello_context = {}
+    try:
+        trello_context = trello.get_card_context(user_id, company_name, limit_comments=3)
+        trello_items = trello_context.get("incomplete_items", [])
+    except Exception as e:
+        log.warning(f"Trello 조회 실패: {e}")
+
+    return {"trello": trello_items, "emails": emails[:3], "minutes": minutes}
 
 
 # ── 브리핑 생성 ──────────────────────────────────────────────
@@ -1123,6 +1132,7 @@ def _create_calendar_event(slack_client, user_id: str, info: dict, company: str 
             end_dt=end_dt,
             attendee_emails=attendee_emails,
             description=info.get("agenda", ""),
+            location=info.get("location", ""),
         )
         event_id = event["id"]
 

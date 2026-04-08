@@ -270,15 +270,20 @@ def get_previous_context(user_id, company_name, person_names) -> dict:
     # NFD/NFC 유니코드 정규화 적용 (macOS 업로드 파일은 NFD, 코드 문자열은 NFC)
     minutes = [...]  # [{id, name, modifiedTime}]
 
-    return {"trello": [], "emails": emails[:3], "minutes": minutes}
+    # Trello 카드 컨텍스트 조회 (사용자별 인증 필요)
+    trello_context = trello.get_card_context(user_id, company_name, limit_comments=3)
+    trello_items = trello_context.get("incomplete_items", [])
+
+    return {"trello": trello_items, "emails": emails[:3], "minutes": minutes}
 ```
 
 브리핑 표시:
+- **Trello**: 미완료 체크리스트 항목 (최대 3개, `Trello 미완료: item1 / item2` 형식)
 - **회의록**: 파일명 + 날짜 + Drive 열기 링크 (최대 3개)
 - **이메일**: 가장 최근 1개의 snippet 앞 60자
-- 둘 다 없으면: "이전 미팅 기록 없음"
+- 모두 없으면: "이전 미팅 기록 없음"
 
-> ⚠️ Trello 미구현 (`"trello": []` 하드코딩)
+> ✅ Trello 연동 구현 완료 — `tools/trello.py`의 `get_card_context()` 사용, 사용자별 인증 필요 (`/trello`)
 
 ### 6.4 브리핑 메시지 (`_send_briefing` + 비동기 리서치)
 
@@ -600,7 +605,7 @@ meeting-agent/
 
 | 항목 | 현황 |
 |------|------|
-| Trello 연동 | `"trello": []` 하드코딩 |
+| Trello 연동 | ✅ 구현 완료 (`tools/trello.py` → `get_card_context()`) |
 | 인물 정보 7일 신선도 체크 | 파일 존재 여부만 확인 |
 | OAuth 토큰 자동 갱신 | 만료 시 `/재등록` 필요 |
 | 이메일 본문 LLM 요약 | 본문 앞 100자 저장 |

@@ -61,7 +61,8 @@ def init_db():
                     "dreamplus_email TEXT",
                     "dreamplus_password_enc TEXT",
                     "dreamplus_jwt TEXT",
-                    "dreamplus_jwt_exp TEXT"):
+                    "dreamplus_jwt_exp TEXT",
+                    "trello_token_enc TEXT"):
             try:
                 conn.execute(f"ALTER TABLE users ADD COLUMN {col}")
             except Exception:
@@ -247,6 +248,39 @@ def save_dreamplus_jwt(slack_user_id: str, jwt: str, public_key: str,
         conn.execute(
             "UPDATE users SET dreamplus_jwt = ?, dreamplus_jwt_exp = ? WHERE slack_user_id = ?",
             (stored, exp_dt.isoformat(), slack_user_id),
+        )
+
+
+# ── Trello ────────────────────────────────────────────────────
+
+def save_trello_token(slack_user_id: str, token: str) -> None:
+    """Trello 사용자 토큰을 Fernet 암호화하여 저장"""
+    enc = _fernet().encrypt(token.encode()).decode()
+    with _conn() as conn:
+        conn.execute(
+            "UPDATE users SET trello_token_enc = ? WHERE slack_user_id = ?",
+            (enc, slack_user_id),
+        )
+
+
+def get_trello_token(slack_user_id: str) -> str | None:
+    """Trello 토큰 복호화 반환. 미설정 시 None."""
+    with _conn() as conn:
+        row = conn.execute(
+            "SELECT trello_token_enc FROM users WHERE slack_user_id = ?",
+            (slack_user_id,),
+        ).fetchone()
+    if not row or not row["trello_token_enc"]:
+        return None
+    return _fernet().decrypt(row["trello_token_enc"].encode()).decode()
+
+
+def clear_trello_token(slack_user_id: str) -> None:
+    """Trello 연결 해제 (토큰 삭제)"""
+    with _conn() as conn:
+        conn.execute(
+            "UPDATE users SET trello_token_enc = NULL WHERE slack_user_id = ?",
+            (slack_user_id,),
         )
 
 

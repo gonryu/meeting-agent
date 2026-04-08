@@ -222,6 +222,22 @@ def handle_message(event, client):
                 handle_event_title_reply(client, user_id, text)
                 return
 
+        # Trello 토큰 입력 대기 중이면 토큰으로 처리 (return_url 실패 시 폴백)
+        if text and oauth_server.is_pending_trello_token(user_id):
+            token = text.strip()
+            if len(token) > 30 and " " not in token:
+                if oauth_server.save_trello_token_from_dm(user_id, token):
+                    client.chat_postMessage(
+                        channel=user_id,
+                        text="✅ Trello 계정이 연결되었습니다! 이제 브리핑에서 Trello 카드 정보를 볼 수 있습니다.",
+                    )
+                else:
+                    client.chat_postMessage(
+                        channel=user_id,
+                        text="❌ Trello 토큰 저장에 실패했습니다. `/trello` 로 다시 시도해주세요.",
+                    )
+                return
+
         _route_message(text, client, user_id=user_id, user_msg_ts=event.get("ts"))
 
 
@@ -728,6 +744,20 @@ def handle_after_done_action_item(ack, body, client):
     after.handle_complete_action_item(client, body)
 
 
+@app.action("trello_register")
+def handle_trello_register(ack, body, client):
+    ack()
+    threading.Thread(
+        target=after.handle_trello_register, args=(client, body), daemon=True
+    ).start()
+
+
+@app.action("trello_skip")
+def handle_trello_skip(ack, body, client):
+    ack()
+    after.handle_trello_skip(client, body)
+
+
 # ── 미팅 이벤트 선택 액션 핸들러 ─────────────────────────────
 
 def _handle_meeting_event_select(ack, body, client):
@@ -856,6 +886,47 @@ app.command("/dreamplus")(_dp_settings_handler)
 def handle_dp_settings_modal(ack, body, client):
     ack()
     dreamplus_agent.handle_settings_modal(client, body)
+
+
+# ── Trello 설정 ─────────────────────────────────────────────
+
+def _trello_setup_handler(ack, body, client):
+    ack()
+    user_id = body["user_id"]
+    if not _check_registered(client, user_id):
+        return
+    try:
+        auth_url = oauth_server.build_trello_auth_url(user_id)
+        client.chat_postMessage(
+            channel=user_id,
+            text=(
+                f"🔗 *Trello 계정 연결*\n\n"
+                f"아래 링크를 클릭하여 Trello 접근을 허용하세요.\n{auth_url}\n\n"
+                f"승인 후 표시되는 토큰을 복사하여 이 DM에 붙여넣어 주세요."
+            ),
+        )
+    except Exception as e:
+        client.chat_postMessage(
+            channel=user_id,
+            text=f"❌ Trello 인증 URL 생성 실패: {e}",
+        )
+
+app.command("/trello")(_trello_setup_handler)
+
+
+def _trello_disconnect_handler(ack, body, client):
+    ack()
+    user_id = body["user_id"]
+    from store import user_store
+    from tools import trello
+    user_store.clear_trello_token(user_id)
+    trello.clear_user_cache(user_id)
+    client.chat_postMessage(
+        channel=user_id,
+        text="✅ Trello 연결이 해제되었습니다.",
+    )
+
+app.command("/trello-disconnect")(_trello_disconnect_handler)
 
 
 def _dp_book_handler(ack, body, client):

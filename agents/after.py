@@ -19,7 +19,7 @@ import anthropic
 from google import genai
 
 from store import user_store
-from tools import calendar as cal, drive, gmail
+from tools import calendar as cal, drive, gmail, trello
 from prompts.briefing import extract_action_items_prompt
 
 log = logging.getLogger(__name__)
@@ -119,6 +119,17 @@ def trigger_after_meeting(
             creds=creds,
             contacts_folder_id=contacts_folder_id,
         )
+
+        # D-2. Trello 액션아이템 등록 제안
+        try:
+            _propose_trello_registration(
+                slack_client,
+                user_id=user_id,
+                event_id=event_id or title,
+                title=title,
+            )
+        except Exception as e:
+            log.warning(f"Trello 등록 제안 실패 (무시): {e}")
 
         # E. Contacts 자동 갱신
         try:
@@ -478,6 +489,148 @@ def action_item_reminder(slack_client) -> None:
                 slack_client.chat_postMessage(channel=uid, text="\n".join(lines))
             except Exception as e:
                 log.warning(f"리마인더 DM 실패 ({uid}): {e}")
+
+
+# ── D-2. Trello 액션아이템 등록 ─────────────────────────────
+
+_INFER_COMPANY_PROMPT = """다음 회의 제목에서 업체(회사)명만 추출하세요.
+업체명이 없으면 빈 문자열을 반환하세요. 업체명만 반환하고 다른 말은 하지 마세요.
+
+회의 제목: {title}
+업체명:"""
+
+
+def _infer_company_name(title: str) -> str:
+    """회의 제목에서 업체명 추론 (LLM)"""
+    try:
+        result = _generate(_INFER_COMPANY_PROMPT.format(title=title))
+        # 따옴표/공백 제거
+        result = result.strip().strip('"').strip("'").strip()
+        if result in ("없음", "없습니다", "N/A", "null", ""):
+            return ""
+        return result
+    except Exception as e:
+        log.warning(f"업체명 추론 실패: {e}")
+        return ""
+
+
+def _propose_trello_registration(
+    slack_client, *,
+    user_id: str,
+    event_id: str,
+    title: str,
+) -> None:
+    """액션아이템이 있으면 Trello 등록 여부를 묻는 Slack 메시지 발송"""
+    items = user_store.get_action_items(event_id)
+    if not items:
+        log.info(f"액션아이템 없음 — Trello 등록 스킵: {title}")
+        return
+
+    company_name = _infer_company_name(title)
+    if not company_name:
+        log.info(f"업체명 추론 불가 — Trello 등록 스킵: {title}")
+        return
+
+    # 버튼 value에 event_id + company_name 인코딩
+    value = json.dumps({"event_id": event_id, "company": company_name})
+
+    card_info = trello.find_card_by_name(user_id, company_name)
+    card_status = f"기존 카드: {card_info['list_name']}" if card_info else "신규 카드 생성 (Contact/Meeting)"
+
+    slack_client.chat_postMessage(
+        channel=user_id,
+        text=f"📌 Trello에 액션아이템 등록할까요? ({company_name})",
+        blocks=[
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": (
+                        f"📌 *Trello에 액션아이템 등록할까요?*\n"
+                        f"*업체:* {company_name} | *액션아이템:* {len(items)}건\n"
+                        f"*카드 상태:* {card_status}"
+                    ),
+                },
+            },
+            {
+                "type": "actions",
+                "elements": [
+                    {
+                        "type": "button",
+                        "text": {"type": "plain_text", "text": "등록"},
+                        "style": "primary",
+                        "action_id": "trello_register",
+                        "value": value,
+                    },
+                    {
+                        "type": "button",
+                        "text": {"type": "plain_text", "text": "건너뜀"},
+                        "action_id": "trello_skip",
+                        "value": value,
+                    },
+                ],
+            },
+        ],
+    )
+
+
+def handle_trello_register(slack_client, body: dict) -> None:
+    """'등록' 버튼 핸들러 — Trello 카드에 액션아이템 체크리스트 추가"""
+    user_id = body["user"]["id"]
+    try:
+        payload = json.loads(body["actions"][0]["value"])
+        event_id = payload["event_id"]
+        company_name = payload["company"]
+    except (KeyError, json.JSONDecodeError) as e:
+        log.warning(f"Trello 등록 payload 파싱 실패: {e}")
+        slack_client.chat_postMessage(
+            channel=user_id, text="❌ Trello 등록 실패: 잘못된 요청"
+        )
+        return
+
+    items = user_store.get_action_items(event_id)
+    if not items:
+        slack_client.chat_postMessage(
+            channel=user_id, text="액션아이템이 없어 Trello 등록을 건너뜁니다."
+        )
+        return
+
+    # 체크리스트 항목 형식 변환
+    checklist_items = []
+    for it in items:
+        checklist_items.append({
+            "assignee": it.get("assignee", ""),
+            "content": it.get("content", ""),
+            "due_date": it.get("due_date"),
+        })
+
+    count = trello.add_checklist_items(user_id, company_name, checklist_items)
+
+    if count > 0:
+        card_info = trello.find_card_by_name(user_id, company_name)
+        card_url = card_info["url"] if card_info else ""
+        url_text = f"\n<{card_url}|카드 열기>" if card_url else ""
+        slack_client.chat_postMessage(
+            channel=user_id,
+            text=(
+                f"📌 *Trello 액션아이템 등록 완료*\n"
+                f"*카드:* {company_name}\n"
+                f"*등록 항목:* {count}건{url_text}"
+            ),
+        )
+    else:
+        slack_client.chat_postMessage(
+            channel=user_id,
+            text=f"❌ Trello 등록 실패: {company_name} 카드에 항목을 추가하지 못했습니다.",
+        )
+
+
+def handle_trello_skip(slack_client, body: dict) -> None:
+    """'건너뜀' 버튼 핸들러"""
+    user_id = body["user"]["id"]
+    slack_client.chat_postMessage(
+        channel=user_id, text="이번에는 Trello 등록을 건너뛰었습니다."
+    )
 
 
 # ── E. Contacts 자동 갱신 ────────────────────────────────────

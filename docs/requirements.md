@@ -489,14 +489,16 @@ Slack 초안 메시지 발송 (버튼 4개)
 
 - 외부 참석자 `People/{이름}.md` 파일에 `last_met` 날짜 + 미팅 이력 1줄 자동 추가
 
-### 7.5 Trello 연동 ❌
+### 7.5 Trello 연동 ✅
 
 - 원본 요구사항(FR-B06-2, FR-A05, FR-A06): Trello 카드 생성·조회·업데이트
-- 계획:
-  - 브리핑 시: 해당 업체 관련 Trello 카드 내용을 맥락으로 포함 (FR-B06-2)
-  - 회의록 생성 후: 액션아이템을 Trello 카드로 자동 생성 (FR-A05)
-  - 회의 진행 상황을 기존 Trello 카드에 업데이트 (FR-A06)
-- 환경변수 필요: `TRELLO_API_KEY`, `TRELLO_TOKEN`, `TRELLO_BOARD_ID`
+- 구현 완료:
+  - 브리핑 시: 해당 업체 관련 Trello 카드의 미완료 체크리스트 항목을 맥락으로 포함 (FR-B06-2) ✅
+  - 회의록 생성 후: 액션아이템을 Trello 카드 체크리스트에 등록 제안 → 사용자 승인 후 등록 (FR-A05) ✅
+  - 카드 없는 업체는 Contact/Meeting 리스트에 자동 생성 ✅
+- 사용자별 OAuth 인증: `/trello` 커맨드 → 브라우저 Trello 승인 → 토큰 자동 저장 ✅
+- 환경변수: `TRELLO_API_KEY` (앱 공통), `TRELLO_BOARD_ID` — Token은 사용자별 DB 저장
+- `DRY_RUN_TRELLO=true`로 API 호출 없이 테스트 가능
 
 ### 7.6 제안서 / 리서치 초안 생성 ❌
 
@@ -673,9 +675,8 @@ MeetingAgent/
 | `OAUTH_CALLBACK_URL`  | Google OAuth 콜백 URL (ngrok 등) | ✅   |
 | `INTERNAL_DOMAINS`    | 내부 도메인 목록 (쉼표 구분)             | ✅   |
 | `SLACK_ERROR_CHANNEL` | 에러 로깅용 Slack 채널 ID            | ❌   |
-| `TRELLO_API_KEY`      | Trello API 키                  | ❌   |
-| `TRELLO_TOKEN`        | Trello OAuth 토큰               | ❌   |
-| `TRELLO_BOARD_ID`     | 연동할 Trello 보드 ID              | ❌   |
+| `TRELLO_API_KEY`      | Trello Power-Up API 키 (앱 공통)  | ✅   |
+| `TRELLO_BOARD_ID`     | 연동할 Trello 보드 ID              | ✅   |
 | `DREAMPLUS_BASE_URL`  | Dreamplus API 기본 URL            | ✅   |
 
 
@@ -836,11 +837,12 @@ meeting-agent/
 - Contacts 자동 갱신 (FR-A09) ✅
 - 제안서 / 리서치 초안 생성 (FR-A10, FR-A11) ❌ (미구현)
 
-### Phase 4.5 — Trello 연동 ❌ 계획
+### Phase 4.5 — Trello 연동 ✅
 
-- 브리핑 시 관련 Trello 카드 맥락 포함 (FR-B06-2)
-- 회의록 생성 후 액션아이템 → Trello 카드 자동 생성 (FR-A05)
-- 기존 Trello 카드에 회의 결과 업데이트 (FR-A06)
+- 브리핑 시 관련 Trello 카드 미완료 체크리스트 포함 (FR-B06-2) ✅
+- 회의록 생성 후 액션아이템 → Trello 카드 체크리스트 등록 제안 (FR-A05) ✅
+- 사용자별 OAuth 인증 (`/trello` 커맨드) ✅
+- 구현 파일: `tools/trello.py`, `server/oauth.py`, `agents/before.py`, `agents/after.py`
 
 ### Phase 5 — 파일 업로드 확장 ❌ 계획
 

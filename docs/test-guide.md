@@ -556,3 +556,20 @@ After Agent(`agents/after.py`)는 구현 완료되었으나 테스트가 없음.
 | `TestUpdateContactsAfterMeeting` | 외부 참석자 `People/` 파일 `last_met` 업데이트 |
 | `TestActionItemsDB` | `action_items` 테이블 CRUD |
 | `TestPendingDraftsDB` | `pending_drafts` 테이블 CRUD |
+
+### Trello 연동 테스트 (`tests/test_trello.py`) ✅ 구현 완료
+
+| 테스트 클래스 | 검증 내용 |
+|-------------|---------|
+| `TestFormatChecklistItem` | 체크리스트 항목 포맷 변환 (`[담당자] 작업 (기한: 날짜)`) |
+| `TestDummyObjects` | DRY_RUN 더미 카드/체크리스트 객체 동작 |
+| `TestClearUserCache` | 사용자별 클라이언트 캐시 초기화 |
+| `TestFindCardByName` | 카드 검색 — 발견/미발견/DRY_RUN |
+| `TestGetCardContext` | 카드 컨텍스트 — 미완료 항목/코멘트/빈 체크리스트 |
+| `TestCreateCard` | 카드 생성 — 성공/리스트 없음/DRY_RUN/보드 없음 |
+| `TestAddChecklistItems` | 체크리스트 추가 — 기존 체크리스트/빈 목록/카드 자동 생성/DRY_RUN |
+| `TestAddComment` | 코멘트 추가 — 성공/카드 없음/DRY_RUN |
+| `TestInferCompanyName` | LLM 업체명 추론 — 성공/빈 결과/따옴표 제거/오류 처리 |
+| `TestProposeTrelloRegistration` | Slack 등록 버튼 발송 — 항목 있음/없음/업체명 없음 |
+| `TestHandleTrelloRegister` | 등록 핸들러 — 성공/항목 없음/실패 |
+| `TestHandleTrelloSkip` | 건너뜀 핸들러 — 메시지 확인 |

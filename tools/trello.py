@@ -1,0 +1,322 @@
+"""Trello API 래퍼 — 파이프라인(업체) 카드 읽기/쓰기
+
+보드: parametapipeline (Board ID: TRELLO_BOARD_ID 환경변수)
+규칙:
+  - 업체 1개 = 카드 1개 (카드명 = 업체명)
+  - 액션아이템은 카드 내 "Action Items" 체크리스트 항목으로 추가
+  - 카드 이동/삭제/체크리스트 완료 처리 금지
+  - 신규 카드 기본 생성 위치: Contact/Meeting 리스트
+인증:
+  - API Key: .env의 TRELLO_API_KEY (앱 공통)
+  - Token: 사용자별로 user_store에 암호화 저장 (OAuth 인증 후)
+"""
+import logging
+import os
+
+from store import user_store
+
+log = logging.getLogger(__name__)
+
+BOARD_ID = os.getenv("TRELLO_BOARD_ID", "69731ce5")
+CONTACT_LIST_NAME = "Contact/Meeting"
+CHECKLIST_NAME = "Action Items"
+
+# ── 내부 헬퍼 ────────────────────────────────────────────────
+
+# 사용자별 클라이언트 캐시 (user_id → TrelloClient)
+_client_cache: dict[str, object] = {}
+# 사용자별 보드 캐시 (user_id → Board)
+_board_cache: dict[str, object] = {}
+
+
+def _is_dry_run() -> bool:
+    dry = os.getenv("DRY_RUN_TRELLO", os.getenv("DRY_RUN", "false"))
+    return dry.lower() in ("true", "1", "yes")
+
+
+def _client_for_user(user_id: str):
+    """사용자별 TrelloClient 반환. 토큰 미등록이면 None."""
+    if user_id in _client_cache:
+        return _client_cache[user_id]
+
+    api_key = os.getenv("TRELLO_API_KEY", "")
+    if not api_key:
+        if _is_dry_run():
+            log.info("Trello DRY_RUN: API Key 없이 더미 모드 실행")
+            return None
+        log.warning("TRELLO_API_KEY 환경변수 미설정")
+        return None
+
+    token = user_store.get_trello_token(user_id)
+    if not token:
+        log.info(f"Trello 토큰 미등록: {user_id}")
+        return None
+
+    from trello import TrelloClient
+    client = TrelloClient(api_key=api_key, token=token)
+    _client_cache[user_id] = client
+    return client
+
+
+def _board_for_user(user_id: str):
+    """사용자별 보드 객체 반환."""
+    if user_id in _board_cache:
+        return _board_cache[user_id]
+
+    client = _client_for_user(user_id)
+    if client is None:
+        return None
+
+    try:
+        board = client.get_board(BOARD_ID)
+        _board_cache[user_id] = board
+        return board
+    except Exception as e:
+        log.warning(f"Trello 보드 로드 실패: {e}")
+        return None
+
+
+def clear_user_cache(user_id: str) -> None:
+    """사용자 캐시 초기화 (토큰 갱신/해제 시 호출)"""
+    _client_cache.pop(user_id, None)
+    _board_cache.pop(user_id, None)
+
+
+def _find_card(user_id: str, company_name: str):
+    """보드에서 업체명으로 카드 검색 (대소문자 무시). py-trello Card 객체 반환."""
+    board = _board_for_user(user_id)
+    if board is None:
+        return None
+
+    target = company_name.strip().lower()
+    try:
+        for card in board.open_cards():
+            if card.name.strip().lower() == target:
+                return card
+    except Exception as e:
+        log.warning(f"Trello 카드 검색 오류: {e}")
+    return None
+
+
+def _find_or_create_checklist(card, checklist_name: str = CHECKLIST_NAME):
+    """카드에서 체크리스트 찾기. 없으면 새로 생성."""
+    for cl in card.checklists:
+        if cl.name == checklist_name:
+            return cl
+    return card.add_checklist(checklist_name)
+
+
+def _format_checklist_item(item: dict) -> str:
+    """액션아이템 → 체크리스트 항목 문자열 변환.
+    item: {"assignee": str, "content": str, "due_date": str|None}
+    """
+    assignee = item.get("assignee", "")
+    content = item.get("content", "")
+    due = item.get("due_date") or "미정"
+    return f"[{assignee}] {content} (기한: {due})"
+
+
+# ── DRY_RUN 더미 객체 ────────────────────────────────────────
+
+class _DummyChecklist:
+    def __init__(self, name: str = CHECKLIST_NAME):
+        self.name = name
+        self.items = []
+
+    def add_checklist_item(self, name: str, checked: bool = False):
+        self.items.append({"name": name, "checked": checked})
+        log.info(f"[DRY_RUN] 체크리스트 항목 추가: {name}")
+
+
+class _DummyCard:
+    def __init__(self, name: str):
+        self.name = name
+        self.id = "dry-run-card-id"
+        self.url = f"https://trello.com/c/dry-run/{name}"
+        self.checklists = [_DummyChecklist()]
+        self.comments = []
+
+    def comment(self, text: str):
+        self.comments.append(text)
+        log.info(f"[DRY_RUN] 코멘트 추가: {text[:60]}...")
+
+    def add_checklist(self, name: str):
+        cl = _DummyChecklist(name)
+        self.checklists.append(cl)
+        return cl
+
+
+# ── READ 함수 (Before Agent용) ──────────────────────────────
+
+def find_card_by_name(user_id: str, company_name: str) -> dict | None:
+    """업체명으로 카드 검색.
+    Returns: {"card_id", "card_name", "list_name", "url"} 또는 None
+    """
+    if _is_dry_run():
+        log.info(f"[DRY_RUN] 카드 검색: {company_name}")
+        return None
+
+    card = _find_card(user_id, company_name)
+    if card is None:
+        return None
+
+    list_name = ""
+    try:
+        list_name = card.get_list().name
+    except Exception:
+        pass
+
+    return {
+        "card_id": card.id,
+        "card_name": card.name,
+        "list_name": list_name,
+        "url": card.url,
+    }
+
+
+def get_card_context(user_id: str, company_name: str, limit_comments: int = 3) -> dict:
+    """업체 카드의 컨텍스트 조회 (Before Agent 브리핑용).
+    Returns: {
+        "card_name": str,
+        "incomplete_items": [str, ...],
+        "recent_comments": [{"author": str, "text": str}, ...],
+        "url": str,
+    }
+    카드 없거나 미등록 사용자면 빈 딕셔너리 반환.
+    """
+    if _is_dry_run():
+        log.info(f"[DRY_RUN] 카드 컨텍스트 조회: {company_name}")
+        return {}
+
+    card = _find_card(user_id, company_name)
+    if card is None:
+        return {}
+
+    # 미완료 체크리스트 항목
+    incomplete = []
+    try:
+        for cl in card.checklists:
+            for item in cl.items:
+                if item.get("state") != "complete":
+                    incomplete.append(item.get("name", ""))
+    except Exception as e:
+        log.warning(f"체크리스트 조회 실패: {e}")
+
+    # 최근 코멘트
+    comments = []
+    try:
+        for c in card.comments[:limit_comments]:
+            comments.append({
+                "author": c.get("memberCreator", {}).get("fullName", ""),
+                "text": c.get("data", {}).get("text", ""),
+            })
+    except Exception as e:
+        log.warning(f"코멘트 조회 실패: {e}")
+
+    return {
+        "card_name": card.name,
+        "incomplete_items": incomplete,
+        "recent_comments": comments,
+        "url": card.url,
+    }
+
+
+# ── WRITE 함수 (After Agent용) ──────────────────────────────
+
+def create_card(user_id: str, company_name: str, list_name: str = CONTACT_LIST_NAME,
+                description: str = "") -> dict | None:
+    """새 카드 생성. 기본 리스트: Contact/Meeting.
+    Returns: {"card_id", "card_name", "url"} 또는 None (실패 시)
+    """
+    if _is_dry_run():
+        dummy = _DummyCard(company_name)
+        log.info(f"[DRY_RUN] 카드 생성: {company_name} → {list_name}")
+        return {"card_id": dummy.id, "card_name": dummy.name, "url": dummy.url}
+
+    board = _board_for_user(user_id)
+    if board is None:
+        return None
+
+    target_list = None
+    try:
+        for lst in board.list_lists():
+            if lst.name == list_name:
+                target_list = lst
+                break
+    except Exception as e:
+        log.warning(f"리스트 조회 실패: {e}")
+        return None
+
+    if target_list is None:
+        log.warning(f"리스트 '{list_name}' 없음")
+        return None
+
+    try:
+        card = target_list.add_card(company_name, desc=description)
+        log.info(f"Trello 카드 생성: {company_name} → {list_name}")
+        return {"card_id": card.id, "card_name": card.name, "url": card.url}
+    except Exception as e:
+        log.warning(f"카드 생성 실패: {e}")
+        return None
+
+
+def add_checklist_items(user_id: str, company_name: str, items: list[dict],
+                        create_if_missing: bool = True) -> int:
+    """업체 카드의 'Action Items' 체크리스트에 항목 추가.
+    items: [{"assignee": str, "content": str, "due_date": str|None}, ...]
+    create_if_missing: True이면 카드 없을 때 Contact/Meeting에 자동 생성
+    Returns: 추가된 항목 수
+    """
+    if not items:
+        return 0
+
+    if _is_dry_run():
+        for item in items:
+            desc = _format_checklist_item(item)
+            log.info(f"[DRY_RUN] 체크리스트 항목: {desc}")
+        return len(items)
+
+    card = _find_card(user_id, company_name)
+    if card is None and create_if_missing:
+        result = create_card(user_id, company_name)
+        if result is None:
+            log.warning(f"카드 생성 실패로 체크리스트 추가 불가: {company_name}")
+            return 0
+        card = _find_card(user_id, company_name)
+
+    if card is None:
+        log.warning(f"Trello 카드 없음: {company_name}")
+        return 0
+
+    try:
+        checklist = _find_or_create_checklist(card, CHECKLIST_NAME)
+        count = 0
+        for item in items:
+            desc = _format_checklist_item(item)
+            checklist.add_checklist_item(desc)
+            count += 1
+        log.info(f"Trello 체크리스트 항목 {count}개 추가: {company_name}")
+        return count
+    except Exception as e:
+        log.warning(f"체크리스트 항목 추가 실패: {e}")
+        return 0
+
+
+def add_comment(user_id: str, company_name: str, comment: str) -> bool:
+    """업체 카드에 코멘트 추가. Returns: 성공 여부"""
+    if _is_dry_run():
+        log.info(f"[DRY_RUN] 코멘트 추가 ({company_name}): {comment[:60]}...")
+        return True
+
+    card = _find_card(user_id, company_name)
+    if card is None:
+        log.warning(f"코멘트 추가 실패 — 카드 없음: {company_name}")
+        return False
+
+    try:
+        card.comment(comment)
+        log.info(f"Trello 코멘트 추가: {company_name}")
+        return True
+    except Exception as e:
+        log.warning(f"코멘트 추가 실패: {e}")
+        return False

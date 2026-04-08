@@ -123,7 +123,8 @@ def classify_meeting(event: dict, company_names: list[str]) -> str:
 
 
 def create_event(creds: Credentials, summary: str, start_dt: datetime,
-                 end_dt: datetime, attendee_emails: list[str], description: str = "") -> dict:
+                 end_dt: datetime, attendee_emails: list[str], description: str = "",
+                 location: str = "") -> dict:
     """캘린더 이벤트 생성"""
     event_body = {
         "summary": summary,
@@ -135,6 +136,8 @@ def create_event(creds: Credentials, summary: str, start_dt: datetime,
             "createRequest": {"requestId": f"meet-{start_dt.timestamp()}"}
         },
     }
+    if location:
+        event_body["location"] = location
     return _service(creds).events().insert(
         calendarId="primary",
         body=event_body,
