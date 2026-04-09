@@ -189,10 +189,13 @@ def build_persons_block(persons_info: list[dict]) -> list[dict]:
 def build_context_block(context: dict) -> list[dict]:
     """이전 미팅 맥락 + 이메일 블록 (컨텍스트 조회 완료 후 발송)."""
     lines = []
+    trello_items = context.get("trello", [])
     emails = context.get("emails", [])
     minutes = context.get("minutes", [])
 
     lines.append("📌  *이전 미팅 맥락*")
+    if trello_items:
+        lines.append(f"• Trello 미완료: {' / '.join(trello_items[:5])}")
     for m in minutes:
         name = m.get("name", "").replace("_내부용.md", "").replace("_", " ")
         modified = m.get("modifiedTime", "")[:10]
@@ -200,7 +203,7 @@ def build_context_block(context: dict) -> list[dict]:
         link = f"https://drive.google.com/file/d/{file_id}/view" if file_id else ""
         link_str = f" <{link}|열기>" if link else ""
         lines.append(f"• 회의록: {name} ({modified}){link_str}")
-    if not minutes:
+    if not trello_items and not minutes:
         lines.append("• 이전 미팅 기록 없음")
 
     lines.append("")

@@ -90,7 +90,10 @@ def _find_card(user_id: str, company_name: str):
 
     target = company_name.strip().lower()
     try:
-        for card in board.open_cards():
+        cards = board.open_cards()
+        card_names = [c.name for c in cards]
+        log.info(f"Trello 카드 검색: target='{target}', 보드 카드={card_names}")
+        for card in cards:
             if card.name.strip().lower() == target:
                 return card
     except Exception as e:
@@ -190,8 +193,10 @@ def get_card_context(user_id: str, company_name: str, limit_comments: int = 3) -
 
     card = _find_card(user_id, company_name)
     if card is None:
+        log.info(f"Trello 카드 미발견 (브리핑 컨텍스트): '{company_name}' — 보드 카드 목록 확인 필요")
         return {}
 
+    log.info(f"Trello 카드 발견: '{card.name}' (id={card.id})")
     # 미완료 체크리스트 항목
     incomplete = []
     try:
@@ -213,6 +218,7 @@ def get_card_context(user_id: str, company_name: str, limit_comments: int = 3) -
     except Exception as e:
         log.warning(f"코멘트 조회 실패: {e}")
 
+    log.info(f"Trello 컨텍스트: card='{card.name}', incomplete={incomplete}, comments={len(comments)}개")
     return {
         "card_name": card.name,
         "incomplete_items": incomplete,

@@ -194,7 +194,7 @@ Gemini `gemini-2.0-flash`가 기본, 오류(429 등) 시 Claude `claude-haiku-4-
 - 백그라운드 작업은 `threading.Thread(target=..., daemon=True).start()` 패턴
 - Drive 파일명 검색 시 macOS NFD/NFC 유니코드 정규화 이슈 주의 (`tools/drive.py`의 `_find_file` 참고)
 - SSL 검증: 사내 방화벽 환경 대응으로 일부 외부 API 호출에 `verify=False` 사용 중
-- 작업 시 main 브랜치에서 직접 커밋하지 않고, 기능/수정별 브랜치를 생성하여 작업함
+- main 브랜치에서 작업이 시작되면 브랜치를 만들어 작업함. 이미 브랜치에 있으면 그 브랜치에서 계속 작업
 - 명시적인 커밋과 푸시 명령이 있을때에만 커밋과 푸시를 수행함
 - `tools/calendar.py`의 `create_event()`는 `location` 파라미터를 지원함 (자연어 미팅 생성 시 장소 설정)
 - 일정 드래프트 스레드에서 업체명은 참석자와 동일한 누적 패턴: "업체 추가해줘 X" → 기존 유지 + 추가, "업체는 X야" → 대체. `draft["company"]`는 쉼표 구분 문자열, LLM 호출 전 `company_candidates` 배열로 동기화됨
