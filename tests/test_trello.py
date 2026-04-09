@@ -307,30 +307,6 @@ class TestAddComment:
             assert result is True
 
 
-# ── After Agent: _infer_company_name ─────────────────────────
-
-class TestInferCompanyName:
-    def test_extracts_company(self):
-        with patch.object(after, "_generate", return_value="카카오"):
-            result = after._infer_company_name("카카오 기술 미팅")
-            assert result == "카카오"
-
-    def test_empty_result(self):
-        with patch.object(after, "_generate", return_value="없음"):
-            result = after._infer_company_name("내부 주간회의")
-            assert result == ""
-
-    def test_strips_quotes(self):
-        with patch.object(after, "_generate", return_value='"미래에셋증권"'):
-            result = after._infer_company_name("미래에셋증권 투자 미팅")
-            assert result == "미래에셋증권"
-
-    def test_llm_failure(self):
-        with patch.object(after, "_generate", side_effect=Exception("API 오류")):
-            result = after._infer_company_name("테스트 미팅")
-            assert result == ""
-
-
 # ── After Agent: _propose_trello_registration ─────────────────
 
 class TestProposeTrelloRegistration:
@@ -340,7 +316,6 @@ class TestProposeTrelloRegistration:
             {"id": 1, "assignee": "김민환", "content": "기술 검토", "due_date": "2026-04-15", "status": "open"},
         ]
         with patch("agents.after.user_store") as mock_store, \
-             patch.object(after, "_infer_company_name", return_value="카카오"), \
              patch("agents.after.trello") as mock_trello:
             mock_store.get_action_items.return_value = items
             mock_trello.find_card_by_name.return_value = {
@@ -348,7 +323,8 @@ class TestProposeTrelloRegistration:
                 "list_name": "Contact/Meeting", "url": "https://trello.com/c/c1",
             }
             after._propose_trello_registration(
-                slack, user_id=_TEST_USER_ID, event_id="evt1", title="카카오 미팅"
+                slack, user_id=_TEST_USER_ID, event_id="evt1",
+                company_names=["카카오"],
             )
             slack.chat_postMessage.assert_called_once()
             call_kwargs = slack.chat_postMessage.call_args[1]
@@ -357,22 +333,27 @@ class TestProposeTrelloRegistration:
             action_block = [b for b in blocks if b["type"] == "actions"]
             assert len(action_block) == 1
 
+    def test_sends_buttons_per_company(self):
+        """업체가 여러 개면 각각 메시지 발송"""
+        slack = _slack()
+        items = [{"id": 1, "assignee": "김민환", "content": "검토", "due_date": "2026-04-15", "status": "open"}]
+        with patch("agents.after.user_store") as mock_store, \
+             patch("agents.after.trello") as mock_trello:
+            mock_store.get_action_items.return_value = items
+            mock_trello.find_card_by_name.return_value = None
+            after._propose_trello_registration(
+                slack, user_id=_TEST_USER_ID, event_id="evt1",
+                company_names=["카카오", "네이버"],
+            )
+            assert slack.chat_postMessage.call_count == 2
+
     def test_skips_when_no_items(self):
         slack = _slack()
         with patch("agents.after.user_store") as mock_store:
             mock_store.get_action_items.return_value = []
             after._propose_trello_registration(
-                slack, user_id=_TEST_USER_ID, event_id="evt1", title="미팅"
-            )
-            slack.chat_postMessage.assert_not_called()
-
-    def test_skips_when_no_company(self):
-        slack = _slack()
-        with patch("agents.after.user_store") as mock_store, \
-             patch.object(after, "_infer_company_name", return_value=""):
-            mock_store.get_action_items.return_value = [{"id": 1}]
-            after._propose_trello_registration(
-                slack, user_id=_TEST_USER_ID, event_id="evt1", title="내부 주간회의"
+                slack, user_id=_TEST_USER_ID, event_id="evt1",
+                company_names=["카카오"],
             )
             slack.chat_postMessage.assert_not_called()
 

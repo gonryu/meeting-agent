@@ -189,6 +189,13 @@ def get_recently_ended_meetings(creds: Credentials,
     return meetings
 
 
+def get_event(creds: Credentials, event_id: str) -> dict:
+    """캘린더 이벤트 원본 반환"""
+    return _service(creds).events().get(
+        calendarId="primary", eventId=event_id
+    ).execute()
+
+
 def get_event_attendees(creds: Credentials, event_id: str) -> list[dict]:
     """캘린더 이벤트에서 외부 참석자 이름+이메일 반환 (내부 도메인 제외)
     Returns: [{"name": "...", "email": "..."}]

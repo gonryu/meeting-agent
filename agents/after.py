@@ -120,14 +120,24 @@ def trigger_after_meeting(
             contacts_folder_id=contacts_folder_id,
         )
 
-        # D-2. Trello 액션아이템 등록 제안
+        # D-2. Trello 액션아이템 등록 제안 (이벤트의 업체명 사용)
         try:
-            _propose_trello_registration(
-                slack_client,
-                user_id=user_id,
-                event_id=event_id or title,
-                title=title,
-            )
+            company_names = []
+            if event_id and creds:
+                try:
+                    ev = cal.get_event(creds, event_id)
+                    company_raw = (ev.get("extendedProperties", {})
+                                    .get("private", {}).get("company", ""))
+                    company_names = [c.strip() for c in company_raw.split(",") if c.strip()]
+                except Exception as e:
+                    log.warning(f"이벤트 업체명 조회 실패: {e}")
+            if company_names:
+                _propose_trello_registration(
+                    slack_client,
+                    user_id=user_id,
+                    event_id=event_id or title,
+                    company_names=company_names,
+                )
         except Exception as e:
             log.warning(f"Trello 등록 제안 실패 (무시): {e}")
 
@@ -493,85 +503,59 @@ def action_item_reminder(slack_client) -> None:
 
 # ── D-2. Trello 액션아이템 등록 ─────────────────────────────
 
-_INFER_COMPANY_PROMPT = """다음 회의 제목에서 업체(회사)명만 추출하세요.
-업체명이 없으면 빈 문자열을 반환하세요. 업체명만 반환하고 다른 말은 하지 마세요.
-
-회의 제목: {title}
-업체명:"""
-
-
-def _infer_company_name(title: str) -> str:
-    """회의 제목에서 업체명 추론 (LLM)"""
-    try:
-        result = _generate(_INFER_COMPANY_PROMPT.format(title=title))
-        # 따옴표/공백 제거
-        result = result.strip().strip('"').strip("'").strip()
-        if result in ("없음", "없습니다", "N/A", "null", ""):
-            return ""
-        return result
-    except Exception as e:
-        log.warning(f"업체명 추론 실패: {e}")
-        return ""
-
-
 def _propose_trello_registration(
     slack_client, *,
     user_id: str,
     event_id: str,
-    title: str,
+    company_names: list[str],
 ) -> None:
-    """액션아이템이 있으면 Trello 등록 여부를 묻는 Slack 메시지 발송"""
+    """액션아이템이 있으면 업체별로 Trello 등록 여부를 묻는 Slack 메시지 발송"""
     items = user_store.get_action_items(event_id)
     if not items:
-        log.info(f"액션아이템 없음 — Trello 등록 스킵: {title}")
+        log.info(f"액션아이템 없음 — Trello 등록 스킵: {event_id}")
         return
 
-    company_name = _infer_company_name(title)
-    if not company_name:
-        log.info(f"업체명 추론 불가 — Trello 등록 스킵: {title}")
-        return
+    for company_name in company_names:
+        value = json.dumps({"event_id": event_id, "company": company_name})
 
-    # 버튼 value에 event_id + company_name 인코딩
-    value = json.dumps({"event_id": event_id, "company": company_name})
+        card_info = trello.find_card_by_name(user_id, company_name)
+        card_status = f"기존 카드: {card_info['list_name']}" if card_info else "신규 카드 생성 (Contact/Meeting)"
 
-    card_info = trello.find_card_by_name(user_id, company_name)
-    card_status = f"기존 카드: {card_info['list_name']}" if card_info else "신규 카드 생성 (Contact/Meeting)"
-
-    slack_client.chat_postMessage(
-        channel=user_id,
-        text=f"📌 Trello에 액션아이템 등록할까요? ({company_name})",
-        blocks=[
-            {
-                "type": "section",
-                "text": {
-                    "type": "mrkdwn",
-                    "text": (
-                        f"📌 *Trello에 액션아이템 등록할까요?*\n"
-                        f"*업체:* {company_name} | *액션아이템:* {len(items)}건\n"
-                        f"*카드 상태:* {card_status}"
-                    ),
+        slack_client.chat_postMessage(
+            channel=user_id,
+            text=f"📌 Trello에 액션아이템 등록할까요? ({company_name})",
+            blocks=[
+                {
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": (
+                            f"📌 *Trello에 액션아이템 등록할까요?*\n"
+                            f"🏢 *업체:* {company_name} | *액션아이템:* {len(items)}건\n"
+                            f"*카드 상태:* {card_status}"
+                        ),
+                    },
                 },
-            },
-            {
-                "type": "actions",
-                "elements": [
-                    {
-                        "type": "button",
-                        "text": {"type": "plain_text", "text": "등록"},
-                        "style": "primary",
-                        "action_id": "trello_register",
-                        "value": value,
-                    },
-                    {
-                        "type": "button",
-                        "text": {"type": "plain_text", "text": "건너뜀"},
-                        "action_id": "trello_skip",
-                        "value": value,
-                    },
-                ],
-            },
-        ],
-    )
+                {
+                    "type": "actions",
+                    "elements": [
+                        {
+                            "type": "button",
+                            "text": {"type": "plain_text", "text": "등록"},
+                            "style": "primary",
+                            "action_id": "trello_register",
+                            "value": value,
+                        },
+                        {
+                            "type": "button",
+                            "text": {"type": "plain_text", "text": "건너뜀"},
+                            "action_id": "trello_skip",
+                            "value": value,
+                        },
+                    ],
+                },
+            ],
+        )
 
 
 def handle_trello_register(slack_client, body: dict) -> None:
