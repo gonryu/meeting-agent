@@ -24,6 +24,7 @@ Before Agent  →  During Agent  →  After Agent
 | **After** | 내부용·외부용 회의록 초안 검토/편집 후 Drive 저장 |
 | **After** | 외부용 회의록 Gmail 발송 (사용자 승인 후) |
 | **After** | 액션아이템 추출 → 담당자 DM → 매일 08:00 리마인더 |
+| **Feedback** | 사용자 피드백 (기능 요청·개선·버그) 수집 → 매일 08:00 관리자 다이제스트 발송 |
 
 ---
 
@@ -35,7 +36,7 @@ Before Agent  →  During Agent  →  After Agent
 | **STT** | Deepgram REST API (`nova-2` 모델, 한국어) |
 | **인터페이스** | Slack Bolt (Socket Mode) |
 | **Google 연동** | Calendar · Drive · Gmail · Docs · Meet API |
-| **스케줄러** | APScheduler (브리핑 09:00, 트랜스크립트 폴링 10분, 리마인더 08:00) |
+| **스케줄러** | APScheduler (브리핑 09:00, 트랜스크립트 폴링 10분, 리마인더 08:00, 피드백 다이제스트 08:00) |
 | **저장소** | SQLite + Fernet 암호화 (사용자 토큰), Google Drive (Contacts · 회의록) |
 
 ---
@@ -74,6 +75,9 @@ ENCRYPTION_KEY=...
 
 # 내부 도메인 (쉼표 구분)
 INTERNAL_DOMAINS=parametacorp.com,iconloop.com
+
+# 피드백 다이제스트 발송 채널 (Slack 채널 ID 또는 관리자 사용자 ID)
+FEEDBACK_CHANNEL=C0123456789
 
 # ParaScope 연동 (선택)
 PARASCOPE_BOT_ID=...
@@ -256,7 +260,7 @@ ENCRYPTION_KEY=abc123...==
 | `/도움말` / `/help` | 사용 가능한 커맨드 및 자연어 명령어 안내 |
 | `/드림플러스설정` / `/dreamplus` | 드림플러스 계정 등록/변경 |
 
-자연어 DM도 지원합니다 (`브리핑 해줘`, `내일 3시 KISA 미팅 잡아줘` 등).
+자연어 DM도 지원합니다 (`브리핑 해줘`, `내일 3시 KISA 미팅 잡아줘`, `~기능 추가해줘`, `~버그 같아` 등).
 
 ---
 
@@ -332,7 +336,8 @@ meeting-agent/
 │   ├── before.py           # Before 에이전트 (브리핑, 리서치, 미팅 생성)
 │   ├── during.py           # During 에이전트 (트랜스크립트, 노트, 회의록 검토)
 │   ├── after.py            # After 에이전트 (회의록 발송, 액션아이템)
-│   └── card.py             # 명함 OCR 에이전트
+│   ├── card.py             # 명함 OCR 에이전트
+│   └── feedback.py         # 피드백 수집·분류·다이제스트 에이전트
 ├── tools/
 │   ├── calendar.py         # Google Calendar API
 │   ├── docs.py             # Google Docs API (트랜스크립트 읽기)
