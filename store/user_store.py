@@ -302,6 +302,7 @@ def save_action_items(event_id: str, user_id: str, items: list[dict]) -> None:
     """액션아이템 목록을 DB에 저장"""
     now = datetime.now().isoformat()
     with _conn() as conn:
+        conn.execute("DELETE FROM action_items WHERE event_id = ?", (event_id,))
         for item in items:
             conn.execute(
                 """INSERT INTO action_items
