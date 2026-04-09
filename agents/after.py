@@ -27,6 +27,8 @@ KST = ZoneInfo("Asia/Seoul")
 
 # 사람 정보 조회 캐시 (name → {"email": str|None, "slack_uid": str|None})
 _person_cache: dict[str, dict] = {}
+# 회의록 요약 캐시 (event_id → summary text) — Trello 카드 description용
+_minutes_summary_cache: dict[str, str] = {}
 
 _gemini = genai.Client(api_key=os.getenv("GOOGLE_API_KEY"))
 _GEMINI_MODEL = "gemini-2.0-flash"
@@ -132,10 +134,19 @@ def trigger_after_meeting(
                 except Exception as e:
                     log.warning(f"이벤트 업체명 조회 실패: {e}")
             if company_names:
+                # 회의록 요약 생성 및 캐시 (Trello 카드 description용)
+                eid = event_id or title
+                try:
+                    summary = _generate(_SUMMARIZE_MINUTES_PROMPT.format(
+                        minutes=internal_body))
+                    _minutes_summary_cache[eid] = summary.strip()
+                    log.info(f"회의록 요약 캐시 저장: {eid}")
+                except Exception as e:
+                    log.warning(f"회의록 요약 생성 실패 (무시): {e}")
                 _propose_trello_registration(
                     slack_client,
                     user_id=user_id,
-                    event_id=event_id or title,
+                    event_id=eid,
                     company_names=company_names,
                 )
         except Exception as e:
@@ -501,6 +512,16 @@ def action_item_reminder(slack_client) -> None:
                 log.warning(f"리마인더 DM 실패 ({uid}): {e}")
 
 
+_SUMMARIZE_MINUTES_PROMPT = """다음 회의록을 10줄 이내로 요약하세요.
+핵심 논의사항, 결정사항, 주요 발언을 간결하게 정리하세요.
+불릿 포인트 없이 일반 텍스트로 작성하세요.
+
+회의록:
+{minutes}
+
+요약:"""
+
+
 # ── D-2. Trello 액션아이템 등록 ─────────────────────────────
 
 def _propose_trello_registration(
@@ -589,6 +610,14 @@ def handle_trello_register(slack_client, body: dict) -> None:
         })
 
     count = trello.add_checklist_items(user_id, company_name, checklist_items)
+
+    # 회의록 요약을 카드 코멘트로 추가
+    summary = _minutes_summary_cache.pop(event_id, "")
+    if summary:
+        try:
+            trello.add_comment(user_id, company_name, f"📝 회의록 요약\n{summary}")
+        except Exception as e:
+            log.warning(f"Trello 카드 코멘트 추가 실패: {e}")
 
     if count > 0:
         card_info = trello.find_card_by_name(user_id, company_name)

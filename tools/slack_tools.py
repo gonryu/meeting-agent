@@ -195,7 +195,9 @@ def build_context_block(context: dict) -> list[dict]:
 
     lines.append("📌  *이전 미팅 맥락*")
     if trello_items:
-        lines.append(f"• Trello 미완료: {' / '.join(trello_items[:5])}")
+        lines.append("• Trello 미완료")
+        for item in trello_items[:5]:
+            lines.append(f"   • {item}")
     for m in minutes:
         name = m.get("name", "").replace("_내부용.md", "").replace("_", " ")
         modified = m.get("modifiedTime", "")[:10]
