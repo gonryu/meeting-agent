@@ -211,8 +211,10 @@ Before Agent   →   During Agent   →   After Agent
 
 | 항목 | 내용 | 출처 |
 | ---- | ---- | ---- |
-| 미팅 헤더 | 제목·업체명, 시간, Google Meet 링크, 장소 | Google Calendar |
-| 어젠다 | Calendar 이벤트 description 표시 (없으면 스레드 답글 안내) | Google Calendar |
+| 미팅 헤더 | 제목, 시간, Google Meet 링크, 장소 | Google Calendar |
+| 관련 업체 | 🏢 별도 필드로 표시 (extendedProperties에서 가져옴) | Google Calendar |
+| 참석자 | 👥 이름 목록 (displayName → Slack → 주소록 → 이메일 폴백) | Google Calendar + Slack |
+| 어젠다 | 📝 Calendar 이벤트 description 표시, 내용은 다음 줄부터 출력 (없으면 스레드 답글 안내) | Google Calendar |
 
 **Block 2 — 백그라운드 (업체 리서치)** (`build_company_research_block`)
 

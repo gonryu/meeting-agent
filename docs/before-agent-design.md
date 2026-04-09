@@ -303,7 +303,7 @@ def get_previous_context(user_id, company_name, person_names) -> dict:
 run_briefing()
   │
   ├─ [1단계: 즉시] 모든 미팅 헤더 발송 (_send_briefing × N)
-  │    └─ build_meeting_header_block() → 미팅 제목/시간/링크/어젠다만 포함
+  │    └─ build_meeting_header_block() → 미팅 제목/시간/링크/장소/관련 업체/참석자/어젠다 포함
   │
   └─ [2단계: 백그라운드 단일 스레드] _run_all_briefing_research()
        └─ 업체별 순차 실행 (_run_briefing_research × N)
@@ -324,7 +324,7 @@ run_briefing()
 
 | 함수 | 발송 시점 | 포함 내용 |
 |------|---------|---------|
-| `build_meeting_header_block()` | 즉시 | 미팅 제목, 시간, Meet 링크, 장소, 어젠다 |
+| `build_meeting_header_block()` | 즉시 | 미팅 제목, 시간, Meet 링크, 장소, 관련 업체, 참석자, 어젠다 |
 | `build_company_research_block()` | 업체 리서치 완료 후 | 🏢 업체명 헤더, ParaScope, 업체 동향, 서비스 연결점 |
 | `build_persons_block()` | 인물 리서치 완료 후 | 담당자 이름/직책/LinkedIn |
 | `build_context_block()` | 컨텍스트 조회 완료 후 | 이전 회의록(Drive), 이메일 맥락 |

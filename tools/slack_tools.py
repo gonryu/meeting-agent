@@ -107,9 +107,11 @@ def build_meeting_header_block(meeting: dict, company_name: str,
 
     lines = [
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
-        f"*📋 {meeting.get('summary', company_name)} ({company_name}) — {time_str} ({link_text}){location_str}*",
+        f"*📋 {meeting.get('summary', company_name)} — {time_str} ({link_text}){location_str}*",
         "",
     ]
+    if company_name:
+        lines.append(f"🏢  *관련 업체*: {company_name}")
     if attendee_names:
         lines.append(f"👥  *참석자*: {', '.join(attendee_names)}")
     if agenda:
@@ -130,7 +132,11 @@ def build_company_research_block(
     connection_lines: list[str],
 ) -> list[dict]:
     """업체 뉴스 + ParaScope + 서비스 연결점 블록 (리서치 완료 후 발송)."""
-    lines = [f"*🏢 {company_name} 리서치 결과*", ""]
+    lines = [        
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+        f"*🏢 {company_name} 리서치 결과*",
+        "",
+    ]
 
     if parascope_lines:
         lines.append("🔭  *ParaScope 브리핑*")
