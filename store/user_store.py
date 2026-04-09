@@ -94,6 +94,18 @@ def init_db():
             )
         """)
 
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS feedback (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id     TEXT NOT NULL,
+                category    TEXT NOT NULL,
+                content     TEXT NOT NULL,
+                original    TEXT NOT NULL,
+                notified    INTEGER DEFAULT 0,
+                created_at  TEXT NOT NULL
+            )
+        """)
+
 
 def is_registered(slack_user_id: str) -> bool:
     with _conn() as conn:
@@ -359,4 +371,39 @@ def update_draft_status(draft_id: int, status: str) -> None:
         conn.execute(
             "UPDATE pending_drafts SET status = ? WHERE id = ?",
             (status, draft_id),
+        )
+
+
+# ── Feedback ─────────────────────────────────────────────────
+
+def save_feedback(user_id: str, category: str, content: str, original: str) -> int:
+    """사용자 피드백 저장. Returns: feedback_id"""
+    now = datetime.now().isoformat()
+    with _conn() as conn:
+        cur = conn.execute(
+            """INSERT INTO feedback (user_id, category, content, original, notified, created_at)
+               VALUES (?, ?, ?, ?, 0, ?)""",
+            (user_id, category, content, original, now),
+        )
+        return cur.lastrowid
+
+
+def get_pending_feedback() -> list[dict]:
+    """아직 관리자에게 알림되지 않은 피드백 조회"""
+    with _conn() as conn:
+        rows = conn.execute(
+            "SELECT * FROM feedback WHERE notified = 0 ORDER BY created_at"
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def mark_feedback_notified(feedback_ids: list[int]) -> None:
+    """피드백 알림 완료 처리"""
+    if not feedback_ids:
+        return
+    placeholders = ",".join("?" for _ in feedback_ids)
+    with _conn() as conn:
+        conn.execute(
+            f"UPDATE feedback SET notified = 1 WHERE id IN ({placeholders})",
+            feedback_ids,
         )
