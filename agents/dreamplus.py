@@ -1,7 +1,7 @@
 """Dreamplus Agent — 드림플러스 강남 회의실 예약 자동화
 
 기능:
-  - /드림플러스설정  : 이메일·비밀번호 Slack 모달로 입력 → DB 암호화 저장
+  - /드림플러스  : 이메일·비밀번호 Slack 모달로 입력 → DB 암호화 저장
   - /회의실예약      : 자연어 → 가용 회의실 추천 → 선택 버튼 → 예약
   - /회의실조회      : 이번 달 내 예약 목록 표시
   - /회의실취소      : 예약 목록 중 선택 취소
@@ -36,7 +36,7 @@ def _get_session(user_id: str, force_refresh: bool = False) -> tuple[str, str, i
 
     creds = user_store.get_dreamplus_credentials(user_id)
     if not creds:
-        raise ValueError("드림플러스 계정이 설정되지 않았습니다. `/드림플러스설정`으로 먼저 설정해주세요.")
+        raise ValueError("드림플러스 계정이 설정되지 않았습니다. `/드림플러스`으로 먼저 설정해주세요.")
 
     email, password = creds
     jwt, pub_key, member_id, company_id = dp.login(email, password)
@@ -206,7 +206,7 @@ def _room_block(room: dict, start_dt: datetime, end_dt: datetime,
     }
 
 
-# ── /드림플러스설정 ───────────────────────────────────────────
+# ── /드림플러스 ───────────────────────────────────────────
 
 def open_settings_modal(slack_client, trigger_id: str, user_id: str):
     """드림플러스 계정 설정 모달 열기"""

@@ -275,15 +275,22 @@ _HELP_TEXT = """*🤖 ParaMee 사용 가이드*
 • `/회의실조회` or `내 회의실 예약 현황` — 예약 목록 조회
 • `/회의실취소` or `회의실 예약 취소해줘` — 예약 취소
 • `/크레딧조회` — 드림플러스 잔여 포인트 조회
-• `/드림플러스설정` — 드림플러스 계정 등록/변경
+• `/드림플러스` — 드림플러스 계정 등록/변경
 
 *🔍 리서치*
 • `한국은행 알아봐줘` — 업체 정보 및 최근 동향 조사
 • `홍길동 한국은행 인물 조사해줘` — 담당자 정보 조사
 
+*📋 Trello 연동*
+• `/trello` — Trello 계정 연결
+  └ 브리핑 시 업체 카드의 미완료 액션아이템 표시
+  └ 회의록 완료 후 액션아이템 + 회의록 요약을 카드에 자동 등록 제안
+
 *⚙️ 설정*
 • `/등록` — Google 계정 연결 (최초 1회)
 • `/재등록` — Google 계정 재연결 (스코프 갱신)
+• `/trello` — Trello 계정 연결
+• `/드림플러스` — 드림플러스 계정 등록/변경
 • `/업데이트` — 내부 서비스 지식 갱신
 
 *📝 피드백*
@@ -465,7 +472,7 @@ def _route_message(text: str, client, user_id: str, channel: str = None,
         client.chat_postMessage(
             channel=channel or user_id,
             thread_ts=thread_ts,
-            text="드림플러스 계정 설정은 `/드림플러스설정` 명령어를 사용해주세요.",
+            text="드림플러스 계정 설정은 `/드림플러스` 명령어를 사용해주세요.",
         )
 
     elif intent == "feedback":
@@ -919,7 +926,7 @@ def _dp_settings_handler(ack, body, client):
         return
     dreamplus_agent.open_settings_modal(client, body["trigger_id"], body["user_id"])
 
-app.command("/드림플러스설정")(_dp_settings_handler)
+app.command("/드림플러스")(_dp_settings_handler)
 app.command("/dreamplus")(_dp_settings_handler)
 
 
