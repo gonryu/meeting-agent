@@ -810,10 +810,27 @@ def handle_trello_search(slack_client, *, user_id: str, query: str = "",
             return
         title = f"📋 *Trello 카드 목록* ({len(cards)}건)"
 
-    lines = []
+    # 제외할 리스트 필터링 후 카테고리별 그룹핑
+    EXCLUDED_LISTS = {"Drop", "대기 (Pending)"}
+    cards = [c for c in cards if c.get("list_name") not in EXCLUDED_LISTS]
+    if not cards:
+        slack_client.chat_postMessage(
+            channel=channel or user_id, thread_ts=thread_ts,
+            text="📋 표시할 Trello 카드가 없습니다.",
+        )
+        return
+
+    from collections import OrderedDict
+    grouped: OrderedDict[str, list] = OrderedDict()
     for c in cards:
-        list_label = f" _({c['list_name']})_" if c.get("list_name") else ""
-        lines.append(f"• <{c['url']}|{c['card_name']}>{list_label}")
+        key = c.get("list_name") or "기타"
+        grouped.setdefault(key, []).append(c)
+
+    lines = []
+    for list_name, group in grouped.items():
+        lines.append(f"\n*📂 {list_name}* ({len(group)}건)")
+        for c in group:
+            lines.append(f"  • <{c['url']}|{c['card_name']}>")
 
     slack_client.chat_postMessage(
         channel=channel or user_id,
