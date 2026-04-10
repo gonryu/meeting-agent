@@ -530,57 +530,190 @@ def _propose_trello_registration(
     event_id: str,
     company_names: list[str],
 ) -> None:
-    """액션아이템이 있으면 업체별로 Trello 등록 여부를 묻는 Slack 메시지 발송"""
+    """액션아이템이 있으면 업체별로 Trello 카드 후보를 보여주고 선택하게 함"""
     items = user_store.get_action_items(event_id)
     if not items:
         log.info(f"액션아이템 없음 — Trello 등록 스킵: {event_id}")
         return
 
     for company_name in company_names:
-        value = json.dumps({"event_id": event_id, "company": company_name})
+        # 유사 카드 후보 검색
+        candidates = trello.search_cards(user_id, company_name, limit=5)
 
-        card_info = trello.find_card_by_name(user_id, company_name)
-        card_status = f"기존 카드: {card_info['list_name']}" if card_info else "신규 카드 생성 (Contact/Meeting)"
+        blocks = [
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": (
+                        f"📌 *Trello에 액션아이템 등록할까요?*\n"
+                        f"🏢 *업체:* {company_name} | *액션아이템:* {len(items)}건\n"
+                        f"등록할 카드를 선택하세요."
+                    ),
+                },
+            },
+        ]
+
+        buttons = []
+        if candidates:
+            # 후보 카드 목록 표시
+            card_list_text = "\n".join(
+                f"• *{c['card_name']}* ({c['list_name']})"
+                for c in candidates
+            )
+            blocks.append({
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": f"🔍 *유사 카드 후보:*\n{card_list_text}",
+                },
+            })
+
+            for c in candidates:
+                label = c["card_name"]
+                if len(label) > 30:
+                    label = label[:27] + "..."
+                buttons.append({
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": label},
+                    "style": "primary" if c.get("exact_match") else None,
+                    "action_id": f"trello_select_card_{c['card_id']}",
+                    "value": json.dumps({
+                        "event_id": event_id,
+                        "company": company_name,
+                        "card_id": c["card_id"],
+                        "card_name": c["card_name"],
+                    }),
+                })
+                # style=None은 Slack API에서 무시되지 않으므로 제거
+                if buttons[-1]["style"] is None:
+                    del buttons[-1]["style"]
+
+        # 신규 생성 + 건너뜀 버튼
+        buttons.append({
+            "type": "button",
+            "text": {"type": "plain_text", "text": "➕ 신규 카드 생성"},
+            "action_id": "trello_new_card",
+            "value": json.dumps({
+                "event_id": event_id,
+                "company": company_name,
+            }),
+        })
+        buttons.append({
+            "type": "button",
+            "text": {"type": "plain_text", "text": "건너뜀"},
+            "action_id": "trello_skip",
+            "value": json.dumps({
+                "event_id": event_id,
+                "company": company_name,
+            }),
+        })
+
+        blocks.append({"type": "actions", "elements": buttons})
 
         slack_client.chat_postMessage(
             channel=user_id,
             text=f"📌 Trello에 액션아이템 등록할까요? ({company_name})",
-            blocks=[
-                {
-                    "type": "section",
-                    "text": {
-                        "type": "mrkdwn",
-                        "text": (
-                            f"📌 *Trello에 액션아이템 등록할까요?*\n"
-                            f"🏢 *업체:* {company_name} | *액션아이템:* {len(items)}건\n"
-                            f"*카드 상태:* {card_status}"
-                        ),
-                    },
-                },
-                {
-                    "type": "actions",
-                    "elements": [
-                        {
-                            "type": "button",
-                            "text": {"type": "plain_text", "text": "등록"},
-                            "style": "primary",
-                            "action_id": "trello_register",
-                            "value": value,
-                        },
-                        {
-                            "type": "button",
-                            "text": {"type": "plain_text", "text": "건너뜀"},
-                            "action_id": "trello_skip",
-                            "value": value,
-                        },
-                    ],
-                },
-            ],
+            blocks=blocks,
+        )
+
+
+def handle_trello_select_card(slack_client, body: dict) -> None:
+    """카드 선택 버튼 핸들러 — 기존 Trello 카드에 액션아이템 체크리스트 추가"""
+    user_id = body["user"]["id"]
+    try:
+        payload = json.loads(body["actions"][0]["value"])
+        event_id = payload["event_id"]
+        company_name = payload["company"]
+        card_id = payload["card_id"]
+        card_name = payload["card_name"]
+    except (KeyError, json.JSONDecodeError) as e:
+        log.warning(f"Trello 카드 선택 payload 파싱 실패: {e}")
+        slack_client.chat_postMessage(
+            channel=user_id, text="❌ Trello 등록 실패: 잘못된 요청"
+        )
+        return
+
+    _register_to_card(slack_client, user_id=user_id, event_id=event_id,
+                      card_id=card_id, card_name=card_name)
+
+
+def handle_trello_new_card(slack_client, body: dict) -> None:
+    """'신규 카드 생성' 버튼 핸들러 — 새 카드를 만들고 액션아이템 등록"""
+    user_id = body["user"]["id"]
+    try:
+        payload = json.loads(body["actions"][0]["value"])
+        event_id = payload["event_id"]
+        company_name = payload["company"]
+    except (KeyError, json.JSONDecodeError) as e:
+        log.warning(f"Trello 신규 카드 payload 파싱 실패: {e}")
+        slack_client.chat_postMessage(
+            channel=user_id, text="❌ Trello 등록 실패: 잘못된 요청"
+        )
+        return
+
+    # 신규 카드 생성
+    result = trello.create_card(user_id, company_name)
+    if result is None:
+        slack_client.chat_postMessage(
+            channel=user_id,
+            text=f"❌ Trello 카드 생성 실패: {company_name}",
+        )
+        return
+
+    _register_to_card(slack_client, user_id=user_id, event_id=event_id,
+                      card_id=result["card_id"], card_name=result["card_name"])
+
+
+def _register_to_card(slack_client, *, user_id: str, event_id: str,
+                      card_id: str, card_name: str) -> None:
+    """지정된 카드에 액션아이템 체크리스트 + 회의록 요약 코멘트 등록"""
+    items = user_store.get_action_items(event_id)
+    if not items:
+        slack_client.chat_postMessage(
+            channel=user_id, text="액션아이템이 없어 Trello 등록을 건너뜁니다."
+        )
+        return
+
+    checklist_items = []
+    for it in items:
+        checklist_items.append({
+            "assignee": it.get("assignee", ""),
+            "content": it.get("content", ""),
+            "due_date": it.get("due_date"),
+        })
+
+    count = trello.add_checklist_items_by_id(user_id, card_id, checklist_items)
+
+    # 회의록 요약을 카드 코멘트로 추가
+    summary = _minutes_summary_cache.pop(event_id, "")
+    if summary:
+        try:
+            trello.add_comment_by_id(user_id, card_id, f"📝 회의록 요약\n{summary}")
+        except Exception as e:
+            log.warning(f"Trello 카드 코멘트 추가 실패: {e}")
+
+    if count > 0:
+        card_info = trello.find_card_by_name(user_id, card_name)
+        card_url = card_info["url"] if card_info else ""
+        url_text = f"\n<{card_url}|카드 열기>" if card_url else ""
+        slack_client.chat_postMessage(
+            channel=user_id,
+            text=(
+                f"📌 *Trello 액션아이템 등록 완료*\n"
+                f"*카드:* {card_name}\n"
+                f"*등록 항목:* {count}건{url_text}"
+            ),
+        )
+    else:
+        slack_client.chat_postMessage(
+            channel=user_id,
+            text=f"❌ Trello 등록 실패: {card_name} 카드에 항목을 추가하지 못했습니다.",
         )
 
 
 def handle_trello_register(slack_client, body: dict) -> None:
-    """'등록' 버튼 핸들러 — Trello 카드에 액션아이템 체크리스트 추가"""
+    """레거시 '등록' 버튼 핸들러 (하위 호환용)"""
     user_id = body["user"]["id"]
     try:
         payload = json.loads(body["actions"][0]["value"])
@@ -593,6 +726,8 @@ def handle_trello_register(slack_client, body: dict) -> None:
         )
         return
 
+    # 기존 방식: 업체명으로 카드 찾거나 생성
+    checklist_items = []
     items = user_store.get_action_items(event_id)
     if not items:
         slack_client.chat_postMessage(
@@ -600,8 +735,6 @@ def handle_trello_register(slack_client, body: dict) -> None:
         )
         return
 
-    # 체크리스트 항목 형식 변환
-    checklist_items = []
     for it in items:
         checklist_items.append({
             "assignee": it.get("assignee", ""),
@@ -611,7 +744,6 @@ def handle_trello_register(slack_client, body: dict) -> None:
 
     count = trello.add_checklist_items(user_id, company_name, checklist_items)
 
-    # 회의록 요약을 카드 코멘트로 추가
     summary = _minutes_summary_cache.pop(event_id, "")
     if summary:
         try:
@@ -643,6 +775,50 @@ def handle_trello_skip(slack_client, body: dict) -> None:
     user_id = body["user"]["id"]
     slack_client.chat_postMessage(
         channel=user_id, text="이번에는 Trello 등록을 건너뛰었습니다."
+    )
+
+
+# ── D-3. Trello 카드 조회 ─────────────────────────────────────
+
+def handle_trello_search(slack_client, *, user_id: str, query: str = "",
+                         channel: str = None, thread_ts: str = None) -> None:
+    """Trello 카드 조회. query가 있으면 유사 검색, 없으면 전체 목록."""
+    token = user_store.get_trello_token(user_id)
+    if not token:
+        slack_client.chat_postMessage(
+            channel=channel or user_id, thread_ts=thread_ts,
+            text="Trello 계정이 연결되어 있지 않습니다. `/trello`로 먼저 연결해주세요.",
+        )
+        return
+
+    if query.strip():
+        cards = trello.search_cards(user_id, query, limit=10)
+        if not cards:
+            slack_client.chat_postMessage(
+                channel=channel or user_id, thread_ts=thread_ts,
+                text=f"🔍 *'{query}'* 와 유사한 Trello 카드를 찾지 못했습니다.",
+            )
+            return
+        title = f"🔍 *'{query}'* 검색 결과 ({len(cards)}건)"
+    else:
+        cards = trello.list_all_cards(user_id)
+        if not cards:
+            slack_client.chat_postMessage(
+                channel=channel or user_id, thread_ts=thread_ts,
+                text="📋 Trello 보드에 카드가 없습니다.",
+            )
+            return
+        title = f"📋 *Trello 카드 목록* ({len(cards)}건)"
+
+    lines = []
+    for c in cards:
+        list_label = f" _({c['list_name']})_" if c.get("list_name") else ""
+        lines.append(f"• <{c['url']}|{c['card_name']}>{list_label}")
+
+    slack_client.chat_postMessage(
+        channel=channel or user_id,
+        thread_ts=thread_ts,
+        text=f"{title}\n" + "\n".join(lines),
     )
 
 

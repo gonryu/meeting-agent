@@ -52,8 +52,12 @@ def _client_for_user(user_id: str):
         log.info(f"Trello 토큰 미등록: {user_id}")
         return None
 
+    import requests as _requests
+    session = _requests.Session()
+    session.verify = False  # 사내 방화벽 SSL 인증서 이슈 대응
+
     from trello import TrelloClient
-    client = TrelloClient(api_key=api_key, token=token)
+    client = TrelloClient(api_key=api_key, token=token, http_service=session)
     _client_cache[user_id] = client
     return client
 
@@ -99,6 +103,104 @@ def _find_card(user_id: str, company_name: str):
     except Exception as e:
         log.warning(f"Trello 카드 검색 오류: {e}")
     return None
+
+
+def _card_similarity(target: str, card_name: str) -> float:
+    """두 문자열 간 유사도 점수 (0.0~1.0). 부분 포함·접두사·공통 토큰 기반."""
+    t = target.strip().lower()
+    c = card_name.strip().lower()
+    if t == c:
+        return 1.0
+    # 한쪽이 다른 쪽에 포함
+    if t in c or c in t:
+        return 0.8
+    # 공통 토큰 비율 (Jaccard-like)
+    t_tokens = set(t.split())
+    c_tokens = set(c.split())
+    if t_tokens and c_tokens:
+        intersection = t_tokens & c_tokens
+        union = t_tokens | c_tokens
+        if intersection:
+            return 0.5 * len(intersection) / len(union)
+    return 0.0
+
+
+def search_cards(user_id: str, query: str, limit: int = 5) -> list[dict]:
+    """업체명 기반으로 유사한 카드 후보 검색.
+    Returns: [{"card_id", "card_name", "list_name", "url", "exact_match": bool}, ...]
+    유사도 순으로 정렬, limit개까지 반환.
+    """
+    if _is_dry_run():
+        log.info(f"[DRY_RUN] 카드 검색: {query}")
+        return []
+
+    board = _board_for_user(user_id)
+    if board is None:
+        return []
+
+    target = query.strip().lower()
+    if not target:
+        return []
+
+    results = []
+    try:
+        cards = board.open_cards()
+        for card in cards:
+            score = _card_similarity(target, card.name)
+            if score > 0:
+                list_name = ""
+                try:
+                    list_name = card.get_list().name
+                except Exception:
+                    pass
+                results.append({
+                    "card_id": card.id,
+                    "card_name": card.name,
+                    "list_name": list_name,
+                    "url": card.url,
+                    "exact_match": score >= 1.0,
+                    "_score": score,
+                })
+    except Exception as e:
+        log.warning(f"Trello 카드 검색 오류: {e}")
+        return []
+
+    results.sort(key=lambda x: x["_score"], reverse=True)
+    for r in results:
+        del r["_score"]
+    return results[:limit]
+
+
+def list_all_cards(user_id: str) -> list[dict]:
+    """보드의 모든 오픈 카드 목록 반환.
+    Returns: [{"card_id", "card_name", "list_name", "url"}, ...]
+    """
+    if _is_dry_run():
+        log.info("[DRY_RUN] 전체 카드 목록 조회")
+        return []
+
+    board = _board_for_user(user_id)
+    if board is None:
+        return []
+
+    results = []
+    try:
+        cards = board.open_cards()
+        for card in cards:
+            list_name = ""
+            try:
+                list_name = card.get_list().name
+            except Exception:
+                pass
+            results.append({
+                "card_id": card.id,
+                "card_name": card.name,
+                "list_name": list_name,
+                "url": card.url,
+            })
+    except Exception as e:
+        log.warning(f"Trello 전체 카드 조회 오류: {e}")
+    return results
 
 
 def _find_or_create_checklist(card, checklist_name: str = CHECKLIST_NAME):
@@ -306,6 +408,72 @@ def add_checklist_items(user_id: str, company_name: str, items: list[dict],
     except Exception as e:
         log.warning(f"체크리스트 항목 추가 실패: {e}")
         return 0
+
+
+def _find_card_by_id(user_id: str, card_id: str):
+    """카드 ID로 직접 조회. py-trello Card 객체 반환."""
+    client = _client_for_user(user_id)
+    if client is None:
+        return None
+    try:
+        return client.get_card(card_id)
+    except Exception as e:
+        log.warning(f"Trello 카드 ID 조회 실패 ({card_id}): {e}")
+        return None
+
+
+def add_checklist_items_by_id(user_id: str, card_id: str, items: list[dict]) -> int:
+    """카드 ID로 직접 체크리스트 항목 추가.
+    items: [{"assignee": str, "content": str, "due_date": str|None}, ...]
+    Returns: 추가된 항목 수
+    """
+    if not items:
+        return 0
+
+    if _is_dry_run():
+        for item in items:
+            desc = _format_checklist_item(item)
+            log.info(f"[DRY_RUN] 체크리스트 항목 (by id): {desc}")
+        return len(items)
+
+    card = _find_card_by_id(user_id, card_id)
+    if card is None:
+        log.warning(f"Trello 카드 없음 (id={card_id})")
+        return 0
+
+    try:
+        card.fetch()
+        checklist = _find_or_create_checklist(card, CHECKLIST_NAME)
+        count = 0
+        for item in items:
+            desc = _format_checklist_item(item)
+            checklist.add_checklist_item(desc)
+            count += 1
+        log.info(f"Trello 체크리스트 항목 {count}개 추가 (card_id={card_id})")
+        return count
+    except Exception as e:
+        log.warning(f"체크리스트 항목 추가 실패 (card_id={card_id}): {e}")
+        return 0
+
+
+def add_comment_by_id(user_id: str, card_id: str, comment: str) -> bool:
+    """카드 ID로 직접 코멘트 추가. Returns: 성공 여부"""
+    if _is_dry_run():
+        log.info(f"[DRY_RUN] 코멘트 추가 (card_id={card_id}): {comment[:60]}...")
+        return True
+
+    card = _find_card_by_id(user_id, card_id)
+    if card is None:
+        log.warning(f"코멘트 추가 실패 — 카드 없음 (card_id={card_id})")
+        return False
+
+    try:
+        card.comment(comment)
+        log.info(f"Trello 코멘트 추가 (card_id={card_id})")
+        return True
+    except Exception as e:
+        log.warning(f"코멘트 추가 실패 (card_id={card_id}): {e}")
+        return False
 
 
 def add_comment(user_id: str, company_name: str, comment: str) -> bool:
