@@ -1,7 +1,7 @@
 # 테스트 가이드
 
-> 최종 갱신: 2026-04-02
-> 총 테스트 수: 142개 (전체 통과) — 업체명 자동추출 테스트 제거, 회의록 초안 검토 흐름 반영, Claude Sonnet mock 적용
+> 최종 갱신: 2026-04-12
+> 총 테스트 수: 211개 (전체 통과) — Trello 카드 검색/조회, 피드백, 텍스트 추출 테스트 추가
 
 > ⚠️ 주요 미추가 테스트 항목:
 > - `test_stt.py`: Deepgram API 호출 (mocking), is_audio() MIME 판별
@@ -36,19 +36,22 @@ pytest tests/ -x
 
 ## 2. 테스트 구성 개요
 
-| 파일 | 대상 모듈 | 테스트 클래스 수 | 테스트 수 |
-|------|-----------|----------------|---------|
-| `test_calendar.py` | `tools/calendar.py` | 2 | 13 |
-| `test_slack_tools.py` | `tools/slack_tools.py` | 2 | 17 |
-| `test_gmail.py` | `tools/gmail.py` (`_decode_body`) | 1 | 8 |
-| `test_gmail_parse.py` | `tools/gmail.py` (`parse_address_header`) | 1 | 8 |
-| `test_docs.py` | `tools/docs.py` | 2 | 8 |
-| `test_drive_minutes.py` | `tools/drive.py` (Minutes/Transcript) | 3 | 8 |
-| `test_oauth.py` | `server/oauth.py` | 2 | 9 |
-| `test_user_store.py` | `store/user_store.py` | 5 | 12 |
-| `test_before.py` | `agents/before.py` | 3 | 13 |
-| `test_during.py` | `agents/during.py` | 8 | 45 |
-| **합계** | | **29** | **142** |
+| 파일 | 대상 모듈 | 테스트 수 |
+|------|-----------|---------|
+| `test_during.py` | `agents/during.py` | 54 |
+| `test_trello.py` | `tools/trello.py` | 34 |
+| `test_slack_tools.py` | `tools/slack_tools.py` | 18 |
+| `test_feedback.py` | `agents/feedback.py` | 15 |
+| `test_calendar.py` | `tools/calendar.py` | 13 |
+| `test_before.py` | `agents/before.py` | 13 |
+| `test_user_store.py` | `store/user_store.py` | 12 |
+| `test_text_extract.py` | `tools/text_extract.py` | 11 |
+| `test_oauth.py` | `server/oauth.py` | 9 |
+| `test_gmail.py` | `tools/gmail.py` (`_decode_body`) | 8 |
+| `test_gmail_parse.py` | `tools/gmail.py` (`parse_address_header`) | 8 |
+| `test_drive_minutes.py` | `tools/drive.py` (Minutes/Transcript) | 8 |
+| `test_docs.py` | `tools/docs.py` | 8 |
+| **합계** | | **211** |
 
 ---
 

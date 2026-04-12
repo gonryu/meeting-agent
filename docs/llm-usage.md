@@ -363,13 +363,18 @@ JSON으로만 응답해줘:
 - start_session: 미팅 시작 (params: title)
 - add_note: 노트 추가 (params: note)
 - end_session: 미팅 종료
+- generate_minutes: 회의록 작성 요청
 - get_minutes: 회의록 조회
 - research_company: 기업 리서치 (params: company)
 - research_person: 인물 리서치 (params: person, company)
 - update_knowledge: 지식 갱신
-- dreamplus_book: 드림플러스 회의실 예약 (params: start, end, title, attendee_count, ...)
+- dreamplus_book: 드림플러스 회의실 예약 (params: text)
 - dreamplus_list: 내 회의실 예약 목록 조회
-- dreamplus_cancel: 회의실 예약 취소
+- dreamplus_cancel: 회의실 예약 취소 (params: text)
+- dreamplus_credits: 드림플러스 크레딧 조회
+- dreamplus_settings: 드림플러스 계정 설정
+- trello_search: Trello 카드 조회/검색 (params: query)
+- feedback: 기능 요청·개선 제안·버그 리포트
 - help: 도움말·사용법 요청
 - unknown: 위 항목에 해당 없음
 ```

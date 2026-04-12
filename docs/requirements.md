@@ -102,6 +102,9 @@ Before Agent   →   During Agent   →   After Agent
 | `/회의록`                 | 저장된 회의록 목록 조회                       | ✅   |
 | `/도움말` / `/help`       | 사용 가능한 커맨드 및 자연어 명령어 안내              | ✅   |
 | `/드림플러스` / `/dreamplus` | 드림플러스 계정 등록/변경                   | ✅   |
+| `/trello`               | Trello 계정 연결                         | ✅   |
+| `/trello-disconnect`    | Trello 계정 해제                         | ✅   |
+| `/트렐로조회` / `/trello-search` | Trello 카드 목록 조회 / 업체명 검색       | ✅   |
 | `/설정`                  | 사용자별 설정 변경                          | ❌   |
 
 
@@ -109,7 +112,7 @@ Before Agent   →   During Agent   →   After Agent
 
 **LLM 인텐트 분류 방식** (`_classify_intent` in `main.py`)
 
-슬래시 커맨드 없이 자연어 메시지를 LLM(`generate_text()`)으로 아래 9개 인텐트 중 하나로 분류합니다:
+슬래시 커맨드 없이 자연어 메시지를 LLM(`generate_text()`)으로 아래 인텐트 중 하나로 분류합니다:
 
 | 인텐트 | 예시 메시지 |
 |--------|------------|
@@ -118,10 +121,18 @@ Before Agent   →   During Agent   →   After Agent
 | `start_session` | "미팅 시작", "KISA 미팅 시작할게" |
 | `add_note` | "지금 논의 내용 메모해줘: ..." |
 | `end_session` | "미팅 끝났어", "회의 종료" |
+| `generate_minutes` | "회의록 작성해줘" |
 | `get_minutes` | "회의록 보여줘", "지난 회의록 목록" |
 | `research_company` | "신한캐피탈 리서치해줘" |
 | `research_person` | "김민환 인물 조회" |
 | `update_knowledge` | "회사 지식 업데이트" |
+| `dreamplus_book` | "회의실 예약해줘", "내일 2시에 회의실" |
+| `dreamplus_list` | "예약 현황 보여줘" |
+| `dreamplus_cancel` | "회의실 예약 취소" |
+| `dreamplus_credits` | "크레딧 얼마나 남았어" |
+| `dreamplus_settings` | "드림플러스 설정" |
+| `trello_search` | "트렐로 카드 보여줘", "삼성 트렐로 카드" |
+| `feedback` | "~기능 추가해줘", "~버그 같아" |
 | `help` | "도움말", "help", "사용법 알려줘" |
 
 분류 실패 시 `/도움말` 안내 메시지 표시. 인텐트별 파라미터(title, note, company 등)도 함께 추출합니다.
@@ -496,10 +507,15 @@ Slack 초안 메시지 발송 (버튼 4개)
 - 원본 요구사항(FR-B06-2, FR-A05, FR-A06): Trello 카드 생성·조회·업데이트
 - 구현 완료:
   - 브리핑 시: 해당 업체 관련 Trello 카드의 미완료 체크리스트 항목을 맥락으로 포함 (FR-B06-2) ✅
-  - 회의록 생성 후: 액션아이템을 Trello 카드 체크리스트에 등록 제안 → 사용자 승인 후 등록 (FR-A05) ✅
-  - 카드 없는 업체는 Contact/Meeting 리스트에 자동 생성 ✅
+  - 회의록 생성 후: 업체명 기반 유사 카드 후보를 검색하여 사용자가 선택 → 체크리스트 등록 (FR-A05) ✅
+    - 유사 카드가 없으면 신규 카드 생성 옵션 제공
+    - exact 매칭이 아닌 부분 포함·토큰 매칭 기반 유사도 검색
+  - 카드 조회: `/트렐로조회` 또는 자연어로 보드 전체 카드 목록 조회 ✅
+    - 리스트(카테고리)별 그룹핑 표시, Drop/대기 (Pending) 리스트 제외
+    - 키워드 검색 지원: `/트렐로조회 삼성` 또는 "삼성 트렐로 카드"
 - 사용자별 OAuth 인증: `/trello` 커맨드 → 브라우저 Trello 승인 → 토큰 자동 저장 ✅
 - 환경변수: `TRELLO_API_KEY` (앱 공통), `TRELLO_BOARD_ID` — Token은 사용자별 DB 저장
+- SSL 검증 우회: 사내 방화벽 대응 (`session.verify = False`)
 - `DRY_RUN_TRELLO=true`로 API 호출 없이 테스트 가능
 
 ### 7.6 제안서 / 리서치 초안 생성 ❌
@@ -679,6 +695,7 @@ MeetingAgent/
 | `SLACK_ERROR_CHANNEL` | 에러 로깅용 Slack 채널 ID            | ❌   |
 | `TRELLO_API_KEY`      | Trello Power-Up API 키 (앱 공통)  | ✅   |
 | `TRELLO_BOARD_ID`     | 연동할 Trello 보드 ID              | ✅   |
+| `FEEDBACK_CHANNEL`    | 피드백 다이제스트 발송 대상 (사용자 ID 또는 채널 ID) | ✅   |
 | `DREAMPLUS_BASE_URL`  | Dreamplus API 기본 URL            | ✅   |
 
 
@@ -842,7 +859,8 @@ meeting-agent/
 ### Phase 4.5 — Trello 연동 ✅
 
 - 브리핑 시 관련 Trello 카드 미완료 체크리스트 포함 (FR-B06-2) ✅
-- 회의록 생성 후 액션아이템 → Trello 카드 체크리스트 등록 제안 (FR-A05) ✅
+- 회의록 생성 후 유사 카드 후보 검색 → 사용자 선택 → 체크리스트 등록 (FR-A05) ✅
+- 카드 조회: `/트렐로조회` 커맨드 및 자연어 지원, 리스트별 그룹핑 표시 ✅
 - 사용자별 OAuth 인증 (`/trello` 커맨드) ✅
 - 구현 파일: `tools/trello.py`, `server/oauth.py`, `agents/before.py`, `agents/after.py`
 
