@@ -28,6 +28,7 @@ with patch("google.genai.Client"), \
         _processed_events,
         _pending_minutes,
         _pending_inputs,
+        _find_draft_for_user,
     )
 
 
@@ -345,10 +346,12 @@ class TestEndSession:
             mock_drive.create_draft_doc.return_value = "draft_doc_id"
             end_session(slack, _TEST_USER)
 
-        # 내부용 회의록이 _pending_minutes에 초안으로 저장됨
-        assert _TEST_USER in _pending_minutes
-        assert _pending_minutes[_TEST_USER]["title"] == "카카오 미팅"
-        assert "## 회의 요약" in _pending_minutes[_TEST_USER]["internal_body"]
+        # FR-D14: 내부용 회의록이 _pending_minutes에 event_id 키로 저장됨
+        found = _find_draft_for_user(_TEST_USER)
+        assert found is not None, "_pending_minutes에 사용자 초안이 없습니다"
+        draft_key, draft = found
+        assert draft["title"] == "카카오 미팅"
+        assert "## 회의 요약" in draft["internal_body"]
 
     def test_no_session_sends_warning(self):
         """세션 없으면 경고 메시지"""
@@ -442,9 +445,11 @@ class TestEndSession:
             mock_drive.create_draft_doc.return_value = "draft_doc_id"
             end_session(slack, _TEST_USER)
 
-        # fallback 초안이 _pending_minutes에 저장됨
-        assert _TEST_USER in _pending_minutes
-        assert "생성 실패" in _pending_minutes[_TEST_USER]["internal_body"]
+        # FR-D14: fallback 초안이 _pending_minutes에 event_id 키로 저장됨
+        found = _find_draft_for_user(_TEST_USER)
+        assert found is not None
+        _, draft = found
+        assert "생성 실패" in draft["internal_body"]
 
     def test_llm_failure_raw_notes_in_draft_content(self):
         """LLM 실패 시 초안 내용에 원본 노트 포함"""
@@ -456,8 +461,10 @@ class TestEndSession:
             mock_drive.create_draft_doc.return_value = "draft_doc_id"
             end_session(_slack(), _TEST_USER)
 
-        # fallback 초안에 원본 노트 내용 포함
-        draft = _pending_minutes[_TEST_USER]
+        # FR-D14: fallback 초안에 원본 노트 내용 포함
+        found = _find_draft_for_user(_TEST_USER)
+        assert found is not None
+        _, draft = found
         assert "DID 연동 논의" in draft["internal_body"] or "DID 연동 논의" in draft["notes_text"]
 
 
@@ -494,9 +501,11 @@ class TestCheckTranscripts:
 
             check_transcripts(slack)
 
-        # 내부용 회의록이 _pending_minutes에 초안으로 저장됨
-        assert _TEST_USER in _pending_minutes
-        assert _pending_minutes[_TEST_USER]["title"] == "카카오 미팅"
+        # FR-D14: 내부용 회의록이 _pending_minutes에 event_id 키로 저장됨
+        found = _find_draft_for_user(_TEST_USER)
+        assert found is not None, "_pending_minutes에 사용자 초안이 없습니다"
+        _, draft = found
+        assert draft["title"] == "카카오 미팅"
 
     def test_no_transcript_skipped(self):
         """트랜스크립트 없으면 회의록 생성 안 함"""
@@ -1099,6 +1108,6 @@ class TestEventSelection:
             mock_drive.save_minutes.return_value = "file_id"
             generate_minutes_now(slack, _TEST_USER)
 
-        # 세션이 종료되고 회의록 초안이 생성됨
+        # 세션이 종료되고 회의록 초안이 생성됨 (FR-D14: event_id 키)
         assert _TEST_USER not in _active_sessions
-        assert _TEST_USER in _pending_minutes
+        assert _find_draft_for_user(_TEST_USER) is not None

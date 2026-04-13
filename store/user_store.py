@@ -31,6 +31,7 @@ def _fernet() -> Fernet:
 @contextmanager
 def _conn():
     conn = sqlite3.connect(_DB_PATH)
+    conn.execute("PRAGMA journal_mode=WAL")  # INF-08: 동시성 안정화
     conn.row_factory = sqlite3.Row
     try:
         yield conn
@@ -105,6 +106,27 @@ def init_db():
                 created_at  TEXT NOT NULL
             )
         """)
+
+        # INF-10: 회의록 검색 인덱스
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS meeting_index (
+                id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                event_id      TEXT NOT NULL,
+                user_id       TEXT NOT NULL,
+                date          TEXT NOT NULL,
+                title         TEXT NOT NULL,
+                company_name  TEXT,
+                attendees     TEXT,
+                drive_file_id TEXT,
+                drive_link    TEXT,
+                has_proposal  INTEGER DEFAULT 0,
+                created_at    TEXT DEFAULT (datetime('now'))
+            )
+        """)
+        # 인덱스 생성 (IF NOT EXISTS로 중복 방지)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_meeting_company ON meeting_index(company_name)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_meeting_date ON meeting_index(date)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_meeting_user ON meeting_index(user_id)")
 
 
 def is_registered(slack_user_id: str) -> bool:
@@ -407,4 +429,55 @@ def mark_feedback_notified(feedback_ids: list[int]) -> None:
         conn.execute(
             f"UPDATE feedback SET notified = 1 WHERE id IN ({placeholders})",
             feedback_ids,
+        )
+
+
+# ── 회의록 인덱스 (INF-10) ───────────────────────────────────
+
+
+def save_meeting_index(*, event_id: str, user_id: str, date: str, title: str,
+                       company_name: str = None, attendees: str = None,
+                       drive_file_id: str = None, drive_link: str = None) -> None:
+    """회의록 메타데이터를 인덱스에 저장"""
+    with _conn() as conn:
+        conn.execute(
+            """INSERT INTO meeting_index
+               (event_id, user_id, date, title, company_name, attendees, drive_file_id, drive_link)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (event_id, user_id, date, title, company_name, attendees,
+             drive_file_id, drive_link),
+        )
+
+
+def search_meetings(*, user_id: str, company: str = None,
+                     date_from: str = None, date_to: str = None,
+                     limit: int = 20) -> list[dict]:
+    """회의록 인덱스 검색 (업체명/기간 필터)"""
+    query = "SELECT * FROM meeting_index WHERE user_id = ?"
+    params: list = [user_id]
+
+    if company:
+        query += " AND company_name LIKE ?"
+        params.append(f"%{company}%")
+    if date_from:
+        query += " AND date >= ?"
+        params.append(date_from)
+    if date_to:
+        query += " AND date <= ?"
+        params.append(date_to)
+
+    query += " ORDER BY date DESC LIMIT ?"
+    params.append(limit)
+
+    with _conn() as conn:
+        rows = conn.execute(query, params).fetchall()
+    return [dict(r) for r in rows]
+
+
+def update_meeting_proposal_flag(event_id: str, user_id: str) -> None:
+    """meeting_index의 has_proposal 플래그를 1로 갱신"""
+    with _conn() as conn:
+        conn.execute(
+            "UPDATE meeting_index SET has_proposal = 1 WHERE event_id = ? AND user_id = ?",
+            (event_id, user_id),
         )

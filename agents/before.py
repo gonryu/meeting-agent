@@ -73,7 +73,127 @@ def _save_pending_agenda(agenda: dict):
         log.warning(f"pending_agenda 저장 실패: {e}")
 
 
+# 동시성 보호용 Lock (INF-07)
+_agenda_lock = threading.Lock()     # _pending_agenda
+_drafts_lock = threading.Lock()     # _meeting_drafts
+
 _pending_agenda: dict[str, list] = _load_pending_agenda()
+
+
+# ── 업체명 추론 (FR-B13, FR-B14) ─────────────────────────────
+
+
+def _infer_company_from_title(title: str, company_candidates: list[str] = None) -> str:
+    """미팅 제목에서 업체명을 LLM으로 추론.
+
+    Args:
+        title: 캘린더 이벤트 제목
+        company_candidates: Drive에 저장된 기존 업체명 목록 (참고용)
+
+    Returns:
+        추론된 업체명 문자열. 추론 실패 시 빈 문자열.
+    """
+    candidates_text = ""
+    if company_candidates:
+        candidates_text = (
+            "\n## 기존 업체 목록 (참고용)\n"
+            + ", ".join(company_candidates)
+        )
+
+    prompt = (
+        f"다음 회의 제목에서 업체(회사)명을 추출하세요.{candidates_text}\n\n"
+        f"## 규칙\n"
+        f"- 제목에 업체명이 명시되어 있으면 그대로 반환\n"
+        f"- 인물명만 있으면 빈 문자열 반환 (업체명이 아님)\n"
+        f"- 기존 업체 목록에 유사한 이름이 있으면 목록의 정확한 이름 사용\n"
+        f"- 약어나 영문명도 기존 목록과 매칭 (예: '카카오' = 'Kakao')\n"
+        f"- 업체명만 반환하고, 설명이나 부연은 하지 마세요\n\n"
+        f"회의 제목: {title}\n업체명:"
+    )
+    try:
+        result = _generate(prompt).strip().strip('"').strip("'")
+        # 빈 응답이나 "없음" 등은 빈 문자열로 처리
+        if not result or result in ("없음", "없다", "N/A", "null", "-"):
+            return ""
+        return result
+    except Exception as e:
+        log.warning(f"업체명 추론 실패: {e}")
+        return ""
+
+
+def _infer_company_from_attendees(
+    attendees: list[dict], creds=None, contacts_folder_id: str = None,
+) -> str:
+    """FR-B16: 참석자 이메일 도메인·인물 파일에서 소속 회사 역추론.
+
+    Returns: 추론된 업체명 문자열. 실패 시 빈 문자열.
+    """
+    _internal_domains = set(
+        os.getenv("INTERNAL_DOMAINS", "parametacorp.com,iconloop.com").split(",")
+    )
+
+    external_domains = set()
+    external_names = []
+
+    for a in attendees:
+        email = a.get("email", "")
+        domain = email.split("@")[-1] if "@" in email else ""
+        if domain and domain not in _internal_domains:
+            external_domains.add(domain)
+            name = a.get("displayName") or a.get("name", "")
+            if name:
+                external_names.append(name)
+
+    # 1단계: 인물 파일에서 소속 조회
+    if creds and contacts_folder_id and external_names:
+        for name in external_names[:3]:  # 상위 3명만 조회
+            try:
+                content, _ = drive.get_person_info(creds, contacts_folder_id, name)
+                if content:
+                    # "소속: ..." 행에서 업체명 추출
+                    for line in content.splitlines():
+                        if "소속:" in line:
+                            import re
+                            # [[기업명]] 또는 일반 텍스트
+                            match = re.search(r'\[\[(.+?)\]\]', line)
+                            if match:
+                                return match.group(1)
+                            # "소속: 카카오" 형태
+                            company = line.split("소속:")[-1].strip().strip("-").strip()
+                            if company and company not in ("", "없음"):
+                                return company
+            except Exception:
+                pass
+
+    # 2단계: 이메일 도메인에서 업체명 추론
+    # 잘 알려진 도메인 매핑
+    domain_hints = {
+        "kakao.com": "카카오", "kakaocorp.com": "카카오",
+        "samsung.com": "삼성전자", "samsungsds.com": "삼성SDS",
+        "lgcns.com": "LGCNS", "lg.com": "LG",
+        "sk.com": "SK", "sktelecom.com": "SK텔레콤",
+        "naver.com": "네이버", "navercorp.com": "네이버",
+        "kisa.or.kr": "KISA", "bok.or.kr": "한국은행",
+    }
+    for domain in external_domains:
+        if domain in domain_hints:
+            return domain_hints[domain]
+
+    # 3단계: 도메인에서 업체명 추출 (2차 도메인)
+    _free_email = {"gmail", "yahoo", "outlook", "hotmail", "naver"}
+    _second_level_tld = {"co", "or", "ac", "go", "ne", "re"}  # .co.kr, .or.kr 등
+    for domain in external_domains:
+        parts = domain.split(".")
+        if len(parts) >= 3 and parts[-2] in _second_level_tld:
+            candidate = parts[-3]  # e.g., "shinhan" from "shinhan.co.kr"
+        elif len(parts) >= 2:
+            candidate = parts[-2]  # e.g., "kakao" from "kakao.com"
+        else:
+            continue
+        if len(candidate) >= 3 and candidate not in _free_email:
+            return candidate.capitalize()
+
+    return ""
 
 
 def _post(slack_client, *, user_id: str, channel=None, thread_ts=None,
@@ -384,10 +504,38 @@ def research_company(user_id: str, company_name: str, force: bool = False) -> tu
     except Exception as e:
         log.warning(f"Gmail 검색 실패 ({company_name}): {e}")
 
-    # 3단계: 웹 검색
+    # 3단계: 웹 검색 (CM-09: 출처 태그 부착)
     news_text = _to_bullet_lines(_search(company_news_prompt(company_name)))
+    # CM-09: 웹 검색 결과에 출처 태그 추가
+    if news_text.strip():
+        news_lines = []
+        for line in news_text.split("\n"):
+            if line.strip().startswith("- ") and "[출처:" not in line:
+                news_lines.append(f"{line.rstrip()} `[출처: 웹 검색, {today}]`")
+            else:
+                news_lines.append(line)
+        news_text = "\n".join(news_lines)
+
     knowledge = drive.get_company_knowledge(creds, knowledge_file_id)
     connections = _to_bullet_lines(_generate(service_connection_prompt(news_text, knowledge)))
+
+    # CM-09: 이메일 섹션에 출처 태그 추가
+    if email_section and "[출처:" not in email_section:
+        email_section = email_section.replace(
+            "## 이메일 맥락",
+            f"## 이메일 맥락 `[출처: Gmail, {today}]`",
+        )
+
+    # CM-10: Sources/ 에 웹 검색 원본 저장
+    if news_text.strip():
+        try:
+            source_content = f"# {company_name} 웹 검색 결과\n- 검색일: {today}\n\n{news_text}"
+            drive.save_source_file(
+                creds, contacts_folder_id, "Research",
+                f"{today}_{company_name}_web_search.md", source_content,
+            )
+        except Exception as e:
+            log.warning(f"Sources/Research 저장 실패 ({company_name}): {e}")
 
     # 섹션 순서: 최근 동향 → 이메일 맥락 → 파라메타 서비스 연결점 → ParaScope 브리핑
     new_content = (
@@ -441,7 +589,14 @@ def research_person(user_id: str, person_name: str, company_name: str,
     except Exception as e:
         log.warning(f"Gmail 검색 실패 ({person_name}): {e}")
 
-    # 2단계: 웹 검색
+    # CM-09: 이메일 섹션에 출처 태그 추가
+    if email_section and "[출처:" not in email_section:
+        email_section = email_section.replace(
+            "## 이메일 맥락",
+            f"## 이메일 맥락 `[출처: Gmail, {today}]`",
+        )
+
+    # 2단계: 웹 검색 (CM-09: 출처 태그 부착)
     info_text = _search(person_info_prompt(person_name, company_name))
 
     # 이메일: 명함 > Gmail 헤더 순 우선
@@ -469,10 +624,14 @@ def research_person(user_id: str, person_name: str, company_name: str,
                 card_lines.append(f"- {label}: {val}")
         card_section = "\n## 명함 정보\n" + "\n".join(card_lines) + "\n"
 
+    # CM-09: 공개 정보에 출처 태그 추가
+    if info_text.strip() and "[출처:" not in info_text:
+        info_text = info_text.rstrip() + f" `[출처: 웹 검색, {today}]`"
+
     new_content = (
         f"# {person_name}\n\n"
         f"## 기본 정보\n"
-        f"- 소속: {company_name}\n"
+        f"- 소속: [[{company_name}]]\n"  # CM-07: Wiki 링크
         f"- last_searched: {today}\n"
         f"{email_line}"
         f"{card_section}"
@@ -586,6 +745,15 @@ def run_briefing(slack_client, user_id: str, event: dict = None,
     sent_threads = []
     research_queue: list[tuple[dict, str]] = []  # (meeting, company_name)
 
+    # 기존 업체 목록 로딩 (LLM 추론 시 후보로 사용, FR-B14)
+    existing_companies = []
+    try:
+        contacts_folder_id = user_store.get_user(user_id).get("contacts_folder_id")
+        if contacts_folder_id:
+            existing_companies = drive.get_company_names(creds, contacts_folder_id)
+    except Exception as e:
+        log.warning(f"기존 업체 목록 로딩 실패: {e}")
+
     # 1단계: 모든 미팅 헤더 즉시 발송 (리서치 없이)
     for ev in events:
         meeting = cal.parse_event(ev)
@@ -595,6 +763,38 @@ def run_briefing(slack_client, user_id: str, event: dict = None,
             ev.get("extendedProperties", {}).get("private", {}).get("company")
         )
         company_names = [c.strip() for c in company_raw.split(",") if c.strip()] if company_raw else []
+
+        # FR-B13: extendedProperties 없으면 LLM 추론 폴백
+        if not company_names:
+            inferred = _infer_company_from_title(
+                meeting.get("summary", ""),
+                company_candidates=existing_companies,
+            )
+            if inferred:
+                company_names = [c.strip() for c in inferred.split(",") if c.strip()]
+                log.info(f"업체명 추론 성공 (제목): '{meeting.get('summary')}' → {company_names}")
+
+        # FR-B16: 제목 추론 실패 시 참석자 기반 역추론
+        if not company_names:
+            attendees = ev.get("attendees", [])
+            if attendees:
+                inferred = _infer_company_from_attendees(
+                    attendees, creds=creds, contacts_folder_id=contacts_folder_id,
+                )
+                if inferred:
+                    company_names = [inferred]
+                    log.info(f"업체명 추론 성공 (참석자): '{meeting.get('summary')}' → {company_names}")
+
+        # FR-B15: 추론 결과를 extendedProperties에 저장 (다음 조회 시 재사용)
+        if company_names and not company_raw:
+            try:
+                event_id = ev.get("id")
+                if event_id:
+                    cal.update_event(creds, event_id,
+                                     extended_properties={"private": {"company": ", ".join(company_names)}})
+                    log.info(f"추론 업체명 extendedProperties 저장: {event_id} → {company_names}")
+            except Exception as ep_err:
+                log.warning(f"extendedProperties 저장 실패: {ep_err}")
 
         if company_names:
             # 첫 번째 업체를 대표로 브리핑 헤더 발송

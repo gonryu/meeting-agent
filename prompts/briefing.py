@@ -238,3 +238,44 @@ JSON 배열로만 답변해줘. 다른 텍스트 없이 JSON만:
 - 기한이 명시되지 않은 경우 null
 - 액션아이템이 없으면 빈 배열 [] 반환
 """
+
+
+# ── 제안서 프롬프트 (Phase 2.4) ─────────────────────────────────
+
+
+def proposal_intake_prompt(
+    minutes_body: str,
+    company_info: str = "",
+    knowledge: str = "",
+    previous_context: str = "",
+) -> str:
+    template = _load_template("proposal_intake.md")
+    return (template
+            .replace("{{minutes_body}}", minutes_body)
+            .replace("{{company_info}}", company_info or "(없음)")
+            .replace("{{knowledge}}", knowledge or "(없음)")
+            .replace("{{previous_context}}", previous_context or "(없음)"))
+
+
+def proposal_generate_prompt(
+    title: str,
+    purpose: str,
+    target: str,
+    scope: str,
+    key_points: str,
+    background: str,
+    minutes_body: str,
+    company_info: str = "",
+    knowledge: str = "",
+) -> str:
+    template = _load_template("proposal_generate.md")
+    return (template
+            .replace("{{title}}", title)
+            .replace("{{purpose}}", purpose)
+            .replace("{{target}}", target)
+            .replace("{{scope}}", scope)
+            .replace("{{key_points}}", key_points)
+            .replace("{{background}}", background)
+            .replace("{{minutes_body}}", minutes_body)
+            .replace("{{company_info}}", company_info or "(없음)")
+            .replace("{{knowledge}}", knowledge or "(없음)"))

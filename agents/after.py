@@ -162,6 +162,23 @@ def trigger_after_meeting(
         # F. 후속 일정 패턴 감지
         _suggest_followup(slack_client, user_id, internal_body, title)
 
+        # G. 제안서 키워드 감지 + 제안 (FR-A11)
+        try:
+            from agents import proposal as proposal_agent
+            proposal_agent.detect_and_suggest_proposal(
+                slack_client,
+                user_id=user_id,
+                event_id=event_id,
+                title=title,
+                date_str=date_str,
+                internal_body=internal_body,
+                company_names=company_names,
+                attendees_raw=attendees_raw,
+                creds=creds,
+            )
+        except Exception as e:
+            log.warning(f"제안서 제안 실패 (무시): {e}")
+
         log.info(f"After Agent 완료: {title}")
 
     except Exception:
@@ -639,7 +656,7 @@ def handle_trello_select_card(slack_client, body: dict) -> None:
 
 
 def handle_trello_new_card(slack_client, body: dict) -> None:
-    """'신규 카드 생성' 버튼 핸들러 — 새 카드를 만들고 액션아이템 등록"""
+    """'신규 카드 생성' 버튼 핸들러 — FR-A16: 사용자 확인 후 카드 생성"""
     user_id = body["user"]["id"]
     try:
         payload = json.loads(body["actions"][0]["value"])
@@ -652,7 +669,62 @@ def handle_trello_new_card(slack_client, body: dict) -> None:
         )
         return
 
-    # 신규 카드 생성
+    # FR-A16: 카드 생성 전 확인 메시지 발송
+    blocks = [
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": f"🆕 *'{company_name}'* 카드를 Trello에 새로 생성할까요?",
+            },
+        },
+        {
+            "type": "actions",
+            "elements": [
+                {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "✅ 생성"},
+                    "style": "primary",
+                    "action_id": "trello_confirm_new_card",
+                    "value": json.dumps({
+                        "event_id": event_id,
+                        "company": company_name,
+                    }),
+                },
+                {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "❌ 취소"},
+                    "action_id": "trello_cancel_new_card",
+                    "value": json.dumps({
+                        "event_id": event_id,
+                        "company": company_name,
+                    }),
+                },
+            ],
+        },
+    ]
+
+    slack_client.chat_postMessage(
+        channel=user_id,
+        text=f"🆕 '{company_name}' 카드를 Trello에 새로 생성할까요?",
+        blocks=blocks,
+    )
+
+
+def handle_trello_confirm_new_card(slack_client, body: dict) -> None:
+    """FR-A16: 신규 카드 생성 확인 → 실제 생성 및 등록"""
+    user_id = body["user"]["id"]
+    try:
+        payload = json.loads(body["actions"][0]["value"])
+        event_id = payload["event_id"]
+        company_name = payload["company"]
+    except (KeyError, json.JSONDecodeError) as e:
+        log.warning(f"Trello 카드 생성 확인 payload 파싱 실패: {e}")
+        slack_client.chat_postMessage(
+            channel=user_id, text="❌ Trello 등록 실패: 잘못된 요청"
+        )
+        return
+
     result = trello.create_card(user_id, company_name)
     if result is None:
         slack_client.chat_postMessage(
@@ -663,6 +735,20 @@ def handle_trello_new_card(slack_client, body: dict) -> None:
 
     _register_to_card(slack_client, user_id=user_id, event_id=event_id,
                       card_id=result["card_id"], card_name=result["card_name"])
+
+
+def handle_trello_cancel_new_card(slack_client, body: dict) -> None:
+    """FR-A16: 신규 카드 생성 취소"""
+    user_id = body["user"]["id"]
+    try:
+        payload = json.loads(body["actions"][0]["value"])
+        company_name = payload["company"]
+    except (KeyError, json.JSONDecodeError):
+        company_name = "알 수 없음"
+    slack_client.chat_postMessage(
+        channel=user_id,
+        text=f"⏭️ *{company_name}* Trello 카드 생성을 건너뛰었습니다.",
+    )
 
 
 def _register_to_card(slack_client, *, user_id: str, event_id: str,
@@ -848,7 +934,8 @@ def _update_contacts(
     title: str,
     date_str: str,
 ) -> None:
-    """외부 참석자 People/{이름}.md에 last_met + 미팅 이력 1줄 추가"""
+    """외부 참석자 People/{이름}.md에 last_met 업데이트.
+    미팅 히스토리 테이블 갱신은 during.py finalize_minutes에서 CM-08로 처리."""
     for person in recipients:
         name = person.get("name", "").strip()
         if not name:
@@ -865,17 +952,6 @@ def _update_contacts(
                 )
             else:
                 content += f"\nlast_met: {date_str}"
-
-            # 미팅 이력 섹션에 추가
-            history_line = f"- {date_str} {title}"
-            if "## 미팅 이력" in content:
-                content = content.replace(
-                    "## 미팅 이력",
-                    f"## 미팅 이력\n{history_line}",
-                    1,
-                )
-            else:
-                content += f"\n\n## 미팅 이력\n{history_line}"
 
             drive.save_person_info(creds, contacts_folder_id, name, content, file_id)
             log.info(f"Contacts 갱신: {name}")

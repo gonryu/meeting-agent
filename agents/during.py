@@ -40,6 +40,11 @@ _SESSIONS_DIR = Path(__file__).parent.parent / ".sessions"
 
 # ── 상태 저장소 ───────────────────────────────────────────────
 
+# 동시성 보호용 Lock (INF-07)
+_sessions_lock = threading.Lock()   # _active_sessions, _completed_notes, _processed_events
+_minutes_lock = threading.Lock()    # _pending_minutes
+_inputs_lock = threading.Lock()     # _pending_inputs
+
 # 진행 중인 수동 노트 세션
 # { user_id: { title, started_at, notes, event_id } }
 _active_sessions: dict[str, dict] = {}
@@ -52,11 +57,11 @@ _completed_notes: dict[str, dict] = {}
 # { user_id: set(event_id) }
 _processed_events: dict[str, set] = {}
 
-# 회의록 검토 대기 중인 초안
-# { user_id: { title, date_str, time_range, attendees, source_label,
-#              transcript_text, notes_text, internal_body, external_body,
-#              minutes_folder_id, creds, event_id, attendees_raw,
-#              draft_ts, channel } }
+# 회의록 검토 대기 중인 초안 (FR-D14: event_id 키 사용)
+# { event_id: { user_id, title, date_str, time_range, attendees, source_label,
+#               transcript_text, notes_text, internal_body, external_body,
+#               minutes_folder_id, creds, event_id, attendees_raw,
+#               draft_ts, channel } }
 _pending_minutes: dict[str, dict] = {}
 
 # 이벤트 선택 대기 중인 입력 (캘린더 이벤트가 0개 또는 여러 개일 때)
@@ -173,8 +178,41 @@ def _load_sessions():
             log.warning(f"처리 완료 이벤트 파일 로드 실패 ({path}): {e}")
 
 
+# ── _pending_minutes 파일 영속화 (INF-09) ────────────────────
+
+
+def _save_pending_minutes():
+    """_pending_minutes를 JSON 파일로 저장 (creds 등 직렬화 불가 객체 제외)"""
+    try:
+        _ensure_sessions_dir()
+        serializable = {}
+        for key, val in _pending_minutes.items():
+            serializable[key] = {
+                k: v for k, v in val.items()
+                if k != "creds"  # Credentials 객체 제외
+            }
+        with open(_SESSIONS_DIR / "pending_minutes.json", "w", encoding="utf-8") as f:
+            json.dump(serializable, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        log.warning(f"pending_minutes 저장 실패: {e}")
+
+
+def _load_pending_minutes() -> dict:
+    """서버 시작 시 pending_minutes.json에서 복구"""
+    path = _SESSIONS_DIR / "pending_minutes.json"
+    if not path.exists():
+        return {}
+    try:
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
+    except (json.JSONDecodeError, Exception) as e:
+        log.warning(f"pending_minutes 로드 실패: {e}")
+        return {}
+
+
 # 모듈 로드 시 자동 복구
 _load_sessions()
+_pending_minutes.update(_load_pending_minutes())
 
 
 # ── LLM 헬퍼 ─────────────────────────────────────────────────
@@ -193,6 +231,56 @@ def _generate(prompt: str) -> str:
             messages=[{"role": "user", "content": prompt}],
         )
         return msg.content[0].text.strip()
+
+
+# ── 회의록 품질 검증 (FR-D09, FR-D10) ────────────────────────
+
+# 내부용 필수 섹션
+_INTERNAL_REQUIRED_SECTIONS = ["회의 요약", "주요 논의 내용", "주요 결정 사항", "액션 아이템"]
+# 외부용 필수 섹션
+_EXTERNAL_REQUIRED_SECTIONS = ["회의 개요", "주요 합의 사항", "공동 액션 아이템"]
+# 외부용 금지 키워드
+_EXTERNAL_FORBIDDEN_KEYWORDS = ["내부 메모", "협상", "전략"]
+
+
+def validate_minutes(body: str, minute_type: str) -> dict:
+    """회의록 필수항목 검증.
+
+    Args:
+        body: 회의록 본문 (마크다운)
+        minute_type: "internal" 또는 "external"
+
+    Returns:
+        {"valid": bool, "missing": [...], "forbidden": [...], "warnings": [...]}
+    """
+    result = {"valid": True, "missing": [], "forbidden": [], "warnings": []}
+
+    if minute_type == "internal":
+        required = _INTERNAL_REQUIRED_SECTIONS
+    else:
+        required = _EXTERNAL_REQUIRED_SECTIONS
+
+    # 필수 섹션 존재 확인 (## 헤더 기준)
+    body_lower = body.lower() if body else ""
+    for section in required:
+        # "## 섹션명" 또는 "##섹션명" 형태 모두 매칭
+        if f"## {section.lower()}" not in body_lower and f"##{section.lower()}" not in body_lower:
+            result["missing"].append(section)
+
+    # 외부용 금지 키워드 검출
+    if minute_type == "external":
+        for keyword in _EXTERNAL_FORBIDDEN_KEYWORDS:
+            if keyword in body:
+                result["forbidden"].append(keyword)
+
+    # 권장 사항 검증
+    if body and len(body) < 500 and minute_type == "internal":
+        result["warnings"].append("본문이 500자 미만입니다")
+
+    if result["missing"] or result["forbidden"]:
+        result["valid"] = False
+
+    return result
 
 
 _MINUTES_SYSTEM_PROMPT = """\
@@ -299,6 +387,15 @@ def get_session_thread(user_id: str) -> tuple[str, str] | None:
     ts = session.get("session_thread_ts")
     if ch and ts:
         return (ch, ts)
+    return None
+
+
+def _find_draft_for_user(user_id: str) -> tuple[str, dict] | None:
+    """FR-D14: user_id로 _pending_minutes에서 초안 역방향 조회.
+    Returns (event_id_key, draft_dict) 또는 None."""
+    for eid, draft in _pending_minutes.items():
+        if draft.get("user_id") == user_id:
+            return (eid, draft)
     return None
 
 
@@ -858,7 +955,8 @@ def end_session(slack_client, user_id: str, channel: str = None, thread_ts: str 
         try:
             creds, minutes_folder_id = _get_creds_and_config(user_id)
         except Exception as e:
-            _post(slack_client, user_id=user_id, text=f"⚠️ 인증 오류: {e}")
+            _post(slack_client, user_id=user_id, channel=channel, thread_ts=thread_ts,
+                  text=f"⚠️ 인증 오류: {e}")
             return
 
         date_str = datetime.now(KST).strftime("%Y-%m-%d")
@@ -1036,6 +1134,18 @@ def _generate_and_post_minutes(slack_client, *, user_id: str, title: str,
                                 event_id: str | None = None,
                                 attendees_raw: list | None = None):
     """내부용·외부용 회의록 생성 → Drive 저장 → Slack 발송 → After Agent 트리거"""
+
+    # FR-D15: 복수 미팅 대기열 — 기존 미처리 초안이 있으면 사용자에게 알림
+    existing_drafts = [
+        (eid, d) for eid, d in _pending_minutes.items()
+        if d.get("user_id") == user_id
+    ]
+    if existing_drafts:
+        existing_titles = ", ".join(f"*{d['title']}*" for _, d in existing_drafts)
+        _post(slack_client, user_id=user_id,
+              text=f"ℹ️ 검토 대기 중인 회의록이 있습니다: {existing_titles}\n"
+                   f"*{title}* 회의록을 추가로 생성합니다.")
+
     meeting_date = f"{date_str} {time_range}".strip()
 
     # 입력 소스 표기
@@ -1057,19 +1167,34 @@ def _generate_and_post_minutes(slack_client, *, user_id: str, title: str,
             log.warning(f"트랜스크립트 전처리 실패, 원본 사용: {e}")
             processed_transcript = transcript_text[:40000]
 
-    # ── 내부용 생성 (외부용은 '저장 및 완료' 후 생성) ──
+    # ── 내부용 생성 + 품질 검증 루프 (FR-D09, 최대 2회 재생성) ──
     _post(slack_client, user_id=user_id, text=f"✍️ *{title}* 내부용 회의록 생성 중...")
-    try:
-        internal_body = _generate_minutes(
-            minutes_internal_prompt(title, meeting_date, attendees,
-                                    processed_transcript, notes_text)
-        )
-    except Exception as e:
-        log.error(f"내부용 회의록 생성 실패: {e}")
-        internal_body = f"## 회의 요약\n(생성 실패: {e})\n\n## 원본\n{notes_text or transcript_text[:2000]}"
+    internal_body = None
+    for attempt in range(3):  # 최초 1회 + 재생성 최대 2회
+        try:
+            internal_body = _generate_minutes(
+                minutes_internal_prompt(title, meeting_date, attendees,
+                                        processed_transcript, notes_text)
+            )
+        except Exception as e:
+            log.error(f"내부용 회의록 생성 실패 (시도 {attempt+1}): {e}")
+            internal_body = f"## 회의 요약\n(생성 실패: {e})\n\n## 원본\n{notes_text or transcript_text[:2000]}"
+            break
 
-    # ── 초안 저장 + 검토 요청 ──
-    _pending_minutes[user_id] = {
+        validation = validate_minutes(internal_body, "internal")
+        if validation["valid"]:
+            break
+        if attempt < 2 and validation["missing"]:
+            log.info(f"회의록 검증 실패 (시도 {attempt+1}), 재생성: 누락={validation['missing']}")
+            processed_transcript = processed_transcript  # 동일 입력으로 재시도
+        else:
+            log.warning(f"회의록 검증 실패 (최종): 누락={validation.get('missing')}")
+            break
+
+    # ── 초안 저장 + 검토 요청 (FR-D14: event_id 키 사용) ──
+    draft_key = event_id or f"manual_{user_id}_{int(datetime.now(KST).timestamp())}"
+    _pending_minutes[draft_key] = {
+        "user_id": user_id,
         "title": title,
         "date_str": date_str,
         "time_range": time_range,
@@ -1085,14 +1210,18 @@ def _generate_and_post_minutes(slack_client, *, user_id: str, title: str,
         "draft_ts": None,
         "channel": user_id,
     }
-    _post_minutes_draft(slack_client, user_id=user_id)
+    _save_pending_minutes()
+    _post_minutes_draft(slack_client, user_id=user_id, draft_key=draft_key)
 
 
 def _build_minutes_content(title: str, date_str: str, time_range: str,
                             attendees: str, source: str, body: str,
                             transcript_text: str, notes_text: str,
-                            kind: str) -> str:
-    """Drive 저장용 마크다운 파일 내용 구성"""
+                            kind: str, *,
+                            company_names: list[str] = None,
+                            attendee_names: list[str] = None,
+                            transcript_source_name: str = None) -> str:
+    """Drive 저장용 마크다운 파일 내용 구성 (CM-07: 역링크 포함)"""
     lines = [
         f"# {title} ({kind})",
         "",
@@ -1112,7 +1241,18 @@ def _build_minutes_content(title: str, date_str: str, time_range: str,
             lines += ["", "---", "## 원본 트랜스크립트", preview + suffix]
         if notes_text:
             lines += ["", "---", "## 원본 수동 노트", notes_text]
-    return "\n".join(lines)
+
+    content = "\n".join(lines)
+
+    # CM-07: 관련 자료 역링크 추가
+    content = drive.add_minutes_backlinks(
+        content,
+        company_names=company_names,
+        attendee_names=attendee_names,
+        transcript_source=transcript_source_name,
+    )
+
+    return content
 
 
 def _post_combined_minutes(slack_client, *, user_id: str, title: str,
@@ -1145,11 +1285,19 @@ def _post_combined_minutes(slack_client, *, user_id: str, title: str,
 # ── 회의록 검토 단계 ──────────────────────────────────────────
 
 
-def _post_minutes_draft(slack_client, *, user_id: str):
+def _post_minutes_draft(slack_client, *, user_id: str, draft_key: str = None):
     """내부용 회의록 미리보기 + 확인/수정/취소 버튼 발송.
     minutes_folder_id가 있으면 Google Docs 초안을 생성하여 직접 편집 링크도 제공.
     """
-    draft = _pending_minutes.get(user_id)
+    # FR-D14: draft_key(event_id)로 조회, 없으면 user_id로 역방향 조회
+    if draft_key:
+        draft = _pending_minutes.get(draft_key)
+    else:
+        found = _find_draft_for_user(user_id)
+        if found:
+            draft_key, draft = found
+        else:
+            draft = None
     if not draft:
         return
 
@@ -1179,24 +1327,27 @@ def _post_minutes_draft(slack_client, *, user_id: str):
     if len(internal_body) > 2500:
         preview += "\n\n_(이하 생략)_"
 
-    # ── Block Kit 구성 ──
+    # ── Block Kit 구성 (FR-D14: 버튼에 draft_key 포함) ──
     action_elements = [
         {
             "type": "button",
             "text": {"type": "plain_text", "text": "✅ 저장 및 완료"},
             "action_id": "minutes_confirm",
             "style": "primary",
+            "value": draft_key or "",
         },
         {
             "type": "button",
             "text": {"type": "plain_text", "text": "✏️ 수정 요청"},
             "action_id": "minutes_edit_request",
+            "value": draft_key or "",
         },
         {
             "type": "button",
             "text": {"type": "plain_text", "text": "❌ 취소"},
             "action_id": "minutes_cancel",
             "style": "danger",
+            "value": draft_key or "",
         },
     ]
     if doc_id:
@@ -1235,9 +1386,20 @@ def _post_minutes_draft(slack_client, *, user_id: str):
         draft["draft_ts"] = resp["ts"]
 
 
-def finalize_minutes(slack_client, user_id: str):
+def finalize_minutes(slack_client, user_id: str, draft_key: str = None):
     """회의록 저장 및 완료 — Drive 저장 + Slack 발송 + After Agent"""
-    draft = _pending_minutes.pop(user_id, None)
+    # FR-D14: draft_key(event_id)로 조회, 없으면 user_id로 역방향 조회
+    if draft_key:
+        draft = _pending_minutes.pop(draft_key, None)
+    else:
+        found = _find_draft_for_user(user_id)
+        if found:
+            draft_key, draft = found
+            _pending_minutes.pop(draft_key, None)
+        else:
+            draft = None
+    if draft:
+        _save_pending_minutes()
     if not draft:
         slack_client.chat_postMessage(
             channel=user_id,
@@ -1272,26 +1434,104 @@ def finalize_minutes(slack_client, user_id: str):
         # 편집용 초안 Doc 삭제 (정리)
         drive.delete_file(creds, draft_doc_id)
 
-    # ── 외부용 생성 (확정된 내부용 기준) ──
+    # ── 외부용 생성 + 품질 검증 (FR-D10: 금지 키워드 자동 제거) ──
     _post(slack_client, user_id=user_id, text=f"✍️ *{title}* 외부용 회의록 생성 중...")
-    try:
-        external_body = _generate_minutes(
-            minutes_external_prompt(title, meeting_date, attendees, internal_body)
-        )
-    except Exception as e:
-        log.error(f"외부용 회의록 생성 실패: {e}")
-        external_body = f"## 회의 개요\n(생성 실패: {e})\n"
+    external_body = None
+    for attempt in range(3):
+        try:
+            extra_instruction = ""
+            if attempt > 0:
+                extra_instruction = "\n\n⚠️ 주의: 다음 키워드는 절대 포함하지 마세요: 내부 메모, 협상, 전략"
+            external_body = _generate_minutes(
+                minutes_external_prompt(title, meeting_date, attendees, internal_body)
+                + extra_instruction
+            )
+        except Exception as e:
+            log.error(f"외부용 회의록 생성 실패 (시도 {attempt+1}): {e}")
+            external_body = f"## 회의 개요\n(생성 실패: {e})\n"
+            break
+
+        validation = validate_minutes(external_body, "external")
+        if validation["valid"]:
+            break
+        if attempt < 2 and (validation["missing"] or validation["forbidden"]):
+            log.info(f"외부용 검증 실패 (시도 {attempt+1}): 누락={validation.get('missing')} 금지={validation.get('forbidden')}")
+        else:
+            # 최종 시도에서도 금지 키워드가 있으면 해당 문장 제거
+            if validation.get("forbidden"):
+                for kw in validation["forbidden"]:
+                    external_body = "\n".join(
+                        line for line in external_body.split("\n")
+                        if kw not in line
+                    )
+                log.warning(f"외부용 금지 키워드 문장 제거: {validation['forbidden']}")
+            break
 
     _post(slack_client, user_id=user_id, text=f"💾 *{title}* Drive에 회의록 저장 중...")
+
+    # CM-07/08/10: Wiki 관련 메타데이터 추출
+    company_names = []
+    attendee_names = []
+    contacts_folder_id = None
+    try:
+        user_info = user_store.get_user(user_id)
+        contacts_folder_id = user_info.get("contacts_folder_id") if user_info else None
+    except Exception:
+        pass
+
+    # 이벤트에서 업체명 추출
+    if event_id and creds:
+        try:
+            ev = cal.get_event(creds, event_id)
+            company_raw = (ev.get("extendedProperties", {})
+                           .get("private", {}).get("company", ""))
+            company_names = [c.strip() for c in company_raw.split(",") if c.strip()]
+        except Exception:
+            pass
+
+    # 참석자 이름 추출
+    for a in (attendees_raw or []):
+        name = a.get("displayName") or a.get("name", "")
+        if name:
+            attendee_names.append(name)
+
+    # CM-10: Sources/Transcripts/ 에 트랜스크립트 원본 저장
+    transcript_source_name = None
+    if transcript_text and contacts_folder_id and creds:
+        try:
+            transcript_filename = f"{date_str}_{title}_transcript.md"
+            transcript_source_name = f"Sources/Transcripts/{transcript_filename}"
+            source_content = (
+                f"# {title} 트랜스크립트 원본\n"
+                f"- 날짜: {date_str}\n"
+                f"- 참석자: {attendees}\n\n"
+                f"{transcript_text}"
+            )
+            drive.save_source_file(
+                creds, contacts_folder_id, "Transcripts",
+                transcript_filename, source_content,
+            )
+            log.info(f"Sources/Transcripts 저장: {transcript_filename}")
+        except Exception as e:
+            log.warning(f"Sources/Transcripts 저장 실패: {e}")
+            transcript_source_name = None
+
     internal_file_id = external_file_id = None
+    minutes_filename = f"{date_str}_{title}_내부용"
+
     if minutes_folder_id:
         internal_content = _build_minutes_content(
             title, date_str, time_range, attendees, source_label,
-            internal_body, transcript_text, notes_text, kind="내부용"
+            internal_body, transcript_text, notes_text, kind="내부용",
+            company_names=company_names,
+            attendee_names=attendee_names,
+            transcript_source_name=transcript_source_name,
         )
         external_content = _build_minutes_content(
             title, date_str, time_range, attendees, source_label,
-            external_body, "", "", kind="외부용"
+            external_body, "", "", kind="외부용",
+            company_names=company_names,
+            attendee_names=attendee_names,
         )
         try:
             internal_file_id = drive.save_minutes(
@@ -1303,6 +1543,51 @@ def finalize_minutes(slack_client, user_id: str):
                 f"{date_str}_{title}_외부용.md", external_content
             )
             log.info(f"회의록 저장: {title} 내부용={internal_file_id} 외부용={external_file_id}")
+
+            # CM-08: 기업·인물 파일 미팅 히스토리 갱신
+            if contacts_folder_id and creds:
+                for cn in company_names:
+                    try:
+                        drive.append_meeting_history_company(
+                            creds, contacts_folder_id, cn,
+                            date_str, title, minutes_filename, attendee_names,
+                        )
+                    except Exception as e:
+                        log.warning(f"기업 미팅 히스토리 갱신 실패 ({cn}): {e}")
+                for an in attendee_names:
+                    try:
+                        drive.append_meeting_history_person(
+                            creds, contacts_folder_id, an,
+                            date_str, title, minutes_filename,
+                        )
+                    except Exception as e:
+                        log.warning(f"인물 미팅 히스토리 갱신 실패 ({an}): {e}")
+
+                # CM-07: 상호 참조 링크 삽입
+                if company_names and attendee_names:
+                    try:
+                        for cn in company_names:
+                            drive.add_wiki_cross_references(
+                                creds, contacts_folder_id, cn, attendee_names,
+                            )
+                    except Exception as e:
+                        log.warning(f"Wiki 상호 참조 삽입 실패: {e}")
+
+            # INF-10: meeting_index에 자동 등록
+            try:
+                import json as _json
+                user_store.save_meeting_index(
+                    event_id=event_id or f"manual_{date_str}_{title}",
+                    user_id=user_id,
+                    date=date_str,
+                    title=title,
+                    company_name=", ".join(company_names) if company_names else None,
+                    attendees=_json.dumps(attendees_raw, ensure_ascii=False) if attendees_raw else None,
+                    drive_file_id=internal_file_id,
+                    drive_link=f"https://drive.google.com/file/d/{internal_file_id}/view" if internal_file_id else None,
+                )
+            except Exception as idx_err:
+                log.warning(f"meeting_index 등록 실패: {idx_err}")
         except Exception as e:
             log.error(f"회의록 Drive 저장 실패: {e}")
 
@@ -1331,9 +1616,20 @@ def finalize_minutes(slack_client, user_id: str):
     ).start()
 
 
-def cancel_minutes(slack_client, user_id: str):
+def cancel_minutes(slack_client, user_id: str, draft_key: str = None):
     """회의록 초안 취소"""
-    draft = _pending_minutes.pop(user_id, None)
+    # FR-D14: draft_key(event_id)로 조회, 없으면 user_id로 역방향 조회
+    if draft_key:
+        draft = _pending_minutes.pop(draft_key, None)
+    else:
+        found = _find_draft_for_user(user_id)
+        if found:
+            draft_key, draft = found
+            _pending_minutes.pop(draft_key, None)
+        else:
+            draft = None
+    if draft:
+        _save_pending_minutes()
     title = draft["title"] if draft else "회의록"
     slack_client.chat_postMessage(
         channel=user_id,
@@ -1341,9 +1637,14 @@ def cancel_minutes(slack_client, user_id: str):
     )
 
 
-def request_minutes_edit(slack_client, user_id: str):
+def request_minutes_edit(slack_client, user_id: str, draft_key: str = None):
     """수정 요청 — 초안 스레드에 안내 메시지 발송"""
-    draft = _pending_minutes.get(user_id)
+    # FR-D14: draft_key로 조회, 없으면 user_id로 역방향 조회
+    if draft_key:
+        draft = _pending_minutes.get(draft_key)
+    else:
+        found = _find_draft_for_user(user_id)
+        draft = found[1] if found else None
     if not draft:
         slack_client.chat_postMessage(
             channel=user_id,
@@ -1362,7 +1663,12 @@ def request_minutes_edit(slack_client, user_id: str):
 
 def handle_minutes_edit_reply(slack_client, user_id: str, edit_text: str):
     """수정 요청 텍스트로 회의록 재생성 후 새 초안 발송"""
-    draft = _pending_minutes.get(user_id)
+    # FR-D14: user_id로 역방향 조회
+    found = _find_draft_for_user(user_id)
+    if found:
+        draft_key, draft = found
+    else:
+        draft_key, draft = None, None
     if not draft:
         return
 
@@ -1389,7 +1695,8 @@ def handle_minutes_edit_reply(slack_client, user_id: str, edit_text: str):
 
     draft["internal_body"] = new_internal
     draft["draft_ts"] = None  # 새 메시지로 재발송
-    _post_minutes_draft(slack_client, user_id=user_id)
+    _save_pending_minutes()
+    _post_minutes_draft(slack_client, user_id=user_id, draft_key=draft_key)
 
 
 # ── 유틸리티 ──────────────────────────────────────────────────

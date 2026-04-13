@@ -1,9 +1,12 @@
-"""Google Drive API 래퍼 — Contacts 읽기/쓰기"""
+"""Google Drive API 래퍼 — Contacts 읽기/쓰기 + Wiki 구조 + Sources 원본 보관"""
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaInMemoryUpload
 from datetime import datetime, timezone
+import logging
 import os
+
+log = logging.getLogger(__name__)
 
 SCOPES = [
     "https://www.googleapis.com/auth/calendar",
@@ -286,3 +289,259 @@ def list_minutes(creds: Credentials, minutes_folder_id: str) -> list[dict]:
         q=q, fields="files(id,name,modifiedTime)", orderBy="modifiedTime desc"
     ).execute()
     return result.get("files", [])
+
+
+# ── Wiki 구조 헬퍼 (Phase 2.3) ──────────────────────────────────
+
+
+def _ensure_sources_folder(creds: Credentials, contacts_folder_id: str,
+                           subfolder: str) -> str:
+    """Sources/{subfolder} 폴더 ID 반환 (없으면 생성).
+    subfolder: 'Transcripts', 'Emails', 'Research'
+    """
+    # Sources 폴더 (contacts_folder_id와 같은 수준 — 루트에 생성)
+    # contacts_folder_id의 부모를 조회하여 같은 위치에 생성
+    svc = _service(creds)
+    try:
+        parent_resp = svc.files().get(fileId=contacts_folder_id, fields="parents").execute()
+        root_id = parent_resp.get("parents", [None])[0]
+    except Exception:
+        root_id = None
+
+    sources_id = create_folder(creds, "Sources", root_id)
+    return create_folder(creds, subfolder, sources_id)
+
+
+def save_source_file(creds: Credentials, contacts_folder_id: str,
+                     subfolder: str, filename: str, content: str) -> str:
+    """CM-10: Sources/{subfolder}/{filename} 에 원본 자료 저장. Returns: file_id"""
+    folder_id = _ensure_sources_folder(creds, contacts_folder_id, subfolder)
+    return _write_file(creds, filename, content, folder_id)
+
+
+def append_meeting_history_company(
+    creds: Credentials, contacts_folder_id: str,
+    company_name: str, date_str: str, title: str,
+    minutes_filename: str, attendee_names: list[str] = None,
+) -> None:
+    """CM-08: 기업 파일의 미팅 히스토리 테이블에 행 추가"""
+    content, file_id, _ = get_company_info(creds, contacts_folder_id, company_name)
+    if not content:
+        return
+
+    minutes_link = f"[[{minutes_filename}]]"
+    attendee_links = ", ".join(f"[[{n}]]" for n in (attendee_names or []))
+    new_row = f"| {date_str} | {title} | {minutes_link} | {attendee_links} |"
+
+    if "## 미팅 히스토리" in content:
+        # 테이블 헤더가 이미 있으면 바로 아래에 행 추가
+        # 중복 체크: 같은 날짜+제목이면 건너뜀
+        if f"| {date_str} | {title} |" in content:
+            return
+        # 테이블 헤더 행(|---|---| 등) 뒤에 삽입
+        lines = content.split("\n")
+        insert_idx = None
+        in_history = False
+        for i, line in enumerate(lines):
+            if "## 미팅 히스토리" in line:
+                in_history = True
+            elif in_history and line.startswith("|---"):
+                insert_idx = i + 1
+                break
+            elif in_history and line.startswith("| "):
+                # 테이블 헤더 구분선 없이 바로 데이터 행인 경우
+                insert_idx = i
+                break
+        if insert_idx is not None:
+            lines.insert(insert_idx, new_row)
+        else:
+            # 테이블 구조가 없으면 섹션 바로 아래에 테이블 생성
+            for i, line in enumerate(lines):
+                if "## 미팅 히스토리" in line:
+                    table_header = (
+                        "| 날짜 | 주제 | 회의록 | 참석자 |\n"
+                        "|------|------|--------|--------|\n"
+                        f"{new_row}"
+                    )
+                    lines.insert(i + 1, table_header)
+                    break
+        content = "\n".join(lines)
+    else:
+        # 미팅 히스토리 섹션 새로 추가
+        table = (
+            "\n\n## 미팅 히스토리\n"
+            "| 날짜 | 주제 | 회의록 | 참석자 |\n"
+            "|------|------|--------|--------|\n"
+            f"{new_row}\n"
+        )
+        content = content.rstrip() + table
+
+    try:
+        save_company_info(creds, contacts_folder_id, company_name, content, file_id)
+        log.info(f"Wiki 미팅 히스토리 갱신 (기업): {company_name}")
+    except Exception as e:
+        log.warning(f"Wiki 미팅 히스토리 갱신 실패 ({company_name}): {e}")
+
+
+def append_meeting_history_person(
+    creds: Credentials, contacts_folder_id: str,
+    person_name: str, date_str: str, title: str,
+    minutes_filename: str,
+) -> None:
+    """CM-08: 인물 파일의 미팅 히스토리 테이블에 행 추가"""
+    content, file_id = get_person_info(creds, contacts_folder_id, person_name)
+    if not content:
+        return
+
+    minutes_link = f"[[{minutes_filename}]]"
+    new_row = f"| {date_str} | {title} | {minutes_link} |"
+
+    if "## 미팅 히스토리" in content:
+        if f"| {date_str} | {title} |" in content:
+            return
+        lines = content.split("\n")
+        insert_idx = None
+        in_history = False
+        for i, line in enumerate(lines):
+            if "## 미팅 히스토리" in line:
+                in_history = True
+            elif in_history and line.startswith("|---"):
+                insert_idx = i + 1
+                break
+            elif in_history and line.startswith("| "):
+                insert_idx = i
+                break
+        if insert_idx is not None:
+            lines.insert(insert_idx, new_row)
+        else:
+            for i, line in enumerate(lines):
+                if "## 미팅 히스토리" in line:
+                    table_header = (
+                        "| 날짜 | 주제 | 회의록 |\n"
+                        "|------|------|--------|\n"
+                        f"{new_row}"
+                    )
+                    lines.insert(i + 1, table_header)
+                    break
+        content = "\n".join(lines)
+    else:
+        # 기존 after.py의 "## 미팅 이력" 형식도 지원
+        if "## 미팅 이력" in content:
+            history_line = f"- {date_str} {title} → {minutes_link}"
+            content = content.replace(
+                "## 미팅 이력",
+                f"## 미팅 이력\n{history_line}",
+                1,
+            )
+        else:
+            table = (
+                "\n\n## 미팅 히스토리\n"
+                "| 날짜 | 주제 | 회의록 |\n"
+                "|------|------|--------|\n"
+                f"{new_row}\n"
+            )
+            content = content.rstrip() + table
+
+    try:
+        save_person_info(creds, contacts_folder_id, person_name, content, file_id)
+        log.info(f"Wiki 미팅 히스토리 갱신 (인물): {person_name}")
+    except Exception as e:
+        log.warning(f"Wiki 미팅 히스토리 갱신 실패 ({person_name}): {e}")
+
+
+def add_wiki_cross_references(
+    creds: Credentials, contacts_folder_id: str,
+    company_name: str, person_names: list[str],
+) -> None:
+    """CM-07: 기업 파일에 인물 [[링크]], 인물 파일에 기업 [[링크]] 상호 참조 삽입"""
+    # 기업 파일에 주요 담당자 [[링크]] 추가
+    if company_name and person_names:
+        content, file_id, _ = get_company_info(creds, contacts_folder_id, company_name)
+        if content:
+            updated = False
+            for name in person_names:
+                wiki_link = f"[[{name}]]"
+                if wiki_link not in content:
+                    # "## 기본 정보" 섹션에 담당자 추가
+                    if "주요 담당자:" in content:
+                        # 기존 담당자 목록에 추가
+                        import re
+                        content = re.sub(
+                            r"(주요 담당자:.+)",
+                            rf"\1, {wiki_link}",
+                            content,
+                            count=1,
+                        )
+                    elif "## 기본 정보" in content:
+                        content = content.replace(
+                            "## 기본 정보",
+                            f"## 기본 정보\n- 주요 담당자: {wiki_link}",
+                            1,
+                        )
+                    updated = True
+            if updated:
+                try:
+                    save_company_info(creds, contacts_folder_id, company_name, content, file_id)
+                    log.info(f"Wiki 상호 참조 갱신 (기업→인물): {company_name}")
+                except Exception as e:
+                    log.warning(f"Wiki 상호 참조 실패 ({company_name}): {e}")
+
+    # 인물 파일에 소속 기업 [[링크]] 추가
+    if company_name:
+        for name in (person_names or []):
+            try:
+                content, file_id = get_person_info(creds, contacts_folder_id, name)
+                if not content:
+                    continue
+                company_link = f"[[{company_name}]]"
+                if company_link not in content:
+                    if "소속:" in content:
+                        import re
+                        # 기존 소속에 추가 (이미 다른 기업명이 있을 수 있음)
+                        if company_name not in content.split("소속:")[1].split("\n")[0]:
+                            content = re.sub(
+                                r"(소속:.+)",
+                                rf"\1, {company_link}",
+                                content,
+                                count=1,
+                            )
+                    elif "## 기본 정보" in content:
+                        content = content.replace(
+                            "## 기본 정보",
+                            f"## 기본 정보\n- 소속: {company_link}",
+                            1,
+                        )
+                    else:
+                        content = f"- 소속: {company_link}\n" + content
+                    save_person_info(creds, contacts_folder_id, name, content, file_id)
+                    log.info(f"Wiki 상호 참조 갱신 (인물→기업): {name} → {company_name}")
+            except Exception as e:
+                log.warning(f"Wiki 상호 참조 실패 ({name}→{company_name}): {e}")
+
+
+def add_minutes_backlinks(
+    content: str, *,
+    company_names: list[str] = None,
+    attendee_names: list[str] = None,
+    transcript_source: str = None,
+    previous_minutes: list[str] = None,
+    research_source: str = None,
+) -> str:
+    """CM-07: 회의록 하단에 관련 자료 역링크 섹션 추가. Returns: 수정된 content"""
+    links = []
+    for c in (company_names or []):
+        links.append(f"- 업체: [[{c}]]")
+    for a in (attendee_names or []):
+        links.append(f"- 참석자: [[{a}]]")
+    if transcript_source:
+        links.append(f"- 원본 트랜스크립트: [[{transcript_source}]]")
+    for m in (previous_minutes or []):
+        links.append(f"- 이전 회의록: [[{m}]]")
+    if research_source:
+        links.append(f"- 브리핑 리서치: [[{research_source}]]")
+
+    if not links:
+        return content
+
+    backlink_section = "\n\n## 관련 자료\n" + "\n".join(links) + "\n"
+    return content.rstrip() + backlink_section
