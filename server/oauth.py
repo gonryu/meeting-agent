@@ -61,7 +61,7 @@ def set_slack_client(client):
 
 def build_auth_url(slack_user_id: str) -> str:
     """Google OAuth 인증 URL 생성. 매 호출마다 고유 state 생성."""
-    state = f"{slack_user_id}|{uuid.uuid4().hex[:12]}"
+    state = f"{slack_user_id}-{uuid.uuid4().hex[:12]}"
     flow = Flow.from_client_secrets_file(
         "credentials.json",
         scopes=SCOPES,
@@ -87,8 +87,8 @@ async def oauth_callback(request: Request):
     if not code or not state:
         return HTMLResponse("<h2>❌ 잘못된 요청입니다.</h2>", status_code=400)
 
-    # state = "{slack_user_id}|{session_token}"
-    slack_user_id = state.split("|")[0]
+    # state = "{slack_user_id}-{session_token}"
+    slack_user_id = state.rsplit("-", 1)[0]
 
     try:
         flow = _pending_flows.pop(state, None)
@@ -246,7 +246,7 @@ def build_trello_auth_url(slack_user_id: str) -> str:
     if not api_key:
         raise ValueError("TRELLO_API_KEY 환경변수가 설정되지 않았습니다")
 
-    state = f"{slack_user_id}|{uuid.uuid4().hex[:12]}"
+    state = f"{slack_user_id}-{uuid.uuid4().hex[:12]}"
     _pending_trello_states[state] = slack_user_id
     _pending_trello_token.add(slack_user_id)
 
