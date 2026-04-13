@@ -137,10 +137,11 @@ async def deploy_webhook(request: Request):
     import hmac
     import hashlib
     import subprocess
+    from fastapi.responses import JSONResponse
 
     secret = os.getenv("DEPLOY_SECRET", "")
     if not secret:
-        return {"error": "DEPLOY_SECRET not configured"}, 403
+        return JSONResponse({"error": "DEPLOY_SECRET not configured"}, status_code=403)
 
     # 시그니처 검증
     signature = request.headers.get("X-Deploy-Signature", "")
@@ -148,7 +149,7 @@ async def deploy_webhook(request: Request):
     expected = hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
     if not hmac.compare_digest(signature, expected):
         log.warning("배포 웹훅: 시그니처 불일치")
-        return {"error": "invalid signature"}, 403
+        return JSONResponse({"error": "invalid signature"}, status_code=403)
 
     log.info("배포 웹훅 수신 — git pull + 재시작 시작")
     try:
@@ -171,7 +172,7 @@ async def deploy_webhook(request: Request):
         return {"status": "deploying", "git": pull.stdout.strip()}
     except Exception as e:
         log.exception(f"배포 실패: {e}")
-        return {"error": str(e)}, 500
+        return JSONResponse({"error": str(e)}, status_code=500)
 
 
 def _setup_drive_for_user(slack_user_id: str, creds):

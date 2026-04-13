@@ -12,8 +12,14 @@ jobs:
         run: |
           BODY='{"ref":"${{ github.sha }}"}'
           SIGNATURE=$(echo -n "$BODY" | openssl dgst -sha256 -hmac "${{ secrets.DEPLOY_SECRET }}" | awk '{print $2}')
-          curl -sf -X POST \
+          RESPONSE=$(curl -s -w "\n%{http_code}" -X POST \
             -H "Content-Type: application/json" \
             -H "X-Deploy-Signature: $SIGNATURE" \
             -d "$BODY" \
-            "${{ secrets.DEPLOY_URL }}/deploy"
+            "${{ secrets.DEPLOY_URL }}/deploy")
+          HTTP_CODE=$(echo "$RESPONSE" | tail -1)
+          BODY_RESPONSE=$(echo "$RESPONSE" | head -n -1)
+          echo "HTTP $HTTP_CODE: $BODY_RESPONSE"
+          if [ "$HTTP_CODE" -ge 400 ]; then
+            exit 1
+          fi
