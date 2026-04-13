@@ -1,0 +1,24 @@
+name: Deploy to Live Server
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USER }}
+          key: ${{ secrets.SERVER_SSH_KEY }}
+          script: |
+            cd ~/workspace/meeting-agent
+            git pull origin main
+            source .venv/bin/activate
+            pip install -r requirements.txt --quiet
+            sudo systemctl restart meeting-agent
+            sleep 3
+            sudo systemctl is-active meeting-agent
