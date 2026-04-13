@@ -495,10 +495,18 @@ ENCRYPTION_KEY=abc123...==
 | `/미팅시작`                   | 수동 노트 세션 시작                 |
 | `/메모`                     | 미팅 중 노트 추가 (세션 없으면 자동 시작)   |
 | `/미팅종료`                   | 세션 종료 + 회의록 즉시 생성 + 검토 단계   |
+| `/회의록작성`                  | 회의록 수동 생성                   |
 | `/회의록`                    | 저장된 회의록 목록 조회               |
 | `/업데이트` / `/update`       | company_knowledge.md 갱신     |
-| `/도움말` / `/help`          | 사용 가능한 커맨드 및 자연어 명령어 안내     |
 | `/드림플러스` / `/dreamplus` | 드림플러스 계정 등록/변경              |
+| `/회의실예약`                  | 드림플러스 회의실 예약               |
+| `/회의실조회`                  | 회의실 예약 조회                  |
+| `/회의실취소`                  | 회의실 예약 취소                  |
+| `/크레딧조회`                  | 드림플러스 크레딧 조회               |
+| `/trello`                 | Trello 계정 연결                |
+| `/trello-disconnect`      | Trello 연결 해제                |
+| `/트렐로조회` / `/trello-search` | Trello 카드 검색            |
+| `/도움말` / `/help`          | 사용 가능한 커맨드 및 자연어 명령어 안내     |
 
 
 자연어 DM도 지원합니다 (`브리핑 해줘`, `내일 3시 KISA 미팅 잡아줘`, `~기능 추가해줘`, `~버그 같아` 등).
@@ -574,12 +582,17 @@ MeetingAgent/
 ```
 meeting-agent/
 ├── main.py                 # Slack Bolt + APScheduler 진입점
-├── start.sh                # 단일 인스턴스 실행 스크립트
+├── start.sh                # 단일 인스턴스 실행 스크립트 (개발용)
+├── .github/
+│   └── workflows/
+│       └── deploy.yml      # GitHub Actions 자동 배포 (웹훅 방식)
 ├── agents/
 │   ├── before.py           # Before 에이전트 (브리핑, 리서치, 미팅 생성)
 │   ├── during.py           # During 에이전트 (트랜스크립트, 노트, 회의록 검토)
-│   ├── after.py            # After 에이전트 (회의록 발송, 액션아이템)
+│   ├── after.py            # After 에이전트 (회의록 발송, 액션아이템, Trello 등록)
 │   ├── card.py             # 명함 OCR 에이전트
+│   ├── room.py             # 드림플러스 회의실 예약·조회·취소 (Slack Modal)
+│   ├── dreamplus.py        # 드림플러스 API 래퍼 (JWT 인증)
 │   └── feedback.py         # 피드백 수집·분류·다이제스트 에이전트
 ├── tools/
 │   ├── calendar.py         # Google Calendar API
@@ -587,19 +600,23 @@ meeting-agent/
 │   ├── drive.py            # Google Drive API
 │   ├── gmail.py            # Gmail API
 │   ├── stt.py              # Deepgram STT API
-│   └── slack_tools.py      # Slack Block Kit 메시지 빌더
+│   ├── slack_tools.py      # Slack Block Kit 메시지 빌더
+│   ├── trello.py           # Trello REST API 래퍼
+│   ├── dreamplus.py        # 드림플러스 API 클라이언트
+│   └── text_extract.py     # 텍스트 추출 유틸리티
 ├── prompts/
 │   ├── briefing.py         # LLM 프롬프트 함수 (템플릿 로더 포함)
 │   └── templates/          # 외부 프롬프트 템플릿 (서버 재실행으로 반영)
 │       ├── minutes_internal.md
 │       ├── minutes_external.md
+│       ├── briefing_summary.md
 │       ├── company_news.md
 │       ├── person_info.md
 │       └── service_connection.md
 ├── store/
 │   └── user_store.py       # SQLite + Fernet 사용자 토큰 관리
 ├── server/
-│   └── oauth.py            # FastAPI Google OAuth 콜백 서버
+│   └── oauth.py            # FastAPI (OAuth 콜백 + Trello 인증 + 배포 웹훅)
 ├── tests/                  # 단위 테스트
 ├── requirements.txt
 └── docs/                   # 설계 문서

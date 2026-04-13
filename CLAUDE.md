@@ -21,6 +21,15 @@ kill $(cat server.pid)
 
 개발용으로 서버를 실행할때는 공개IP를 확보해야해서, ngrok를 먼저 실행해야 합니다.
 
+### 라이브 서버 (자동 배포)
+
+main 브랜치에 푸시하면 GitHub Actions가 라이브 서버의 `/deploy` 웹훅을 호출하여 자동으로 `git pull` + `pip install` + `systemctl restart`를 수행합니다. 라이브 서버는 systemd 서비스(`meeting-agent.service`)로 관리됩니다.
+
+```bash
+# 라이브 서버 로그 확인
+sudo journalctl -u meeting-agent -f
+```
+
 ## 테스트
 
 ```bash
@@ -169,6 +178,23 @@ Gemini `gemini-2.0-flash`가 기본, 오류(429 등) 시 Claude `claude-haiku-4-
 
 **환경변수:**
 - `FEEDBACK_CHANNEL` — 다이제스트 발송 대상 Slack 채널 ID 또는 관리자 사용자 ID (`.env`)
+
+### 자동 배포 — GitHub Actions 웹훅
+
+SSH 대신 웹훅 방식으로 배포합니다 (서버 22 포트 오픈 불필요).
+
+**흐름:** main 푸시 → GitHub Actions → `POST /deploy` (HMAC 시그니처 검증) → `git pull` + `pip install` + `systemctl restart`
+
+**관련 파일:**
+- `.github/workflows/deploy.yml` — GitHub Actions 워크플로우
+- `server/oauth.py` — `/deploy` 엔드포인트 (HMAC-SHA256 검증)
+
+**환경변수:**
+- `DEPLOY_SECRET` — HMAC 시그니처 검증용 비밀 키 (`.env` + GitHub Secrets 동일 값)
+
+**GitHub Secrets:**
+- `DEPLOY_URL` — 라이브 서버 URL (예: `https://meeting.yourdomain.com`)
+- `DEPLOY_SECRET` — 서버 `.env`와 동일한 값
 
 **다이제스트 출력 순서:** 버그 리포트 → 기능 요청 → 개선 요청 (긴급도 순)
 
