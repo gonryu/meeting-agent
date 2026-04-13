@@ -290,6 +290,18 @@ def _post(slack_client, *, user_id: str, channel: str = None,
     )
 
 
+def get_session_thread(user_id: str) -> tuple[str, str] | None:
+    """사용자의 활성 세션이 채널 쓰레드에서 시작된 경우 (channel, thread_ts) 반환."""
+    session = _active_sessions.get(user_id)
+    if not session:
+        return None
+    ch = session.get("session_channel")
+    ts = session.get("session_thread_ts")
+    if ch and ts:
+        return (ch, ts)
+    return None
+
+
 # ── 캘린더 이벤트 자동 감지 ─────────────────────────────────────
 
 
@@ -630,16 +642,18 @@ def handle_event_title_reply(slack_client, user_id: str, title_text: str):
 # ── 수동 노트 세션 ─────────────────────────────────────────────
 
 
-def start_session(slack_client, user_id: str, title: str):
+def start_session(slack_client, user_id: str, title: str,
+                   channel: str = None, thread_ts: str = None):
     """/미팅시작 {제목} — 수동 노트 세션 시작"""
     try:
         creds, _ = _get_creds_and_config(user_id)
     except Exception as e:
-        _post(slack_client, user_id=user_id, text=f"⚠️ 인증 오류: {e}")
+        _post(slack_client, user_id=user_id, channel=channel, thread_ts=thread_ts,
+              text=f"⚠️ 인증 오류: {e}")
         return
 
     if user_id in _active_sessions:
-        _post(slack_client, user_id=user_id,
+        _post(slack_client, user_id=user_id, channel=channel, thread_ts=thread_ts,
               text=f"⚠️ 이미 진행 중인 세션이 있습니다: *{_active_sessions[user_id]['title']}*\n"
                    f"`/미팅종료` 후 다시 시작해주세요.")
         return
@@ -698,6 +712,8 @@ def start_session(slack_client, user_id: str, title: str):
         "event_id": event_id,
         "event_summary": event_summary,
         "event_time_str": event_time_str,
+        "session_channel": channel,
+        "session_thread_ts": thread_ts,
     }
     _save_active_session(user_id)
 
@@ -705,17 +721,17 @@ def start_session(slack_client, user_id: str, title: str):
         event_line = f"\n📅 연동된 일정: *{event_summary}* ({event_time_str})"
     else:
         event_line = "\n_(캘린더 일정 미연동)_"
-    _post(slack_client, user_id=user_id,
+    _post(slack_client, user_id=user_id, channel=channel, thread_ts=thread_ts,
           text=f"✅ *{title_to_use}* 노트 세션 시작{event_line}\n"
                f"`/메모 내용` 으로 실시간 메모를 기록하세요.\n"
                f"미팅이 끝나면 `/미팅종료` 를 입력해주세요.")
 
 
 def add_note(slack_client, user_id: str, note_text: str, session_title: str = "메모 세션",
-             input_type: str = "note"):
+             input_type: str = "note", channel: str = None, thread_ts: str = None):
     """/메모 {내용} — 진행 중 세션에 노트 추가. 세션이 없으면 캘린더 이벤트 자동 감지."""
     if not note_text.strip():
-        _post(slack_client, user_id=user_id,
+        _post(slack_client, user_id=user_id, channel=channel, thread_ts=thread_ts,
               text="⚠️ 노트 내용을 입력해주세요. 예: `/메모 DID 연동 방안 논의`")
         return
 
@@ -731,7 +747,7 @@ def add_note(slack_client, user_id: str, note_text: str, session_title: str = "�
     _active_sessions[user_id]["notes"].append({"time": timestamp, "text": note_text.strip()})
     _save_active_session(user_id)
     count = len(_active_sessions[user_id]["notes"])
-    _post(slack_client, user_id=user_id,
+    _post(slack_client, user_id=user_id, channel=channel, thread_ts=thread_ts,
           text=f"📝 노트 #{count} 저장: _{note_text.strip()}_")
 
 
@@ -790,15 +806,15 @@ def _generate_from_session_end(slack_client, *, user_id: str, event_id: str,
     )
 
 
-def generate_minutes_now(slack_client, user_id: str):
+def generate_minutes_now(slack_client, user_id: str, channel: str = None, thread_ts: str = None):
     """/회의록작성 — 세션 종료 + 회의록 생성. /미팅종료와 동일 동작."""
-    end_session(slack_client, user_id)
+    end_session(slack_client, user_id, channel=channel, thread_ts=thread_ts)
 
 
-def end_session(slack_client, user_id: str):
+def end_session(slack_client, user_id: str, channel: str = None, thread_ts: str = None):
     """/미팅종료 — 트랜스크립트를 즉시 확인하고 회의록 생성."""
     if user_id not in _active_sessions:
-        _post(slack_client, user_id=user_id,
+        _post(slack_client, user_id=user_id, channel=channel, thread_ts=thread_ts,
               text="⚠️ 진행 중인 미팅 세션이 없습니다.\n"
                    "먼저 `/미팅시작` 또는 `/메모`로 메모를 기록해주세요.")
         return
@@ -819,7 +835,7 @@ def end_session(slack_client, user_id: str):
         event_line = f"\n📅 일정: *{event_summary}*" + (f" ({event_time_str})" if event_time_str else "")
     else:
         event_line = "\n_(캘린더 미연동)_"
-    _post(slack_client, user_id=user_id,
+    _post(slack_client, user_id=user_id, channel=channel, thread_ts=thread_ts,
           text=f"✅ 세션 종료. 노트 {note_count}개 저장됨.{event_line}\n"
                f"📡 트랜스크립트를 확인하고 회의록을 생성 중입니다...")
 
@@ -1412,27 +1428,30 @@ def _parse_meeting_meta(meeting: dict) -> tuple[str, str, str]:
 # ── 회의록 목록 조회 ──────────────────────────────────────────
 
 
-def get_minutes_list(slack_client, user_id: str):
+def get_minutes_list(slack_client, user_id: str, channel: str = None, thread_ts: str = None):
     """/회의록 — 저장된 회의록 목록 조회"""
     try:
         creds, minutes_folder_id = _get_creds_and_config(user_id)
     except Exception as e:
-        _post(slack_client, user_id=user_id, text=f"⚠️ 인증 오류: {e}")
+        _post(slack_client, user_id=user_id, channel=channel, thread_ts=thread_ts,
+              text=f"⚠️ 인증 오류: {e}")
         return
 
     if not minutes_folder_id:
-        _post(slack_client, user_id=user_id,
+        _post(slack_client, user_id=user_id, channel=channel, thread_ts=thread_ts,
               text="⚠️ Minutes 폴더가 설정되지 않았습니다. `/재등록` 으로 재인증해주세요.")
         return
 
     try:
         files = drive.list_minutes(creds, minutes_folder_id)
     except Exception as e:
-        _post(slack_client, user_id=user_id, text=f"⚠️ 회의록 조회 실패: {e}")
+        _post(slack_client, user_id=user_id, channel=channel, thread_ts=thread_ts,
+              text=f"⚠️ 회의록 조회 실패: {e}")
         return
 
     if not files:
-        _post(slack_client, user_id=user_id, text="📁 저장된 회의록이 없습니다.")
+        _post(slack_client, user_id=user_id, channel=channel, thread_ts=thread_ts,
+              text="📁 저장된 회의록이 없습니다.")
         return
 
     lines = [f"*📋 저장된 회의록 ({len(files)}개)*"]
@@ -1446,4 +1465,5 @@ def get_minutes_list(slack_client, user_id: str):
     if len(files) > 10:
         lines.append(f"_...외 {len(files) - 10}개_")
 
-    _post(slack_client, user_id=user_id, text="\n".join(lines))
+    _post(slack_client, user_id=user_id, channel=channel, thread_ts=thread_ts,
+          text="\n".join(lines))
