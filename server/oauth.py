@@ -131,6 +131,49 @@ async def health():
     return {"status": "ok"}
 
 
+@app.post("/deploy")
+async def deploy_webhook(request: Request):
+    """GitHub Actions 웹훅 → git pull + 서비스 재시작"""
+    import hmac
+    import hashlib
+    import subprocess
+
+    secret = os.getenv("DEPLOY_SECRET", "")
+    if not secret:
+        return {"error": "DEPLOY_SECRET not configured"}, 403
+
+    # 시그니처 검증
+    signature = request.headers.get("X-Deploy-Signature", "")
+    body = await request.body()
+    expected = hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(signature, expected):
+        log.warning("배포 웹훅: 시그니처 불일치")
+        return {"error": "invalid signature"}, 403
+
+    log.info("배포 웹훅 수신 — git pull + 재시작 시작")
+    try:
+        pull = subprocess.run(
+            ["git", "pull", "origin", "main"],
+            capture_output=True, text=True, timeout=30,
+        )
+        log.info(f"git pull: {pull.stdout.strip()}")
+
+        pip = subprocess.run(
+            [".venv/bin/pip", "install", "-r", "requirements.txt", "--quiet"],
+            capture_output=True, text=True, timeout=120,
+        )
+        log.info(f"pip install: {pip.returncode}")
+
+        subprocess.Popen(
+            ["sudo", "systemctl", "restart", "meeting-agent"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        return {"status": "deploying", "git": pull.stdout.strip()}
+    except Exception as e:
+        log.exception(f"배포 실패: {e}")
+        return {"error": str(e)}, 500
+
+
 def _setup_drive_for_user(slack_user_id: str, creds):
     """Drive 폴더 구조 생성/확인 후 DB 업데이트 (재등록 시에도 안전하게 동작)"""
     try:
