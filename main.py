@@ -77,7 +77,7 @@ def _check_registered(client, user_id: str, channel: str = None) -> bool:
     auth_url = oauth_server.build_auth_url(user_id)
     client.chat_postMessage(
         channel=channel or user_id,
-        text=f"⚠️ 먼저 Google 계정을 연결해주세요.\n아래 링크에서 인증을 완료하면 자동으로 등록됩니다.\n{auth_url}",
+        text=f"⚠️ 먼저 Google 계정을 연결해주세요.\n아래 링크에서 인증을 완료하면 자동으로 등록됩니다.\n<{auth_url}|🔗 Google 계정 연결하기>",
     )
     return False
 
@@ -704,7 +704,7 @@ def _register_handler(ack, body, client):
     auth_url = oauth_server.build_auth_url(user_id)
     client.chat_postMessage(
         channel=user_id,
-        text=f"🔗 아래 링크를 클릭하여 Google 계정을 연결해주세요.\n{auth_url}",
+        text=f"🔗 아래 링크를 클릭하여 Google 계정을 연결해주세요.\n<{auth_url}|Google 계정 연결하기>",
     )
 
 app.command("/register")(_register_handler)
@@ -718,7 +718,7 @@ def _reregister_handler(ack, body, client):
     auth_url = oauth_server.build_auth_url(user_id)
     client.chat_postMessage(
         channel=user_id,
-        text=f"🔄 Google 계정 재연결 링크입니다. 클릭 후 권한을 다시 동의해주세요.\n{auth_url}",
+        text=f"🔄 Google 계정 재연결 링크입니다. 클릭 후 권한을 다시 동의해주세요.\n<{auth_url}|Google 계정 재연결하기>",
     )
 
 app.command("/재등록")(_reregister_handler)
@@ -1242,7 +1242,7 @@ def _trello_setup_handler(ack, body, client):
             channel=user_id,
             text=(
                 f"🔗 *Trello 계정 연결*\n\n"
-                f"아래 링크를 클릭하여 Trello 접근을 허용하세요.\n{auth_url}\n\n"
+                f"아래 링크를 클릭하여 Trello 접근을 허용하세요.\n<{auth_url}|Trello 계정 연결하기>\n\n"
                 f"승인 후 표시되는 토큰을 복사하여 이 DM에 붙여넣어 주세요."
             ),
         )
