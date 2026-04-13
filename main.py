@@ -46,6 +46,7 @@ from agents.during import (
     handle_event_title_reply,
     _pending_minutes,
     _pending_inputs,
+    get_session_thread,
 )
 from agents import after
 from agents import card as card_agent
@@ -138,6 +139,15 @@ def handle_mention(event, say, client):
                 daemon=True,
             ).start()
         return
+
+    # 스레드 답장 → 미팅 세션 명령어 (start_session 쓰레드에서 메모/종료)
+    if parent_ts:
+        session_thread = get_session_thread(user_id)
+        if session_thread and session_thread == (channel, parent_ts):
+            if _check_registered(client, user_id, channel):
+                _route_message(text, client, user_id=user_id,
+                               channel=channel, thread_ts=parent_ts)
+            return
 
     if not text:
         client.chat_postMessage(
@@ -390,24 +400,29 @@ def _route_message(text: str, client, user_id: str, channel: str = None,
 
     elif intent == "start_session":
         title = params.get("title", "").strip() or "미팅"
-        start_session(client, user_id=user_id, title=title)
+        start_session(client, user_id=user_id, title=title,
+                      channel=channel, thread_ts=thread_ts)
 
     elif intent == "add_note":
         note = params.get("note", "").strip() or text
-        add_note(client, user_id=user_id, note_text=note)
+        add_note(client, user_id=user_id, note_text=note,
+                 channel=channel, thread_ts=thread_ts)
 
     elif intent == "end_session":
-        end_session(client, user_id=user_id)
+        end_session(client, user_id=user_id,
+                    channel=channel, thread_ts=thread_ts)
 
     elif intent == "generate_minutes":
         threading.Thread(
             target=generate_minutes_now,
             args=(client, user_id),
+            kwargs=dict(channel=channel, thread_ts=thread_ts),
             daemon=True,
         ).start()
 
     elif intent == "get_minutes":
-        get_minutes_list(client, user_id=user_id)
+        get_minutes_list(client, user_id=user_id,
+                         channel=channel, thread_ts=thread_ts)
 
     elif intent == "research_company":
         company = params.get("company", "").strip()
