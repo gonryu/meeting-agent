@@ -260,9 +260,9 @@ def handle_settings_modal(slack_client, body: dict):
 
     # 로그인 테스트 후 저장
     try:
-        jwt, pub_key = dp.login(email, password)
+        jwt, pub_key, member_id, company_id = dp.login(email, password)
         user_store.save_dreamplus_credentials(user_id, email, password)
-        user_store.save_dreamplus_jwt(user_id, jwt, pub_key)
+        user_store.save_dreamplus_jwt(user_id, jwt, pub_key, member_id, company_id)
         _post(slack_client, user_id, "✅ 드림플러스 계정이 설정되었습니다.")
         log.info(f"드림플러스 계정 설정 완료: {user_id} ({email})")
     except Exception as e:

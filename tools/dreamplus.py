@@ -181,7 +181,7 @@ def _encrypt_password(password: str, public_key_b64: str) -> str:
     return base64.b64encode(encrypted).decode("utf-8")
 
 
-def login(email: str, password: str) -> tuple[str, str]:
+def login(email: str, password: str) -> tuple[str, str, int, int]:
     """로그인 → (jwtToken, publicKey) 반환. 실패 시 RuntimeError.
 
     API 문서 필드: email, password(RSA 암호화), finger_print, decryptRSA, publicKey
