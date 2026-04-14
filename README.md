@@ -19,9 +19,10 @@ Before Agent  →  During Agent  →  After Agent
 | **Before** | 외부 미팅 자동 감지 → 미팅 헤더 즉시 발송 → 업체·인물 리서치 백그라운드 순차 발송         |
 | **Before** | 자연어 미팅 생성 (`내일 오전 10시 KISA 미팅 잡아줘`) + 스레드 답글로 업체명·장소 등 수정 |
 | **Before** | 명함 DM 업로드 → Claude Vision OCR → Contacts 자동 등록 |
-| **During** | Google Meet 트랜스크립트 자동 폴링 (10분 주기) |
+| **During** | Google Meet 트랜스크립트 자동 폴링 (10분 주기) + 늦게 도착 시 회의록 자동 보강 |
 | **During** | Slack 수동 노트 세션 (`/미팅시작`, `/메모`, `/미팅종료`) |
 | **During** | 음성 파일 업로드 → Deepgram STT → 메모 자동 등록 |
+| **During** | 텍스트 문서 업로드 (TXT, MD, PDF, DOCX 등) → 텍스트 추출 → 메모 자동 등록 |
 | **After** | 내부용·외부용 회의록 초안 검토/편집 후 Drive 저장 |
 | **After** | 외부용 회의록 Gmail 발송 (사용자 승인 후) |
 | **After** | 액션아이템 추출 → 담당자 DM → 매일 08:00 리마인더 |
@@ -530,7 +531,7 @@ meeting-agent/
 │       └── deploy.yml      # GitHub Actions 자동 배포 (웹훅 방식)
 ├── agents/
 │   ├── before.py           # Before 에이전트 (브리핑, 리서치, 미팅 생성)
-│   ├── during.py           # During 에이전트 (트랜스크립트, 노트, 회의록 검토)
+│   ├── during.py           # During 에이전트 (트랜스크립트, 노트, 음성STT, 문서업로드, 회의록)
 │   ├── after.py            # After 에이전트 (회의록 발송, 액션아이템, Trello 등록)
 │   ├── proposal.py         # 제안서 에이전트 (개요·초안 생성, 스레드 수정)
 │   ├── card.py             # 명함 OCR 에이전트
