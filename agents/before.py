@@ -1249,7 +1249,7 @@ def create_meeting_from_text(slack_client, user_id: str, user_message: str,
 
     attendee_emails = []
     missing_names = []
-    pending_selections = []  # 이메일 후보가 여러 개인 참석자
+    pending_selections = []  # 이메일 후보가 여러 개인 참석자 (일정 생성 후 선택)
     inline_emails = info.get("participant_emails", {})
 
     for name in info.get("participants", []):
@@ -1265,47 +1265,41 @@ def create_meeting_from_text(slack_client, user_id: str, user_message: str,
         else:
             missing_names.append(name)
 
-    # 이메일 후보가 여러 개인 참석자가 있으면 사용자 선택 대기
+    # 확정된 참석자만으로 일정 먼저 생성 (이메일 미확정·미발견 참석자는 나중에 추가)
+    notices = []
     if pending_selections:
-        _pending_meetings[user_id] = {
-            "info": info,
-            "company": company,
-            "channel": channel,
-            "thread_ts": thread_ts,
-            "user_msg_ts": user_msg_ts,
-            "attendee_emails": attendee_emails,
-            "missing_names": missing_names,
-            "pending_selections": pending_selections,
-            "stage": "email_select",
-        }
-        try:
-            _post_email_selection(slack_client, user_id, pending_selections[0], channel, thread_ts)
-        except Exception as e:
-            log.exception(f"이메일 선택 블록 발송 실패: {e}")
-            # 선택 UI 실패 시 첫 번째 후보로 자동 진행
-            del _pending_meetings[user_id]
-            for sel in pending_selections:
-                attendee_emails.append(sel["candidates"][0])
-            _post(slack_client, user_id=user_id, channel=channel, thread_ts=thread_ts,
-                  text=f"⚠️ 이메일 선택 UI 표시에 실패하여, 첫 번째 후보 이메일로 자동 진행합니다.")
-            _create_calendar_event(
-                slack_client, user_id, info, company, attendee_emails,
-                channel, thread_ts, user_msg_ts=user_msg_ts,
-            )
-        return
-
+        names = [s["name"] for s in pending_selections]
+        notices.append(f"⏳ *{', '.join(names)}*은(는) 이메일 선택 후 참석자에 추가됩니다.")
     if missing_names:
+        notices.append(f"⚠️ *{', '.join(missing_names)}*의 이메일을 찾지 못했습니다.")
+    if notices:
         _post(slack_client, user_id=user_id, channel=channel, thread_ts=thread_ts,
-              text=f"⚠️ *{', '.join(missing_names)}*의 이메일을 찾지 못했습니다. 해당 참석자 없이 일정을 생성합니다.")
+              text="\n".join(notices))
 
-    # 일정 먼저 생성 (업체명 미확정이어도 진행)
     created_event_id = _create_calendar_event(
         slack_client, user_id, info, company, attendee_emails,
         channel, thread_ts, user_msg_ts=user_msg_ts,
     )
 
+    if not created_event_id:
+        return
+
+    # 일정 생성 완료 후, 이메일 미확정 참석자 선택 UI 표시
+    if pending_selections:
+        _pending_meetings[user_id] = {
+            "event_id": created_event_id,
+            "channel": channel,
+            "thread_ts": thread_ts,
+            "pending_selections": pending_selections,
+        }
+        try:
+            _post_email_selection(slack_client, user_id, pending_selections[0], channel, thread_ts)
+        except Exception as e:
+            log.exception(f"이메일 선택 블록 발송 실패: {e}")
+            del _pending_meetings[user_id]
+
     # 업체명 후보가 있지만 확정 안 됨 → 일정 생성 후 별도로 확인 요청
-    if company_candidates and not company_confirmed and created_event_id:
+    if company_candidates and not company_confirmed:
         _post_company_confirmation(
             slack_client, user_id, company_candidates,
             event_id=created_event_id, channel=channel, thread_ts=thread_ts,
@@ -1693,36 +1687,60 @@ def _create_calendar_event(slack_client, user_id: str, info: dict, company: str 
 
 
 def handle_email_selection(slack_client, body: dict):
-    """select_attendee_email 버튼 클릭 처리"""
+    """select_attendee_email 버튼 클릭 → 기존 이벤트에 참석자 추가"""
     user_id = body["user"]["id"]
     value = body["actions"][0]["value"]
     pending = _pending_meetings.get(user_id)
     if not pending:
         _post(slack_client, user_id=user_id,
-              text="⚠️ 선택 세션이 만료되었습니다 (서버 재시작 등). 미팅 생성을 다시 요청해주세요.")
+              text="⚠️ 선택 세션이 만료되었습니다 (서버 재시작 등).\n"
+                   "스레드 답글로 참석자를 직접 추가해주세요. (예: '참석자 추가해줘 hoon@parametacorp.com')")
         return
 
     _, email = value.split("|", 1)
+    added_emails = []
     if email != "__skip__":
-        pending["attendee_emails"].append(email)
+        added_emails.append(email)
     pending["pending_selections"].pop(0)
 
     if pending["pending_selections"]:
         # 아직 선택이 남아있으면 다음 항목 표시
-        _post_email_selection(slack_client, user_id,
-                              pending["pending_selections"][0],
-                              pending["channel"], pending["thread_ts"])
+        # 먼저 이번에 선택한 이메일을 즉시 추가
+        if added_emails:
+            _add_attendees_to_event(slack_client, user_id, pending["event_id"], added_emails)
+        try:
+            _post_email_selection(slack_client, user_id,
+                                  pending["pending_selections"][0],
+                                  pending["channel"], pending["thread_ts"])
+        except Exception as e:
+            log.exception(f"이메일 선택 블록 발송 실패: {e}")
+            del _pending_meetings[user_id]
     else:
-        # 모든 선택 완료 → 이벤트 생성
+        # 모든 선택 완료
         del _pending_meetings[user_id]
-        if pending.get("missing_names"):
-            _post(slack_client, user_id=user_id,
-                  channel=pending["channel"], thread_ts=pending["thread_ts"],
-                  text=f"⚠️ *{', '.join(pending['missing_names'])}*의 이메일을 찾지 못했습니다. 해당 참석자 없이 일정을 생성합니다.")
-        _create_calendar_event(slack_client, user_id,
-                               pending["info"], pending["company"],
-                               pending["attendee_emails"],
-                               pending["channel"], pending["thread_ts"])
+        if added_emails:
+            _add_attendees_to_event(slack_client, user_id, pending["event_id"], added_emails)
+
+
+def _add_attendees_to_event(slack_client, user_id: str, event_id: str, new_emails: list[str]):
+    """기존 캘린더 이벤트에 참석자 추가"""
+    try:
+        creds = user_store.get_credentials(user_id)
+        event = cal.get_event(creds, event_id)
+        existing_emails = [a["email"].lower() for a in event.get("attendees", [])]
+        all_emails = existing_emails + [e for e in new_emails if e.lower() not in existing_emails]
+        cal.update_event(creds, event_id, attendee_emails=all_emails)
+        # _meeting_drafts에도 반영
+        for draft in _meeting_drafts.values():
+            if draft.get("event_id") == event_id:
+                draft["attendee_emails"] = list(all_emails)
+        _save_meeting_drafts()
+        _post(slack_client, user_id=user_id,
+              text=f"✅ 참석자 추가 완료: {', '.join(new_emails)}")
+    except Exception as e:
+        log.exception(f"참석자 추가 실패: {e}")
+        _post(slack_client, user_id=user_id,
+              text=f"⚠️ 참석자 추가 실패: {e}\n스레드 답글로 직접 추가해주세요.")
 
 
 # ── 일정 드래프트 업데이트 ──────────────────────────────────────
