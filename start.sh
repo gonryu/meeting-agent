@@ -12,6 +12,6 @@ rm -f server.pid
 
 # 서버 시작
 source .venv/bin/activate
-nohup python3 main.py > server.log 2>&1 &
+nohup python3 -u main.py > server.log 2>&1 &
 echo $! > server.pid
 echo "서버 시작 (PID $(cat server.pid))"
