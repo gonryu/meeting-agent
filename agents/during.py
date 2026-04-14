@@ -57,6 +57,11 @@ _completed_notes: dict[str, dict] = {}
 # { user_id: set(event_id) }
 _processed_events: dict[str, set] = {}
 
+# 노트만으로 회의록 생성 후, 트랜스크립트 도착 시 보강 대기
+# { event_id: { user_id, title, date_str, time_range, attendees,
+#               notes_text, minutes_folder_id, attendees_raw, created_at } }
+_awaiting_transcript: dict[str, dict] = {}
+
 # 회의록 검토 대기 중인 초안 (FR-D14: event_id 키 사용)
 # { event_id: { user_id, title, date_str, time_range, attendees, source_label,
 #               transcript_text, notes_text, internal_body, external_body,
@@ -861,6 +866,21 @@ def _generate_from_session_end(slack_client, *, user_id: str, event_id: str,
         _post(slack_client, user_id=user_id, text=f"⚠️ 인증 오류: {e}")
         return
 
+    # Calendar 이벤트에서 날짜·참석자 조회 시도
+    date_str = datetime.now(KST).strftime("%Y-%m-%d")
+    time_range = f"{started_at.split(' ')[-1]} ~ {ended_at}"
+    attendees_str = "정보 없음"
+    attendees_raw = []
+    try:
+        recently_ended = cal.get_recently_ended_meetings(creds, min_minutes_ago=0, max_minutes_ago=90)
+        for m in recently_ended:
+            if m.get("id") == event_id:
+                date_str, time_range, attendees_str = _parse_meeting_meta(m)
+                attendees_raw = m.get("attendees", [])
+                break
+    except Exception as e:
+        log.warning(f"Calendar 이벤트 조회 실패: {e}")
+
     # 트랜스크립트 1회 탐색
     _post(slack_client, user_id=user_id, text=f"🔍 *{title}* 트랜스크립트 탐색 중...")
     transcript_text = ""
@@ -877,22 +897,25 @@ def _generate_from_session_end(slack_client, *, user_id: str, event_id: str,
     _processed_events.setdefault(user_id, set()).add(event_id)
     _save_processed_events(user_id)
 
-    # Calendar 이벤트에서 날짜·참석자 조회 시도
-    date_str = datetime.now(KST).strftime("%Y-%m-%d")
-    time_range = f"{started_at.split(' ')[-1]} ~ {ended_at}"
-    attendees_str = "정보 없음"
-    attendees_raw = []
-    try:
-        recently_ended = cal.get_recently_ended_meetings(creds, min_minutes_ago=0, max_minutes_ago=90)
-        for m in recently_ended:
-            if m.get("id") == event_id:
-                date_str, time_range, attendees_str = _parse_meeting_meta(m)
-                attendees_raw = m.get("attendees", [])
-                break
-    except Exception as e:
-        log.warning(f"Calendar 이벤트 조회 실패: {e}")
-
     notes_text = _format_notes(notes)
+
+    # 트랜스크립트 없이 노트만으로 생성 → 트랜스크립트 도착 대기 등록
+    if not transcript_text and notes_text and event_id:
+        _awaiting_transcript[event_id] = {
+            "user_id": user_id,
+            "title": title,
+            "date_str": date_str,
+            "time_range": time_range,
+            "attendees": attendees_str,
+            "notes_text": notes_text,
+            "minutes_folder_id": minutes_folder_id,
+            "attendees_raw": attendees_raw,
+            "created_at": datetime.now(KST),
+        }
+        log.info(f"트랜스크립트 대기 등록: {title} ({event_id})")
+        _post(slack_client, user_id=user_id,
+              text=f"ℹ️ 트랜스크립트가 나중에 도착하면 회의록을 자동 보강합니다. (최대 90분 대기)")
+
     _generate_and_post_minutes(
         slack_client, user_id=user_id,
         title=title, date_str=date_str, time_range=time_range,
@@ -988,6 +1011,9 @@ def check_transcripts(slack_client):
 
     # 90분 경과 후에도 처리 못한 노트 → 노트만으로 fallback 생성
     _flush_expired_notes(slack_client)
+
+    # 트랜스크립트 대기 중인 이벤트 체크 (노트만으로 생성 후 보강 대기)
+    _check_awaiting_transcripts(slack_client)
 
 
 def _check_transcripts_for_user(slack_client, user_id: str, min_minutes_ago: int = 10):
@@ -1122,6 +1148,63 @@ def _flush_expired_notes(slack_client):
             minutes_folder_id=minutes_folder_id, creds=creds,
             event_id=event_id, attendees_raw=[],
         )
+
+
+def _check_awaiting_transcripts(slack_client):
+    """트랜스크립트 대기 중인 이벤트에 트랜스크립트가 도착했는지 확인.
+    도착 시 회의록 보강 초안을 생성하여 사용자에게 승인 요청.
+    90분 경과 시 대기 해제.
+    """
+    now = datetime.now(KST)
+    expired = []
+    for event_id, data in list(_awaiting_transcript.items()):
+        elapsed = (now - data["created_at"]).total_seconds()
+        if elapsed > 90 * 60:
+            expired.append(event_id)
+            continue
+
+        user_id = data["user_id"]
+        title = data["title"]
+        try:
+            creds, _ = _get_creds_and_config(user_id)
+            transcript_file = drive.find_meet_transcript(creds, title, None)
+            if not transcript_file:
+                continue
+
+            log.info(f"지연 트랜스크립트 발견: {title} ({event_id})")
+            transcript_text = docs.read_document(creds, transcript_file["id"])
+            if not transcript_text:
+                continue
+
+            # 대기 목록에서 제거
+            _awaiting_transcript.pop(event_id, None)
+
+            _post(slack_client, user_id=user_id,
+                  text=f"📡 *{title}* 트랜스크립트가 도착했습니다! 회의록을 보강 중...")
+
+            # 트랜스크립트 + 노트로 보강된 회의록 생성
+            _generate_and_post_minutes(
+                slack_client, user_id=user_id,
+                title=f"{title} (트랜스크립트 보강)",
+                date_str=data["date_str"],
+                time_range=data["time_range"],
+                attendees=data["attendees"],
+                transcript_text=transcript_text,
+                notes_text=data["notes_text"],
+                minutes_folder_id=data["minutes_folder_id"],
+                creds=creds,
+                event_id=event_id,
+                attendees_raw=data["attendees_raw"],
+            )
+
+        except Exception as e:
+            log.warning(f"트랜스크립트 대기 체크 실패 ({title}): {e}")
+
+    # 90분 초과 항목 정리
+    for event_id in expired:
+        data = _awaiting_transcript.pop(event_id, None)
+        if data:
+            log.info(f"트랜스크립트 대기 만료 (90분): {data['title']}")
 
 
 # ── 회의록 생성 공통 ──────────────────────────────────────────
