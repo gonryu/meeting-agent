@@ -1,6 +1,6 @@
 # LLM 사용 현황
 
-> 최종 갱신: 2026-04-02 | 회의록 생성 Claude Sonnet 전환, 업체명 자동추출 제거, 통합 스레드 업데이트
+> 최종 갱신: 2026-04-14 | 제안서 LLM 호출 추가, 업체명 추론 NONE 키워드 방식, 인텐트 통합 (get_minutes + search_minutes + company_memo)
 
 ---
 
@@ -11,6 +11,7 @@
 | 기본 | Gemini `gemini-2.0-flash` | Google Search 도구 포함 |
 | 폴백 | Claude `claude-haiku-4-5` | Gemini 실패(429 등) 시 자동 전환 |
 | 회의록 생성·수정 전용 | Claude `claude-sonnet-4-5` | `agents/during.py` `_generate_minutes()`, Gemini 폴백 없음 |
+| 제안서 생성 전용 | Claude `claude-sonnet-4-5` | `agents/proposal.py`, Gemini 폴백 없음 |
 | 명함 OCR 전용 | Claude `claude-haiku-4-5` (Vision) | `agents/card.py` 단독 사용, Gemini 미사용 |
 
 ---
@@ -155,10 +156,15 @@ JSON 형식으로만 답변 (다른 텍스트 없이):
 
 ---
 
-### ~~3.5 업체명 추출~~ (제거됨)
+### 3.5 업체명 추론 (`_infer_company_from_title`)
 
-> 2026-04-02: `_extract_company_with_llm()`, `_extract_company_name()`, `_get_internal_products_from_knowledge()` 함수 제거.
-> 업체명은 `extendedProperties.private.company`로만 식별 (일정 생성 시 사용자가 명시하거나 스레드에서 설정).
+- **위치**: `agents/before.py` → `_infer_company_from_title(title, company_candidates)`
+- **함수**: `_generate`
+- **동작**: 회의 제목에서 업체명을 LLM으로 추론. 추론 불가 시 `NONE`만 반환하도록 프롬프트에 명시.
+- **폴백 체인**: `extendedProperties.private.company` → 제목 LLM 추론 → 참석자 기반 역추론 (`_infer_company_from_attendees`)
+
+> 2026-04-02: `_extract_company_with_llm()` 등 제거.
+> 2026-04-14: 프롬프트를 `NONE` 키워드 방식으로 개선 — LLM이 설명문 대신 `NONE`만 반환하도록 강제.
 
 ---
 
@@ -373,7 +379,9 @@ JSON으로만 응답해줘:
 - dreamplus_cancel: 회의실 예약 취소 (params: text)
 - dreamplus_credits: 드림플러스 크레딧 조회
 - dreamplus_settings: 드림플러스 계정 설정
+- get_minutes: 회의록 조회·검색 (params: query — 업체명, 날짜, 기간 등 원본 그대로. 단순 목록 조회면 빈 문자열)
 - trello_search: Trello 카드 조회/검색 (params: query)
+- company_memo: 업체 관련 메모 저장 (params: company, memo)
 - feedback: 기능 요청·개선 제안·버그 리포트
 - help: 도움말·사용법 요청
 - unknown: 위 항목에 해당 없음
@@ -381,6 +389,32 @@ JSON으로만 응답해줘:
 
 분류 실패(JSON 파싱 오류) 시 `{"intent": "unknown", "params": {}}` 반환.
 `unknown` 인텐트 수신 시 `/도움말` 안내 메시지 발송 (단순 에러 메시지 → 도움말 안내로 개선, 2026-04-02).
+
+---
+
+## 5.5 Proposal Agent LLM 호출 (제안서)
+
+### 5.5.1 제안서 개요 생성 (Intake)
+
+- **위치**: `agents/proposal.py` → 개요 생성
+- **함수**: `_generate` (Gemini/Claude 폴백)
+- **프롬프트**: `prompts/templates/proposal_intake.md`
+- **입력**: 내부용 회의록 전문
+- **출력**: 제안서 개요 (목적, 범위, 핵심 요소 등)
+
+### 5.5.2 제안서 초안 생성
+
+- **위치**: `agents/proposal.py` → 초안 생성
+- **함수**: Claude `claude-sonnet-4-5` 직접 호출
+- **프롬프트**: `prompts/templates/proposal_generate.md`
+- **입력**: 개요 + 내부용 회의록
+- **출력**: 제안서 본문 (마크다운)
+
+### 5.5.3 제안서 수정 (스레드)
+
+- **트리거**: 개요/초안 스레드에 답글
+- **함수**: Claude `claude-sonnet-4-5` 직접 호출
+- **동작**: 기존 개요/초안 + 수정 요청 → 재생성
 
 ---
 
@@ -430,6 +464,8 @@ JSON으로만 응답해줘:
 | `company_news.md` | `company_news_prompt()` | `{{today}}`, `{{company_name}}` |
 | `person_info.md` | `person_info_prompt()` | `{{person_name}}`, `{{company_name}}` |
 | `service_connection.md` | `service_connection_prompt()` | `{{knowledge}}`, `{{company_info}}` |
+| `proposal_intake.md` | 제안서 개요 생성 | `{{internal_minutes}}` |
+| `proposal_generate.md` | 제안서 초안 생성 | `{{outline}}`, `{{internal_minutes}}` |
 | `briefing_summary.md` | `briefing_summary_prompt()` | `{{company_name}}`, `{{company_news}}`, `{{person_info}}`, `{{service_connections}}`, `{{email_context}}` |
 
 인라인 프롬프트로 유지되는 함수: `parse_meeting_prompt`, `merge_meeting_prompt`, `update_knowledge_prompt`, `extract_action_items_prompt`

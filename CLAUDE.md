@@ -184,11 +184,13 @@ Gemini `gemini-2.0-flash`가 기본, 오류(429 등) 시 Claude `claude-haiku-4-
 
 SSH 대신 웹훅 방식으로 배포합니다 (서버 22 포트 오픈 불필요).
 
-**흐름:** main 푸시 → GitHub Actions → `POST /deploy` (HMAC 시그니처 검증) → `git pull` + `pip install` + `systemctl restart`
+**흐름:** main 푸시 → GitHub Actions → `POST /deploy` (HMAC 시그니처 검증) → `git pull` + `pip install` + 관리자 채널 알림 + `systemctl restart`
+
+**배포 알림:** `_notify_deploy()`가 `FEEDBACK_CHANNEL`에 버전(short hash)과 커밋 메시지 목록을 발송. git pull 전후 커밋 해시를 비교하여 변경 커밋만 추출 (`--no-merges`).
 
 **관련 파일:**
 - `.github/workflows/deploy.yml` — GitHub Actions 워크플로우
-- `server/oauth.py` — `/deploy` 엔드포인트 (HMAC-SHA256 검증)
+- `server/oauth.py` — `/deploy` 엔드포인트 (HMAC-SHA256 검증) + `_notify_deploy()` 배포 알림
 
 **환경변수:**
 - `DEPLOY_SECRET` — HMAC 시그니처 검증용 비밀 키 (`.env` + GitHub Secrets 동일 값)

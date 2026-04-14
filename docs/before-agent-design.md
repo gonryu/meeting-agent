@@ -135,8 +135,11 @@ drive.get_company_info() → (content, file_id, is_fresh)
     │
     ├─ 3단계: _generate(service_connection_prompt(news, knowledge))  연결점 분석
     │
+    └─ 기존 파일에서 비리서치 섹션(내부 메모 등) 보존
     └─ drive.save_company_info()  → Companies/{업체명}.md 저장/갱신
 ```
+
+> **메모 보존**: 리서치 시 `## 최근 동향`, `## 이메일 맥락`, `## 파라메타 서비스 연결점`, `## ParaScope` 섹션만 갱신. `## 내부 메모` 등 그 외 섹션은 기존 내용 그대로 유지.
 
 저장 구조:
 ```markdown
@@ -157,11 +160,15 @@ drive.get_company_info() → (content, file_id, is_fresh)
 ## ParaScope 브리핑
 - last_searched: YYYY-MM-DD
 - bullet line
+
+## 내부 메모
+- [2026-04-14 09:30] PoC 예산 확보
 ```
 
-> 섹션 순서: `최근 동향` → `이메일 맥락` → `파라메타 서비스 연결점` → `ParaScope 브리핑`
+> 섹션 순서: `최근 동향` → `이메일 맥락` → `파라메타 서비스 연결점` → `ParaScope 브리핑` → `내부 메모`
 > `last_searched` 라인은 Drive에 저장되지만 브리핑 출력에는 표시하지 않음.
 > 이메일 snippet의 줄바꿈(`\n`, `\r`)은 저장 전 공백으로 치환됨.
+> `## 내부 메모`는 리서치 대상이 아니므로 업체 리서치 시에도 보존됨.
 
 #### ParaScope 채널 연동 (`_query_parascope`)
 

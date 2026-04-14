@@ -183,6 +183,13 @@ def get_recently_ended_meetings(creds: Credentials,
         end_str = end.get("dateTime", end.get("date"))
         if not end_str:
             continue
+        # 실제 종료 시간이 지난 이벤트만 포함 (진행 중인 미팅 제외)
+        try:
+            end_dt = datetime.fromisoformat(end_str)
+            if end_dt > now:
+                continue
+        except Exception:
+            continue
         parsed = parse_event(ev)
         parsed["end_time"] = end_str
         meetings.append(parsed)

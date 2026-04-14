@@ -51,7 +51,10 @@ pytest tests/ -x
 | `test_gmail_parse.py` | `tools/gmail.py` (`parse_address_header`) | 8 |
 | `test_drive_minutes.py` | `tools/drive.py` (Minutes/Transcript) | 8 |
 | `test_docs.py` | `tools/docs.py` | 8 |
-| **합계** | | **211** |
+| `test_v2_phase2_1.py` | 회의록 검색, `meeting_index`, Wiki 구조 | 34 |
+| `test_v2_phase2_3.py` | 업체 메모, 회의록 자연어 검색, 업체 리서치 메모 보존 | 24 |
+| `test_v2_phase2_4.py` | 제안서 워크플로우, 인텐트 분류, 제안서 플래그 | 20 |
+| **합계** | | **289** |
 
 ---
 

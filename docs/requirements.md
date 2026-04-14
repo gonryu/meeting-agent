@@ -518,10 +518,11 @@ Slack 초안 메시지 발송 (버튼 4개)
 - SSL 검증 우회: 사내 방화벽 대응 (`session.verify = False`)
 - `DRY_RUN_TRELLO=true`로 API 호출 없이 테스트 가능
 
-### 7.6 제안서 / 리서치 초안 생성 ❌
+### 7.6 제안서 워크플로우 ✅
 
-- 원본 요구사항(FR-A10, FR-A11): 미팅 내용을 바탕으로 제안서 초안 또는 추가 리서치 요청 초안을 LLM으로 자동 생성
-- 계획: 회의록 생성 후 "제안서 초안 생성" 버튼 → LLM이 미팅 맥락 기반 초안 작성 → Drive 저장
+- 회의록 완료 후 "제안서 초안 생성" 버튼 → 개요 생성 → 스레드에서 수정 → 초안 생성 → 스레드에서 수정
+- `agents/proposal.py` — 개요·초안 생성, 스레드 수정 루프
+- 프롬프트 템플릿: `prompts/templates/proposal_intake.md`, `proposal_generate.md`
 
 ---
 
@@ -532,9 +533,11 @@ Slack 초안 메시지 발송 (버튼 4개)
 ```
 MeetingAgent/
 ├── Contacts/
-│   ├── Companies/      ← 업체별 .md 파일
+│   ├── Companies/      ← 업체별 .md 파일 (리서치 결과 + 내부 메모)
 │   └── People/         ← 담당자별 .md 파일
 ├── Minutes/            ← 회의록 (.md 파일)
+├── Sources/
+│   └── Research/       ← 웹 검색 원본 ({날짜}_{업체명}_web_search.md)
 └── company_knowledge.md
 ```
 
@@ -557,15 +560,20 @@ MeetingAgent/
 ## ParaScope 브리핑
 - last_searched: YYYY-MM-DD
 - bullet line
+
+## 내부 메모
+- [2026-04-14 09:30] PoC 예산 확보
 ```
 
-섹션 순서: `최근 동향` → `이메일 맥락` → `파라메타 서비스 연결점` → `ParaScope 브리핑`
+섹션 순서: `최근 동향` → `이메일 맥락` → `파라메타 서비스 연결점` → `ParaScope 브리핑` → `내부 메모`
 `last_searched` 라인은 저장되지만 브리핑 출력에는 표시하지 않음.
 
 - 브리핑 시 자동 생성/갱신 (7일 캐시)
 - `/company {업체명}` 커맨드로 강제 갱신
 - Drive에서 직접 편집 가능
 - NFD/NFC 파일명 인코딩 자동 대응, 중복 생성 방지
+- **업체 리서치 시 `## 내부 메모` 등 비리서치 섹션은 보존** (리서치 대상: 최근 동향, 이메일 맥락, 파라메타 서비스 연결점, ParaScope)
+- 업체 메모 추가: `company_memo` 인텐트 → `## 내부 메모` 섹션에 타임스탬프와 함께 기록
 
 ### 8.3 담당자 정보 파일 (People/{이름}.md) ✅
 
@@ -656,8 +664,9 @@ MeetingAgent/
 | 담당자 공개 정보 검색            | Before | ✅   |
 | 서비스 연결점 분석              | Before | ✅   |
 | 미팅 자연어 파싱               | Before | ✅   |
-| 업체명 추출                  | Before | ✅   |
+| 업체명 추출 (NONE 키워드 방식)  | Before | ✅   |
 | company_knowledge.md 갱신 | Before | ✅   |
+| 제안서 개요·초안 생성           | Proposal | ✅ |
 | 트랜스크립트 기반 회의록 생성        | During | ✅   |
 | 수동 노트 기반 회의록 생성         | During | ✅   |
 | 이메일 본문 요약               | Before | ❌   |

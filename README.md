@@ -336,6 +336,8 @@ git pull
 sudo systemctl restart meeting-agent
 ```
 
+> main 브랜치에 푸시하면 GitHub Actions가 자동으로 배포하며, 배포 완료 시 `FEEDBACK_CHANNEL`에 버전·변경사항 알림이 발송됩니다.
+
 **8. 데이터 백업 (선택)**
 
 SQLite DB를 주기적으로 백업합니다:

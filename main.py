@@ -143,13 +143,18 @@ def handle_mention(event, say, client):
             ).start()
         return
 
-    # 스레드 답장 → 미팅 세션 명령어 (start_session 쓰레드에서 메모/종료)
+    # 스레드 답장 → 미팅 세션 (미팅종료 외 모든 입력은 메모로 처리)
     if parent_ts:
         session_thread = get_session_thread(user_id)
         if session_thread and session_thread == (channel, parent_ts):
             if _check_registered(client, user_id, channel):
-                _route_message(text, client, user_id=user_id,
-                               channel=channel, thread_ts=parent_ts)
+                _end_keywords = {"미팅종료", "미팅 종료", "회의 끝", "회의 종료", "미팅 마무리"}
+                if any(text.strip().startswith(kw) for kw in _end_keywords):
+                    end_session(client, user_id=user_id,
+                                channel=channel, thread_ts=parent_ts)
+                else:
+                    add_note(client, user_id=user_id, note_text=text.strip(),
+                             channel=channel, thread_ts=parent_ts)
             return
 
     if not text:
