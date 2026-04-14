@@ -643,7 +643,12 @@ def auto_book_room(slack_client, *, user_id: str, start_dt: datetime,
     """
     creds = user_store.get_dreamplus_credentials(user_id)
     if not creds:
-        return  # 계정 미설정 → 조용히 스킵
+        from server.oauth import build_dreamplus_setup_url
+        url = build_dreamplus_setup_url(user_id)
+        _post(slack_client, user_id,
+              f"🏢 드림플러스 계정을 설정하면 회의실 예약을 할 수 있습니다.\n<{url}|드림플러스 계정 설정>",
+              channel=channel, thread_ts=thread_ts)
+        return
 
     try:
         jwt, pub_key, member_id, company_id = _get_session(user_id)
