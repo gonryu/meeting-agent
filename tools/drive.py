@@ -281,6 +281,13 @@ def save_minutes(creds: Credentials, minutes_folder_id: str,
     return _write_file(creds, filename, content, minutes_folder_id)
 
 
+def update_file_content(creds: Credentials, file_id: str, content: str) -> None:
+    """Drive 파일 내용을 file_id로 직접 업데이트."""
+    from googleapiclient.http import MediaInMemoryUpload
+    media = MediaInMemoryUpload(content.encode("utf-8"), mimetype="text/plain")
+    _service(creds).files().update(fileId=file_id, media_body=media).execute()
+
+
 def list_minutes(creds: Credentials, minutes_folder_id: str) -> list[dict]:
     """회의록 목록 조회. Returns: [{id, name, modifiedTime}]"""
     svc = _service(creds)

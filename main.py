@@ -45,8 +45,12 @@ from agents.during import (
     handle_minutes_edit_reply,
     handle_event_selection,
     handle_event_title_reply,
+    handle_end_input_selection,
+    handle_finalized_minutes_reply,
     _pending_minutes,
     _pending_inputs,
+    _pending_end_inputs,
+    _finalized_minutes_threads,
     _find_draft_for_user,
     get_session_thread,
 )
@@ -244,6 +248,15 @@ def handle_message(event, client):
                     daemon=True,
                 ).start()
                 return
+
+        # 완성된 회의록 스레드 답글 감지 → Drive 내부용 회의록 업데이트
+        if thread_ts and user_id and text and (user_id, thread_ts) in _finalized_minutes_threads:
+            threading.Thread(
+                target=handle_finalized_minutes_reply,
+                args=(client, user_id, thread_ts, text),
+                daemon=True,
+            ).start()
+            return
 
         # 제안서 개요/초안 수정 스레드 답글 감지 (Phase 2.4)
         if thread_ts and user_id:
@@ -960,10 +973,11 @@ app.command("/인물")(_person_handler)
 def _meeting_start_handler(ack, body, client):
     ack()
     user_id = body["user_id"]
+    channel_id = body.get("channel_id")
     if not _check_registered(client, user_id):
         return
     title = body.get("text", "").strip() or "미팅"
-    start_session(client, user_id=user_id, title=title)
+    start_session(client, user_id=user_id, title=title, channel=channel_id)
 
 app.command("/미팅시작")(_meeting_start_handler)
 
@@ -971,10 +985,11 @@ app.command("/미팅시작")(_meeting_start_handler)
 def _note_handler(ack, body, client):
     ack()
     user_id = body["user_id"]
+    channel_id = body.get("channel_id")
     if not _check_registered(client, user_id):
         return
     note_text = body.get("text", "").strip()
-    add_note(client, user_id=user_id, note_text=note_text)
+    add_note(client, user_id=user_id, note_text=note_text, channel=channel_id)
 
 app.command("/메모")(_note_handler)
 
@@ -1000,6 +1015,16 @@ def _handle_audio_upload(client, user_id: str, file_info: dict):
 
     if not text:
         client.chat_postMessage(channel=user_id, text="⚠️ 음성에서 텍스트를 추출하지 못했습니다.")
+        return
+
+    # 미팅종료 후 음성 파일 대기 중이면 → session notes에 추가 후 회의록 생성
+    pending_end = _pending_end_inputs.get(user_id)
+    if pending_end and pending_end.get("awaiting_audio"):
+        session = pending_end["session"]
+        notes = session.setdefault("notes", [])
+        notes.append({"time": datetime.now().strftime("%H:%M"), "text": f"[음성] {text}"})
+        _pending_end_inputs.pop(user_id, None)
+        handle_end_input_selection(client, user_id, "notes_only")
         return
 
     # 세션 자동 시작 + 메모 등록
@@ -1041,9 +1066,10 @@ def _handle_text_upload(client, user_id: str, file_info: dict):
 def _meeting_end_handler(ack, body, client):
     ack()
     user_id = body["user_id"]
+    channel_id = body.get("channel_id")
     if not _check_registered(client, user_id):
         return
-    end_session(client, user_id=user_id)
+    end_session(client, user_id=user_id, channel=channel_id)
 
 app.command("/미팅종료")(_meeting_end_handler)
 
@@ -1232,8 +1258,9 @@ def _handle_meeting_event_select(ack, body, client):
         # "새 미팅으로 기록" — 제목 입력 안내
         pending = _pending_inputs.get(user_id)
         if pending:
+            channel = pending.get("channel") or user_id
             client.chat_postMessage(
-                channel=user_id,
+                channel=channel,
                 thread_ts=pending.get("prompt_ts"),
                 text="📝 미팅 제목을 이 스레드에 답글로 입력해주세요. (예: 'KISA 보안 미팅')",
             )
@@ -1247,6 +1274,30 @@ def _handle_meeting_event_select(ack, body, client):
 for i in range(5):
     app.action(f"select_meeting_event_{i}")(_handle_meeting_event_select)
 app.action("select_meeting_event_new")(_handle_meeting_event_select)
+
+
+# ── 입력 소스 선택 액션 핸들러 (미팅종료) ─────────────────────
+
+def _handle_end_input_select(ack, body, client):
+    """end_input_* 버튼 콜백 — 회의록 입력 소스 선택"""
+    ack()
+    user_id = body["user"]["id"]
+    action_id = body.get("actions", [{}])[0].get("action_id", "")
+    choice_map = {
+        "end_input_transcript": "transcript",
+        "end_input_audio":      "audio",
+        "end_input_notes_only": "notes_only",
+        "end_input_skip":       "skip",
+    }
+    choice = choice_map.get(action_id, "skip")
+    threading.Thread(
+        target=handle_end_input_selection,
+        args=(client, user_id, choice),
+        daemon=True,
+    ).start()
+
+for _aid in ["end_input_transcript", "end_input_audio", "end_input_notes_only", "end_input_skip"]:
+    app.action(_aid)(_handle_end_input_select)
 
 
 # ── 회의록 검토 액션 핸들러 ─────────────────────────────────

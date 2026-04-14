@@ -74,6 +74,15 @@ _pending_minutes: dict[str, dict] = {}
 #              events: [parsed_event, ...], prompt_ts: str } }
 _pending_inputs: dict[str, dict] = {}
 
+# 미팅종료 후 회의록 입력 소스 선택 대기
+# { user_id: { session: dict, channel: str|None, thread_ts: str|None,
+#              awaiting_audio: bool } }
+_pending_end_inputs: dict[str, dict] = {}
+
+# 완료된 회의록 Slack 메시지 → Drive 파일 역방향 인덱스 (스레드 답글 처리용)
+# { (user_id, msg_ts): { title, event_id, internal_file_id, date_str, creds_user_id } }
+_finalized_minutes_threads: dict[tuple[str, str], dict] = {}
+
 
 # ── 세션 파일 저장/복구 헬퍼 ─────────────────────────────────
 
@@ -491,7 +500,8 @@ def _find_candidate_events(creds) -> dict:
     }
 
 
-def _start_session_with_event(slack_client, user_id: str, event: dict):
+def _start_session_with_event(slack_client, user_id: str, event: dict,
+                               channel: str = None, thread_ts: str = None):
     """파싱된 캘린더 이벤트로 세션 자동 시작. 이미 세션이 있으면 무시."""
     if user_id in _active_sessions:
         return
@@ -513,16 +523,19 @@ def _start_session_with_event(slack_client, user_id: str, event: dict):
         "event_id": event_id,
         "event_summary": event_summary,
         "event_time_str": event_time_str,
+        "session_channel": channel,
+        "session_thread_ts": thread_ts,
     }
     _save_active_session(user_id)
 
     event_line = f"\n📅 연동된 일정: *{event_summary}*" + (f" ({event_time_str})" if event_time_str else "")
-    _post(slack_client, user_id=user_id,
+    _post(slack_client, user_id=user_id, channel=channel, thread_ts=thread_ts,
           text=f"✅ 자동으로 세션을 시작했습니다: *{event_summary}*{event_line}\n"
                f"미팅이 끝나면 `/미팅종료` 를 입력해주세요.")
 
 
-def _prompt_event_confirm(slack_client, user_id: str, event: dict, distance_min: int):
+def _prompt_event_confirm(slack_client, user_id: str, event: dict, distance_min: int,
+                           channel: str = None):
     """가장 가까운 이벤트를 보여주고 맞는지 확인 요청."""
     summary = event["summary"]
     start_str = event.get("start_time", "")
@@ -560,7 +573,7 @@ def _prompt_event_confirm(slack_client, user_id: str, event: dict, distance_min:
         {"type": "actions", "elements": buttons},
     ]
     resp = slack_client.chat_postMessage(
-        channel=user_id,
+        channel=channel or user_id,
         text=f"가장 가까운 일정 '{summary}'에 대한 기록이 맞나요?",
         blocks=blocks,
     )
@@ -568,7 +581,8 @@ def _prompt_event_confirm(slack_client, user_id: str, event: dict, distance_min:
     pending["prompt_ts"] = resp["ts"] if resp and resp.get("ok") else None
 
 
-def _prompt_event_selection(slack_client, user_id: str, events: list[dict]):
+def _prompt_event_selection(slack_client, user_id: str, events: list[dict],
+                             channel: str = None):
     """여러 캘린더 이벤트 중 선택하도록 Slack 버튼 발송."""
     buttons = []
     for i, ev in enumerate(events[:5]):  # 최대 5개
@@ -602,7 +616,7 @@ def _prompt_event_selection(slack_client, user_id: str, events: list[dict]):
         {"type": "actions", "elements": buttons},
     ]
     resp = slack_client.chat_postMessage(
-        channel=user_id,
+        channel=channel or user_id,
         text="어떤 미팅에 대한 기록인지 선택해주세요.",
         blocks=blocks,
     )
@@ -610,7 +624,8 @@ def _prompt_event_selection(slack_client, user_id: str, events: list[dict]):
     pending["prompt_ts"] = resp["ts"] if resp and resp.get("ok") else None
 
 
-def _auto_start_or_enqueue(slack_client, user_id: str, input_item: dict):
+def _auto_start_or_enqueue(slack_client, user_id: str, input_item: dict,
+                            channel: str = None):
     """세션 없이 입력이 들어왔을 때: 캘린더 이벤트 자동 감지 → 세션 시작 또는 확인 요청.
 
     input_item: { "type": "note"|"audio"|"document", "content": str }
@@ -619,14 +634,14 @@ def _auto_start_or_enqueue(slack_client, user_id: str, input_item: dict):
     # 이미 이벤트 선택 대기 중이면 큐에 추가만
     if user_id in _pending_inputs:
         _pending_inputs[user_id]["inputs"].append(input_item)
-        _post(slack_client, user_id=user_id,
+        _post(slack_client, user_id=user_id, channel=channel,
               text=f"📝 메모가 대기열에 추가되었습니다. 위의 미팅을 먼저 선택해주세요.")
         return False
 
     try:
         creds, _ = _get_creds_and_config(user_id)
     except Exception as e:
-        _post(slack_client, user_id=user_id, text=f"⚠️ 인증 오류: {e}")
+        _post(slack_client, user_id=user_id, channel=channel, text=f"⚠️ 인증 오류: {e}")
         return False
 
     result = _find_candidate_events(creds)
@@ -637,37 +652,38 @@ def _auto_start_or_enqueue(slack_client, user_id: str, input_item: dict):
 
     # 1) 진행 중 이벤트
     if len(ongoing) == 1:
-        _start_session_with_event(slack_client, user_id, ongoing[0])
+        _start_session_with_event(slack_client, user_id, ongoing[0], channel=channel)
         return True
     elif len(ongoing) > 1:
-        _pending_inputs[user_id] = {"inputs": [input_item], "events": ongoing}
-        _prompt_event_selection(slack_client, user_id, ongoing)
+        _pending_inputs[user_id] = {"inputs": [input_item], "events": ongoing, "channel": channel}
+        _prompt_event_selection(slack_client, user_id, ongoing, channel=channel)
         return False
 
     # 2) 30분 내 시작 예정 이벤트
     if len(upcoming) == 1:
-        _pending_inputs[user_id] = {"inputs": [input_item], "events": upcoming}
-        _prompt_event_confirm(slack_client, user_id, upcoming[0], 0)
+        _pending_inputs[user_id] = {"inputs": [input_item], "events": upcoming, "channel": channel}
+        _prompt_event_confirm(slack_client, user_id, upcoming[0], 0, channel=channel)
         return False
     elif len(upcoming) > 1:
-        _pending_inputs[user_id] = {"inputs": [input_item], "events": upcoming}
-        _prompt_event_selection(slack_client, user_id, upcoming)
+        _pending_inputs[user_id] = {"inputs": [input_item], "events": upcoming, "channel": channel}
+        _prompt_event_selection(slack_client, user_id, upcoming, channel=channel)
         return False
 
     # 3) 진행 중·예정 없음, 가장 가까운 이벤트(들)
     if len(nearby) == 1:
-        _pending_inputs[user_id] = {"inputs": [input_item], "events": nearby}
-        _prompt_event_confirm(slack_client, user_id, nearby[0], nearby_dist)
+        _pending_inputs[user_id] = {"inputs": [input_item], "events": nearby, "channel": channel}
+        _prompt_event_confirm(slack_client, user_id, nearby[0], nearby_dist, channel=channel)
         return False
     elif len(nearby) > 1:
-        _pending_inputs[user_id] = {"inputs": [input_item], "events": nearby}
-        _prompt_event_selection(slack_client, user_id, nearby)
+        _pending_inputs[user_id] = {"inputs": [input_item], "events": nearby, "channel": channel}
+        _prompt_event_selection(slack_client, user_id, nearby, channel=channel)
         return False
 
     # 4) 오늘 일정 없음 → 제목 입력 요청
     _pending_inputs[user_id] = {
         "inputs": [input_item],
         "events": [],
+        "channel": channel,
     }
     blocks = [
         {
@@ -685,7 +701,7 @@ def _auto_start_or_enqueue(slack_client, user_id: str, input_item: dict):
         },
     ]
     resp = slack_client.chat_postMessage(
-        channel=user_id,
+        channel=channel or user_id,
         text="오늘 일정이 없습니다. 미팅 제목을 입력해주세요.",
         blocks=blocks,
     )
@@ -707,19 +723,22 @@ def handle_event_selection(slack_client, user_id: str, selected_event_id: str | 
 
     inputs = pending.get("inputs", [])
     events = pending.get("events", [])
+    channel = pending.get("channel")
+    title_hint = pending.get("title_hint")
 
     if selected_event_id:
         # 이벤트 목록에서 해당 ID 찾기
         matched = next((ev for ev in events if ev["id"] == selected_event_id), None)
         if matched:
-            _start_session_with_event(slack_client, user_id, matched)
+            _start_session_with_event(slack_client, user_id, matched, channel=channel)
         else:
             # fallback: 제목으로 시작
-            start_session(slack_client, user_id, custom_title or "미팅")
+            start_session(slack_client, user_id, custom_title or title_hint or "미팅",
+                          channel=channel)
     else:
         # 새 미팅
-        title = custom_title or "미팅"
-        start_session(slack_client, user_id, title)
+        title = custom_title or title_hint or "미팅"
+        start_session(slack_client, user_id, title, channel=channel)
 
     # 대기 중이던 입력들을 세션에 추가
     if user_id in _active_sessions:
@@ -731,7 +750,7 @@ def handle_event_selection(slack_client, user_id: str, selected_event_id: str | 
         _save_active_session(user_id)
         count = len(_active_sessions[user_id]["notes"])
         if inputs:
-            _post(slack_client, user_id=user_id,
+            _post(slack_client, user_id=user_id, channel=channel,
                   text=f"📝 대기 중이던 메모 {len(inputs)}개가 세션에 추가되었습니다. (총 {count}개)")
 
 
@@ -746,7 +765,11 @@ def handle_event_title_reply(slack_client, user_id: str, title_text: str):
 
 def start_session(slack_client, user_id: str, title: str,
                    channel: str = None, thread_ts: str = None):
-    """/미팅시작 {제목} — 수동 노트 세션 시작"""
+    """/미팅시작 {제목} — 수동 노트 세션 시작.
+
+    캘린더 후보 이벤트가 여러 개면 선택 UI를 표시하고 즉시 리턴.
+    하나이거나 없으면 바로 세션을 생성한다.
+    """
     try:
         creds, _ = _get_creds_and_config(user_id)
     except Exception as e:
@@ -760,71 +783,65 @@ def start_session(slack_client, user_id: str, title: str,
                    f"`/미팅종료` 후 다시 시작해주세요.")
         return
 
-    # 진행 중인 캘린더 이벤트 매칭
-    # 우선순위: 1) 현재 진행 중  2) 30분 내 시작 예정  3) 제목 일치
-    event_id = None
-    event_summary = None
-    event_time_str = None
+    # 이벤트 선택 대기 중인 경우 (이미 /메모 등으로 picker가 열림)
+    if user_id in _pending_inputs:
+        _post(slack_client, user_id=user_id, channel=channel, thread_ts=thread_ts,
+              text="⚠️ 이미 이벤트 선택 대기 중입니다. 위의 선택지에서 먼저 미팅을 선택해주세요.")
+        return
+
+    result = _find_candidate_events(creds)
+    ongoing = result["ongoing"]
+    upcoming = result["upcoming"]
+    nearby = result["nearby"]
+    nearby_dist = result["nearby_distance_min"]
+
+    # 진행 중 이벤트 1개 → 바로 시작
+    if len(ongoing) == 1:
+        _start_session_with_event(slack_client, user_id, ongoing[0],
+                                   channel=channel, thread_ts=thread_ts)
+        return
+
+    # 후보 이벤트 여러 개 → picker UI
+    candidates = ongoing or upcoming or nearby
+    if len(candidates) > 1:
+        _pending_inputs[user_id] = {
+            "inputs": [],
+            "events": candidates,
+            "channel": channel,
+            "source": "start_session",
+            "title_hint": title,
+        }
+        _prompt_event_selection(slack_client, user_id, candidates, channel=channel)
+        return
+
+    # 후보 이벤트 1개 → 확인 UI
+    if len(candidates) == 1:
+        _pending_inputs[user_id] = {
+            "inputs": [],
+            "events": candidates,
+            "channel": channel,
+            "source": "start_session",
+            "title_hint": title,
+        }
+        _prompt_event_confirm(slack_client, user_id, candidates[0], nearby_dist,
+                               channel=channel)
+        return
+
+    # 일정 없음 → 제목으로 수동 세션 즉시 생성
     title_to_use = title or "미팅"
-    try:
-        now = datetime.now(KST)
-        events = cal.get_upcoming_meetings(creds, days=1)
-
-        ongoing = None      # 1순위: 진행 중
-        upcoming = None     # 2순위: 30분 내 시작
-        by_title = None     # 3순위: 제목 일치
-
-        for ev in events:
-            parsed = cal.parse_event(ev)
-            start_str = parsed.get("start_time", "")
-            end_str = ev.get("end", {}).get("dateTime", "")
-            if not start_str or not end_str:
-                continue
-            try:
-                start_dt = datetime.fromisoformat(start_str)
-                end_dt = datetime.fromisoformat(end_str)
-            except Exception:
-                continue
-
-            if start_dt <= now <= end_dt:
-                ongoing = (parsed, start_str, end_str)
-                break  # 진행 중이면 바로 확정
-            elif now < start_dt <= now + timedelta(minutes=30):
-                if upcoming is None:
-                    upcoming = (parsed, start_str, end_str)
-            if title_to_use.lower() in parsed["summary"].lower():
-                if by_title is None:
-                    by_title = (parsed, start_str, end_str)
-
-        matched = ongoing or upcoming or by_title
-        if matched:
-            parsed, start_str, end_str = matched
-            event_id = parsed["id"]
-            event_summary = parsed["summary"]
-            event_time_str = f"{format_time(start_str)} ~ {format_time(end_str)}"
-            # 일정이 매칭되면 세션 제목도 캘린더 제목으로 덮어쓰기
-            title_to_use = event_summary
-    except Exception as e:
-        log.warning(f"캘린더 이벤트 매칭 실패: {e}")
-
     _active_sessions[user_id] = {
         "title": title_to_use,
         "started_at": datetime.now(KST).strftime("%Y-%m-%d %H:%M"),
         "notes": [],
-        "event_id": event_id,
-        "event_summary": event_summary,
-        "event_time_str": event_time_str,
+        "event_id": None,
+        "event_summary": None,
+        "event_time_str": None,
         "session_channel": channel,
         "session_thread_ts": thread_ts,
     }
     _save_active_session(user_id)
-
-    if event_id:
-        event_line = f"\n📅 연동된 일정: *{event_summary}* ({event_time_str})"
-    else:
-        event_line = "\n_(캘린더 일정 미연동)_"
     _post(slack_client, user_id=user_id, channel=channel, thread_ts=thread_ts,
-          text=f"✅ *{title_to_use}* 노트 세션 시작{event_line}\n"
+          text=f"✅ *{title_to_use}* 노트 세션 시작\n_(캘린더 일정 미연동)_\n"
                f"`/메모 내용` 으로 실시간 메모를 기록하세요.\n"
                f"미팅이 끝나면 `/미팅종료` 를 입력해주세요.")
 
@@ -840,7 +857,8 @@ def add_note(slack_client, user_id: str, note_text: str, session_title: str = "�
     if user_id not in _active_sessions:
         # 캘린더 이벤트 자동 감지 → 세션 시작 또는 선택 요청
         input_item = {"type": input_type, "content": note_text.strip()}
-        session_started = _auto_start_or_enqueue(slack_client, user_id, input_item)
+        session_started = _auto_start_or_enqueue(slack_client, user_id, input_item,
+                                                  channel=channel)
         if not session_started:
             # 이벤트 선택 대기 중 — 입력은 큐에 저장됨
             return
@@ -926,13 +944,140 @@ def _generate_from_session_end(slack_client, *, user_id: str, event_id: str,
     )
 
 
+def _prompt_input_source_selection(slack_client, user_id: str, session: dict,
+                                    channel: str = None, thread_ts: str = None):
+    """미팅종료 후 회의록 입력 소스 선택 UI 발송."""
+    title = session.get("title", "미팅")
+    note_count = len(session.get("notes", []))
+    note_hint = f" (누적 메모 {note_count}개 있음)" if note_count else ""
+
+    blocks = [
+        {
+            "type": "section",
+            "text": {"type": "mrkdwn",
+                     "text": f"✅ *{title}* 미팅이 종료되었습니다.{note_hint}\n"
+                             f"회의록 생성에 사용할 자료를 선택해주세요."},
+        },
+        {
+            "type": "actions",
+            "elements": [
+                {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "🤖 구글미트 트랜스크립트"},
+                    "action_id": "end_input_transcript",
+                    "style": "primary",
+                },
+                {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "🎙️ 음성 파일 첨부"},
+                    "action_id": "end_input_audio",
+                },
+                {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "📝 수동 메모만 사용"},
+                    "action_id": "end_input_notes_only",
+                },
+                {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "⏭️ 건너뜀"},
+                    "action_id": "end_input_skip",
+                    "style": "danger",
+                },
+            ],
+        },
+    ]
+    resp = slack_client.chat_postMessage(
+        channel=channel or user_id,
+        thread_ts=thread_ts,
+        text="회의록 생성 자료를 선택해주세요.",
+        blocks=blocks,
+    )
+    _pending_end_inputs[user_id] = {
+        "session": session,
+        "channel": channel,
+        "thread_ts": thread_ts,
+        "awaiting_audio": False,
+    }
+
+
+def handle_end_input_selection(slack_client, user_id: str, choice: str):
+    """end_input_* 액션 버튼 콜백.
+
+    choice: "transcript" | "audio" | "notes_only" | "skip"
+    """
+    pending = _pending_end_inputs.get(user_id)
+    if not pending:
+        return
+
+    session = pending["session"]
+    channel = pending.get("channel")
+    thread_ts = pending.get("thread_ts")
+    title = session["title"]
+    notes = session.get("notes", [])
+    event_id = session.get("event_id")
+    started_at = session.get("started_at", "")
+    ended_at = session.get("ended_at", datetime.now(KST).strftime("%H:%M"))
+
+    if choice == "skip":
+        _pending_end_inputs.pop(user_id, None)
+        _post(slack_client, user_id=user_id, channel=channel, thread_ts=thread_ts,
+              text=f"⏭️ *{title}* 회의록 생성을 건너뜁니다.")
+        return
+
+    if choice == "notes_only":
+        _pending_end_inputs.pop(user_id, None)
+        try:
+            creds, minutes_folder_id = _get_creds_and_config(user_id)
+        except Exception as e:
+            _post(slack_client, user_id=user_id, channel=channel, thread_ts=thread_ts,
+                  text=f"⚠️ 인증 오류: {e}")
+            return
+        date_str = datetime.now(KST).strftime("%Y-%m-%d")
+        time_range = f"{started_at.split(' ')[-1]} ~ {ended_at}"
+        notes_text = _format_notes(notes)
+        threading.Thread(
+            target=_generate_and_post_minutes,
+            kwargs=dict(
+                slack_client=slack_client, user_id=user_id,
+                title=title, date_str=date_str, time_range=time_range,
+                attendees="정보 없음",
+                transcript_text="", notes_text=notes_text,
+                minutes_folder_id=minutes_folder_id, creds=creds,
+                event_id=event_id, attendees_raw=[],
+            ),
+            daemon=True,
+        ).start()
+        return
+
+    if choice == "transcript":
+        _pending_end_inputs.pop(user_id, None)
+        eid = event_id or f"manual_{user_id}"
+        threading.Thread(
+            target=_generate_from_session_end,
+            kwargs=dict(
+                slack_client=slack_client, user_id=user_id,
+                event_id=eid,
+                title=title, notes=notes,
+                started_at=started_at, ended_at=ended_at,
+            ),
+            daemon=True,
+        ).start()
+        return
+
+    if choice == "audio":
+        # 음성 파일 업로드 대기
+        pending["awaiting_audio"] = True
+        _post(slack_client, user_id=user_id, channel=user_id,  # DM으로 안내
+              text="🎙️ DM으로 음성 파일을 업로드해주세요. 업로드가 완료되면 자동으로 STT 변환 후 회의록을 생성합니다.")
+
+
 def generate_minutes_now(slack_client, user_id: str, channel: str = None, thread_ts: str = None):
     """/회의록작성 — 세션 종료 + 회의록 생성. /미팅종료와 동일 동작."""
     end_session(slack_client, user_id, channel=channel, thread_ts=thread_ts)
 
 
 def end_session(slack_client, user_id: str, channel: str = None, thread_ts: str = None):
-    """/미팅종료 — 트랜스크립트를 즉시 확인하고 회의록 생성."""
+    """/미팅종료 — 세션을 종료하고 회의록 입력 소스를 선택하도록 안내."""
     if user_id not in _active_sessions:
         _post(slack_client, user_id=user_id, channel=channel, thread_ts=thread_ts,
               text="⚠️ 진행 중인 미팅 세션이 없습니다.\n"
@@ -940,59 +1085,14 @@ def end_session(slack_client, user_id: str, channel: str = None, thread_ts: str 
         return
 
     session = _active_sessions.pop(user_id)
-    title = session["title"]
-    notes = session["notes"]
-    event_id = session["event_id"]
-    event_summary = session.get("event_summary")
-    event_time_str = session.get("event_time_str")
-    started_at = session["started_at"]
-    ended_at = datetime.now(KST).strftime("%H:%M")
-
     _delete_active_session_file(user_id)
 
-    note_count = len(notes)
-    if event_id and event_summary:
-        event_line = f"\n📅 일정: *{event_summary}*" + (f" ({event_time_str})" if event_time_str else "")
-    else:
-        event_line = "\n_(캘린더 미연동)_"
-    _post(slack_client, user_id=user_id, channel=channel, thread_ts=thread_ts,
-          text=f"✅ 세션 종료. 노트 {note_count}개 저장됨.{event_line}\n"
-               f"📡 트랜스크립트를 확인하고 회의록을 생성 중입니다...")
+    # 세션에 종료 시각 기록
+    session["ended_at"] = datetime.now(KST).strftime("%H:%M")
 
-    if event_id:
-        threading.Thread(
-            target=_generate_from_session_end,
-            kwargs=dict(
-                slack_client=slack_client,
-                user_id=user_id,
-                event_id=event_id,
-                title=title,
-                notes=notes,
-                started_at=started_at,
-                ended_at=ended_at,
-            ),
-            daemon=True,
-        ).start()
-    else:
-        # 캘린더 연동 없음 — 동일하게 즉시 생성 (백그라운드 불필요)
-        try:
-            creds, minutes_folder_id = _get_creds_and_config(user_id)
-        except Exception as e:
-            _post(slack_client, user_id=user_id, channel=channel, thread_ts=thread_ts,
-                  text=f"⚠️ 인증 오류: {e}")
-            return
-
-        date_str = datetime.now(KST).strftime("%Y-%m-%d")
-        time_range = f"{started_at.split(' ')[-1]} ~ {ended_at}"
-        notes_text = _format_notes(notes)
-        _generate_and_post_minutes(
-            slack_client, user_id=user_id,
-            title=title, date_str=date_str, time_range=time_range,
-            attendees="정보 없음",
-            transcript_text="", notes_text=notes_text,
-            minutes_folder_id=minutes_folder_id, creds=creds,
-            event_id=None, attendees_raw=[],
-        )
+    # 회의록 입력 소스 선택 UI 표시
+    _prompt_input_source_selection(slack_client, user_id, session,
+                                    channel=channel, thread_ts=thread_ts)
 
 
 # ── 트랜스크립트 폴링 ──────────────────────────────────────────
@@ -1340,8 +1440,11 @@ def _build_minutes_content(title: str, date_str: str, time_range: str,
 
 def _post_combined_minutes(slack_client, *, user_id: str, title: str,
                             source_label: str, internal_body: str, external_body: str,
-                            internal_file_id: str | None, external_file_id: str | None):
-    """내부용·외부용 회의록 Drive 링크를 Slack으로 발송"""
+                            internal_file_id: str | None, external_file_id: str | None,
+                            event_id: str | None = None, date_str: str = ""):
+    """내부용·외부용 회의록 Drive 링크를 Slack으로 발송.
+    발송 후 메시지 ts를 _finalized_minutes_threads에 저장 (스레드 답글 처리용).
+    """
     def drive_link(file_id: str) -> str:
         return f"https://drive.google.com/file/d/{file_id}/view"
 
@@ -1355,14 +1458,24 @@ def _post_combined_minutes(slack_client, *, user_id: str, title: str,
     else:
         external_line = "📤 *외부용*: Drive 저장 실패"
 
-    slack_client.chat_postMessage(
+    resp = slack_client.chat_postMessage(
         channel=user_id,
         text=(
             f"*📋 회의록이 생성되었습니다: {title}*  |  _소스: {source_label}_\n"
             f"{internal_line}\n"
-            f"{external_line}"
+            f"{external_line}\n"
+            f"_이 메시지에 답글을 달면 내부용 회의록을 수정할 수 있습니다._"
         ),
     )
+    if resp and resp.get("ok") and internal_file_id:
+        msg_ts = resp["ts"]
+        _finalized_minutes_threads[(user_id, msg_ts)] = {
+            "title": title,
+            "event_id": event_id,
+            "internal_file_id": internal_file_id,
+            "date_str": date_str,
+        }
+        log.info(f"완성된 회의록 스레드 인덱스 등록: {user_id} / {msg_ts}")
 
 
 # ── 회의록 검토 단계 ──────────────────────────────────────────
@@ -1680,6 +1793,8 @@ def finalize_minutes(slack_client, user_id: str, draft_key: str = None):
         internal_body=internal_body, external_body=external_body,
         internal_file_id=internal_file_id,
         external_file_id=external_file_id,
+        event_id=event_id,
+        date_str=date_str,
     )
 
     threading.Thread(
@@ -1697,6 +1812,100 @@ def finalize_minutes(slack_client, user_id: str, draft_key: str = None):
         ),
         daemon=True,
     ).start()
+
+
+def handle_finalized_minutes_reply(slack_client, user_id: str,
+                                    msg_ts: str, reply_text: str) -> bool:
+    """완성된 회의록 메시지에 달린 스레드 답글 처리.
+
+    해당 메시지가 _finalized_minutes_threads에 등록된 경우 Drive 내부용 회의록을 업데이트.
+    Returns True면 처리됨 (호출자가 일반 메시지 처리를 건너뜀).
+    """
+    entry = _finalized_minutes_threads.get((user_id, msg_ts))
+    if not entry:
+        return False
+
+    title = entry["title"]
+    internal_file_id = entry.get("internal_file_id")
+
+    if not internal_file_id:
+        slack_client.chat_postMessage(
+            channel=user_id,
+            thread_ts=msg_ts,
+            text="⚠️ 이 회의록은 Drive에 저장되지 않아 업데이트할 수 없습니다.",
+        )
+        return True
+
+    slack_client.chat_postMessage(
+        channel=user_id,
+        thread_ts=msg_ts,
+        text=f"🔄 *{title}* 내부용 회의록 업데이트 중...",
+    )
+
+    try:
+        creds, _ = _get_creds_and_config(user_id)
+    except Exception as e:
+        slack_client.chat_postMessage(
+            channel=user_id,
+            thread_ts=msg_ts,
+            text=f"⚠️ 인증 오류: {e}",
+        )
+        return True
+
+    # Drive에서 현재 회의록 내용 읽기
+    try:
+        existing = docs.read_document(creds, internal_file_id)
+    except Exception as e:
+        # docs.read_document가 실패하면 drive 직접 다운로드 시도
+        try:
+            svc = drive._service(creds)
+            content_bytes = svc.files().get_media(fileId=internal_file_id).execute()
+            existing = content_bytes.decode("utf-8") if isinstance(content_bytes, bytes) else content_bytes
+        except Exception as e2:
+            slack_client.chat_postMessage(
+                channel=user_id,
+                thread_ts=msg_ts,
+                text=f"⚠️ 회의록 읽기 실패: {e2}",
+            )
+            return True
+
+    # LLM으로 수정
+    edit_prompt = (
+        f"다음 회의록을 아래 수정 요청에 따라 수정해줘. 반드시 한국어로.\n\n"
+        f"[기존 회의록]\n{existing}\n\n"
+        f"[수정 요청]\n{reply_text}\n\n"
+        f"수정 규칙:\n"
+        f"1. 요청된 부분만 정확히 수정하고, 나머지 내용과 구조는 그대로 유지\n"
+        f"2. 섹션 헤더(##)와 마크다운 형식을 동일하게 유지\n"
+        f"3. 수정된 전체 회의록을 동일한 마크다운 형식으로 반환해줘"
+    )
+    try:
+        updated = _generate_minutes(edit_prompt)
+    except Exception as e:
+        slack_client.chat_postMessage(
+            channel=user_id,
+            thread_ts=msg_ts,
+            text=f"⚠️ LLM 수정 실패: {e}",
+        )
+        return True
+
+    # Drive에 업데이트
+    try:
+        drive.update_file_content(creds, internal_file_id, updated)
+    except Exception as e:
+        slack_client.chat_postMessage(
+            channel=user_id,
+            thread_ts=msg_ts,
+            text=f"⚠️ Drive 업데이트 실패: {e}",
+        )
+        return True
+
+    slack_client.chat_postMessage(
+        channel=user_id,
+        thread_ts=msg_ts,
+        text=f"✅ *{title}* 내부용 회의록이 Drive에서 업데이트되었습니다.",
+    )
+    return True
 
 
 def cancel_minutes(slack_client, user_id: str, draft_key: str = None):
