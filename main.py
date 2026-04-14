@@ -1323,7 +1323,7 @@ def handle_confirm_company_name(ack, body, client):
     handle_company_confirmation(client, body)
 
 
-@app.action("select_attendee_email")
+@app.action(re.compile(r"^select_attendee_email"))
 def handle_select_attendee_email(ack, body, client):
     ack()
     before.handle_email_selection(client, body)

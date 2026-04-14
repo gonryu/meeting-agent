@@ -1,0 +1,16 @@
+[Unit]
+Description=Meeting Agent Slack Bot
+After=network.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/workspace/meeting-agent
+EnvironmentFile=/home/ubuntu/workspace/meeting-agent/.env
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/home/ubuntu/workspace/meeting-agent/.venv/bin/python3.11 main.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

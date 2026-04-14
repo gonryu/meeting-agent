@@ -1278,7 +1278,20 @@ def create_meeting_from_text(slack_client, user_id: str, user_message: str,
             "pending_selections": pending_selections,
             "stage": "email_select",
         }
-        _post_email_selection(slack_client, user_id, pending_selections[0], channel, thread_ts)
+        try:
+            _post_email_selection(slack_client, user_id, pending_selections[0], channel, thread_ts)
+        except Exception as e:
+            log.exception(f"이메일 선택 블록 발송 실패: {e}")
+            # 선택 UI 실패 시 첫 번째 후보로 자동 진행
+            del _pending_meetings[user_id]
+            for sel in pending_selections:
+                attendee_emails.append(sel["candidates"][0])
+            _post(slack_client, user_id=user_id, channel=channel, thread_ts=thread_ts,
+                  text=f"⚠️ 이메일 선택 UI 표시에 실패하여, 첫 번째 후보 이메일로 자동 진행합니다.")
+            _create_calendar_event(
+                slack_client, user_id, info, company, attendee_emails,
+                channel, thread_ts, user_msg_ts=user_msg_ts,
+            )
         return
 
     if missing_names:
@@ -1559,15 +1572,15 @@ def _post_email_selection(slack_client, user_id: str, selection: dict,
             "type": "button",
             "text": {"type": "plain_text", "text": email},
             "value": f"{user_id}|{email}",
-            "action_id": "select_attendee_email",
+            "action_id": f"select_attendee_email_{i}",
         }
-        for email in candidates
+        for i, email in enumerate(candidates)
     ] + [
         {
             "type": "button",
             "text": {"type": "plain_text", "text": "이 참석자 제외"},
             "value": f"{user_id}|__skip__",
-            "action_id": "select_attendee_email",
+            "action_id": f"select_attendee_email_{len(candidates)}",
             "style": "danger",
         }
     ]
