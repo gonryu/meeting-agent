@@ -133,6 +133,9 @@ def trigger_after_meeting(
                     company_names = [c.strip() for c in company_raw.split(",") if c.strip()]
                 except Exception as e:
                     log.warning(f"이벤트 업체명 조회 실패: {e}")
+            if not company_names:
+                company_names = [title]
+                log.info(f"업체명 없음 → 미팅 제목을 Trello 카드명으로 사용: {title}")
             if company_names:
                 if not user_store.get_trello_token(user_id):
                     from server.oauth import build_trello_auth_url
