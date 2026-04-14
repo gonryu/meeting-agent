@@ -28,6 +28,7 @@ from agents.before import (
     research_person,
     generate_text,
     handle_company_confirmation,
+    handle_email_selection,
     _pending_agenda,
     _meeting_drafts,
 )
@@ -1326,7 +1327,7 @@ def handle_confirm_company_name(ack, body, client):
 @app.action(re.compile(r"^select_attendee_email"))
 def handle_select_attendee_email(ack, body, client):
     ack()
-    before.handle_email_selection(client, body)
+    handle_email_selection(client, body)
 
 
 @app.action("suggest_followup_meeting")
