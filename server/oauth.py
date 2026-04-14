@@ -59,6 +59,28 @@ def set_slack_client(client):
     _slack_client = client
 
 
+def _notify_deploy(version: str, changelog: str):
+    """배포 완료 시 관리자 채널에 버전·변경사항 알림"""
+    channel = os.getenv("FEEDBACK_CHANNEL", "")
+    if not channel or not _slack_client:
+        return
+    lines = [f"🚀 *배포 완료* (`{version}`)"]
+    if changelog:
+        lines.append("")
+        # 커밋 메시지에서 Co-Authored-By 제거
+        for line in changelog.splitlines()[:10]:
+            if "Co-Authored-By" not in line:
+                lines.append(line)
+    try:
+        _slack_client.chat_postMessage(
+            channel=channel,
+            text="\n".join(lines),
+        )
+        log.info(f"배포 알림 발송: {channel} ({version})")
+    except Exception as e:
+        log.warning(f"배포 알림 발송 실패: {e}")
+
+
 def build_auth_url(slack_user_id: str) -> str:
     """Google OAuth 인증 URL 생성. 매 호출마다 고유 state 생성."""
     state = f"{slack_user_id}-{uuid.uuid4().hex[:12]}"
@@ -153,17 +175,41 @@ async def deploy_webhook(request: Request):
 
     log.info("배포 웹훅 수신 — git pull + 재시작 시작")
     try:
+        # 배포 전 현재 커밋 해시 기록
+        prev_hash = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            capture_output=True, text=True, timeout=5,
+        ).stdout.strip()
+
         pull = subprocess.run(
             ["git", "pull", "origin", "main"],
             capture_output=True, text=True, timeout=30,
         )
         log.info(f"git pull: {pull.stdout.strip()}")
 
+        # 배포 후 새 커밋 해시
+        new_hash = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            capture_output=True, text=True, timeout=5,
+        ).stdout.strip()
+
+        # 변경된 커밋 메시지 추출 (제목만)
+        changelog = ""
+        if prev_hash and prev_hash != new_hash:
+            log_result = subprocess.run(
+                ["git", "log", f"{prev_hash}..HEAD", "--pretty=format:• %s", "--no-merges"],
+                capture_output=True, text=True, timeout=10,
+            )
+            changelog = log_result.stdout.strip()
+
         pip = subprocess.run(
             [".venv/bin/pip", "install", "-r", "requirements.txt", "--quiet"],
             capture_output=True, text=True, timeout=120,
         )
         log.info(f"pip install: {pip.returncode}")
+
+        # 관리자 채널에 배포 알림
+        _notify_deploy(new_hash, changelog)
 
         subprocess.Popen(
             ["sudo", "systemctl", "restart", "meeting-agent"],
