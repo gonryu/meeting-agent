@@ -1660,8 +1660,9 @@ def _create_calendar_event(slack_client, user_id: str, info: dict, company: str 
             except Exception as e:
                 log.warning(f"업체명 extendedProperties 저장 실패: {e}")
 
-        # 드림플러스 회의실 자동 추천 먼저 (계정 미설정 시 스킵)
+        # 드림플러스 회의실 자동 추천 (계정 미설정 시 스킵)
         attendee_count = len(attendee_emails) + 1  # 참석자 + 주최자
+        log.info(f"auto_book_room 스레드 시작: event_id={event_id}, attendee_count={attendee_count}")
         threading.Thread(
             target=dreamplus_agent.auto_book_room,
             kwargs=dict(

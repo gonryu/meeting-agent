@@ -671,8 +671,10 @@ def auto_book_room(slack_client, *, user_id: str, start_dt: datetime,
     """미팅 생성 직후 자동 호출 — 회의실 추천 버튼 Slack 발송.
     드림플러스 계정 미설정 또는 오류 시 조용히 스킵.
     """
+    log.info(f"auto_book_room 시작: user={user_id}, start={start_dt}, attendees={attendee_count}")
     creds = user_store.get_dreamplus_credentials(user_id)
     if not creds:
+        log.info(f"auto_book_room 스킵: 드림플러스 계정 미설정 (user={user_id})")
         return  # 계정 미설정 → 조용히 스킵
 
     try:
@@ -692,7 +694,9 @@ def auto_book_room(slack_client, *, user_id: str, start_dt: datetime,
 
     all_candidates = _recommend_rooms(rooms, attendee_count, start_dt, end_dt)
     recommended = all_candidates[:3]
+    log.info(f"auto_book_room: 전체 후보={len(all_candidates)}, 추천={len(recommended)}")
     if not recommended:
+        log.info("auto_book_room: 추천 가능한 회의실 없음 (스킵)")
         return
 
     date_str = start_dt.strftime("%m월 %d일")
