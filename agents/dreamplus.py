@@ -209,42 +209,12 @@ def _room_block(room: dict, start_dt: datetime, end_dt: datetime,
 # ── /드림플러스 ───────────────────────────────────────────
 
 def open_settings_modal(slack_client, trigger_id: str, user_id: str):
-    """드림플러스 계정 설정 모달 열기"""
-    existing = user_store.get_dreamplus_credentials(user_id)
-    initial_email = existing[0] if existing else ""
-
-    slack_client.views_open(
-        trigger_id=trigger_id,
-        view={
-            "type": "modal",
-            "callback_id": _MODAL_CALLBACK,
-            "title": {"type": "plain_text", "text": "드림플러스 계정 설정"},
-            "submit": {"type": "plain_text", "text": "저장"},
-            "close": {"type": "plain_text", "text": "취소"},
-            "blocks": [
-                {
-                    "type": "input",
-                    "block_id": "dp_email",
-                    "label": {"type": "plain_text", "text": "드림플러스 이메일"},
-                    "element": {
-                        "type": "plain_text_input",
-                        "action_id": "email_input",
-                        "initial_value": initial_email,
-                        "placeholder": {"type": "plain_text", "text": "example@company.com"},
-                    },
-                },
-                {
-                    "type": "input",
-                    "block_id": "dp_password",
-                    "label": {"type": "plain_text", "text": "비밀번호"},
-                    "element": {
-                        "type": "plain_text_input",
-                        "action_id": "password_input",
-                        "placeholder": {"type": "plain_text", "text": "드림플러스 로그인 비밀번호"},
-                    },
-                },
-            ],
-        },
+    """드림플러스 계정 설정 — 비밀번호 마스킹을 위해 웹 폼 링크 발송"""
+    from server.oauth import build_dreamplus_setup_url
+    url = build_dreamplus_setup_url(user_id)
+    slack_client.chat_postMessage(
+        channel=user_id,
+        text=f"🏢 아래 링크에서 드림플러스 계정을 설정해주세요:\n<{url}|드림플러스 계정 설정>",
     )
 
 
@@ -673,7 +643,12 @@ def auto_book_room(slack_client, *, user_id: str, start_dt: datetime,
     """
     creds = user_store.get_dreamplus_credentials(user_id)
     if not creds:
-        return  # 계정 미설정 → 조용히 스킵
+        from server.oauth import build_dreamplus_setup_url
+        url = build_dreamplus_setup_url(user_id)
+        _post(slack_client, user_id,
+              f"🏢 드림플러스 계정을 설정하면 회의실 예약을 할 수 있습니다.\n<{url}|드림플러스 계정 설정>",
+              channel=channel, thread_ts=thread_ts)
+        return
 
     try:
         jwt, pub_key, member_id, company_id = _get_session(user_id)

@@ -134,21 +134,32 @@ def trigger_after_meeting(
                 except Exception as e:
                     log.warning(f"이벤트 업체명 조회 실패: {e}")
             if company_names:
-                # 회의록 요약 생성 및 캐시 (Trello 카드 description용)
-                eid = event_id or title
-                try:
-                    summary = _generate(_SUMMARIZE_MINUTES_PROMPT.format(
-                        minutes=internal_body))
-                    _minutes_summary_cache[eid] = summary.strip()
-                    log.info(f"회의록 요약 캐시 저장: {eid}")
-                except Exception as e:
-                    log.warning(f"회의록 요약 생성 실패 (무시): {e}")
-                _propose_trello_registration(
-                    slack_client,
-                    user_id=user_id,
-                    event_id=eid,
-                    company_names=company_names,
-                )
+                if not user_store.get_trello_token(user_id):
+                    from server.oauth import build_trello_auth_url
+                    try:
+                        trello_url = build_trello_auth_url(user_id)
+                        slack_client.chat_postMessage(
+                            channel=user_id,
+                            text=f"📌 Trello를 연동하면 액션아이템을 자동으로 등록할 수 있습니다.\n<{trello_url}|Trello 계정 연동>",
+                        )
+                    except Exception as e:
+                        log.warning(f"Trello 안내 발송 실패: {e}")
+                else:
+                    # 회의록 요약 생성 및 캐시 (Trello 카드 description용)
+                    eid = event_id or title
+                    try:
+                        summary = _generate(_SUMMARIZE_MINUTES_PROMPT.format(
+                            minutes=internal_body))
+                        _minutes_summary_cache[eid] = summary.strip()
+                        log.info(f"회의록 요약 캐시 저장: {eid}")
+                    except Exception as e:
+                        log.warning(f"회의록 요약 생성 실패 (무시): {e}")
+                    _propose_trello_registration(
+                        slack_client,
+                        user_id=user_id,
+                        event_id=eid,
+                        company_names=company_names,
+                    )
         except Exception as e:
             log.warning(f"Trello 등록 제안 실패 (무시): {e}")
 

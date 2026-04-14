@@ -6,8 +6,8 @@ import uuid
 from threading import Thread
 from urllib.parse import urlencode
 
-from fastapi import FastAPI, Request
-from fastapi.responses import HTMLResponse
+from fastapi import FastAPI, Request, Form
+from fastapi.responses import HTMLResponse, RedirectResponse
 from pydantic import BaseModel
 from google_auth_oauthlib.flow import Flow
 from googleapiclient.discovery import build
@@ -423,3 +423,102 @@ async def trello_save(req: _TrelloSaveRequest):
     except Exception as e:
         log.error(f"Trello 토큰 저장 실패: {e}")
         return {"ok": False, "error": str(e)}
+
+
+# ── 드림플러스 계정 설정 (웹 폼) ─────────────────────────────────
+
+_pending_dp_states: dict[str, str] = {}   # state → slack_user_id
+
+
+def build_dreamplus_setup_url(slack_user_id: str) -> str:
+    """드림플러스 계정 설정 웹 폼 URL 생성"""
+    state = f"{slack_user_id}-{uuid.uuid4().hex[:12]}"
+    _pending_dp_states[state] = slack_user_id
+    base_url = os.getenv("OAUTH_CALLBACK_URL", "").rsplit("/oauth/callback", 1)[0]
+    return f"{base_url}/dreamplus/setup?state={state}"
+
+
+@app.get("/dreamplus/setup")
+async def dreamplus_setup_form(state: str = ""):
+    """드림플러스 계정 설정 웹 폼 (비밀번호 마스킹)"""
+    if state not in _pending_dp_states:
+        return HTMLResponse("<h3>링크가 만료되었습니다. Slack에서 /드림플러스 를 다시 실행해주세요.</h3>", status_code=400)
+
+    # 기존 이메일 가져오기
+    slack_user_id = _pending_dp_states[state]
+    existing = user_store.get_dreamplus_credentials(slack_user_id)
+    initial_email = existing[0] if existing else ""
+
+    html = f"""<!DOCTYPE html>
+<html><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>드림플러스 계정 설정</title>
+<style>
+  body {{ font-family: -apple-system, sans-serif; max-width: 400px; margin: 60px auto; padding: 0 20px; }}
+  h2 {{ margin-bottom: 24px; }}
+  label {{ display: block; font-weight: 600; margin-bottom: 6px; margin-top: 16px; }}
+  input {{ width: 100%; padding: 10px; border: 1px solid #ccc; border-radius: 6px; font-size: 15px; box-sizing: border-box; }}
+  button {{ margin-top: 24px; width: 100%; padding: 12px; background: #4A154B; color: white; border: none; border-radius: 6px; font-size: 16px; cursor: pointer; }}
+  button:hover {{ background: #611f69; }}
+  .note {{ color: #666; font-size: 13px; margin-top: 6px; }}
+</style>
+</head><body>
+<h2>🏢 드림플러스 계정 설정</h2>
+<form method="POST" action="/dreamplus/save">
+  <input type="hidden" name="state" value="{state}">
+  <label>이메일</label>
+  <input type="email" name="email" value="{initial_email}" placeholder="example@company.com" required>
+  <label>비밀번호</label>
+  <input type="password" name="password" placeholder="드림플러스 로그인 비밀번호" required>
+  <p class="note">🔒 비밀번호는 암호화되어 저장되며, 회의실 예약에만 사용됩니다.</p>
+  <button type="submit">저장</button>
+</form>
+</body></html>"""
+    return HTMLResponse(html)
+
+
+@app.post("/dreamplus/save")
+async def dreamplus_save(state: str = Form(...), email: str = Form(...), password: str = Form(...)):
+    """드림플러스 계정 저장 처리"""
+    slack_user_id = _pending_dp_states.pop(state, None)
+    if not slack_user_id:
+        return HTMLResponse("<h3>링크가 만료되었습니다. Slack에서 /드림플러스 를 다시 실행해주세요.</h3>", status_code=400)
+
+    email = email.strip()
+    password = password.strip()
+    if not email or not password:
+        return HTMLResponse("<h3>이메일과 비밀번호를 모두 입력해주세요.</h3>", status_code=400)
+
+    # 로그인 테스트
+    try:
+        from tools import dreamplus as dp
+        jwt, pub_key, member_id, company_id = dp.login(email, password)
+        user_store.save_dreamplus_credentials(slack_user_id, email, password)
+        user_store.save_dreamplus_jwt(slack_user_id, jwt, pub_key, member_id, company_id)
+        log.info(f"드림플러스 계정 설정 완료 (웹): {slack_user_id} ({email})")
+
+        if _slack_client:
+            _slack_client.chat_postMessage(
+                channel=slack_user_id,
+                text="✅ 드림플러스 계정이 설정되었습니다.",
+            )
+
+        return HTMLResponse("""<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>완료</title>
+<style>body { font-family: -apple-system, sans-serif; max-width: 400px; margin: 60px auto; padding: 0 20px; text-align: center; }</style>
+</head><body>
+<h2>✅ 설정 완료</h2>
+<p>드림플러스 계정이 연결되었습니다.<br>이 창을 닫아주세요.</p>
+</body></html>""")
+
+    except Exception as e:
+        log.warning(f"드림플러스 로그인 실패 (웹): {slack_user_id} — {e}")
+        return HTMLResponse(f"""<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>오류</title>
+<style>body {{ font-family: -apple-system, sans-serif; max-width: 400px; margin: 60px auto; padding: 0 20px; text-align: center; }}</style>
+</head><body>
+<h2>❌ 로그인 실패</h2>
+<p>이메일 또는 비밀번호를 확인해주세요.</p>
+<p style="color:#999; font-size:13px;">{str(e)[:200]}</p>
+<p><a href="javascript:history.back()">← 다시 시도</a></p>
+</body></html>""", status_code=400)
