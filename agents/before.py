@@ -104,16 +104,17 @@ def _infer_company_from_title(title: str, company_candidates: list[str] = None) 
         f"다음 회의 제목에서 업체(회사)명을 추출하세요.{candidates_text}\n\n"
         f"## 규칙\n"
         f"- 제목에 업체명이 명시되어 있으면 그대로 반환\n"
-        f"- 인물명만 있으면 빈 문자열 반환 (업체명이 아님)\n"
+        f"- 인물명만 있으면 NONE 반환 (업체명이 아님)\n"
+        f"- 업체명을 알 수 없으면 반드시 NONE만 반환\n"
         f"- 기존 업체 목록에 유사한 이름이 있으면 목록의 정확한 이름 사용\n"
         f"- 약어나 영문명도 기존 목록과 매칭 (예: '카카오' = 'Kakao')\n"
-        f"- 업체명만 반환하고, 설명이나 부연은 하지 마세요\n\n"
+        f"- 업체명 또는 NONE 한 단어만 반환. 설명, 이유, 부연 금지\n\n"
         f"회의 제목: {title}\n업체명:"
     )
     try:
         result = _generate(prompt).strip().strip('"').strip("'")
         # 빈 응답이나 "없음" 등은 빈 문자열로 처리
-        if not result or result in ("없음", "없다", "N/A", "null", "-"):
+        if not result or result.upper() == "NONE" or result in ("없음", "없다", "N/A", "null", "-"):
             return ""
         return result
     except Exception as e:
@@ -537,14 +538,34 @@ def research_company(user_id: str, company_name: str, force: bool = False) -> tu
         except Exception as e:
             log.warning(f"Sources/Research 저장 실패 ({company_name}): {e}")
 
-    # 섹션 순서: 최근 동향 → 이메일 맥락 → 파라메타 서비스 연결점 → ParaScope 브리핑
+    # 기존 파일에서 리서치 대상이 아닌 섹션(내부 메모 등) 보존
+    preserved_sections = ""
+    if content:
+        _RESEARCH_HEADERS = {"# ", "## 최근 동향", "## 이메일 맥락", "## 파라메타 서비스 연결점", "## ParaScope"}
+        current_section = []
+        is_preserved = False
+        for line in content.splitlines():
+            if line.startswith("## ") or line.startswith("# "):
+                # 이전 보존 섹션 저장
+                if is_preserved and current_section:
+                    preserved_sections += "\n".join(current_section) + "\n\n"
+                # 새 섹션 판별: 리서치 대상 헤더가 아니면 보존
+                is_preserved = not any(line.startswith(h) for h in _RESEARCH_HEADERS)
+                current_section = [line] if is_preserved else []
+            elif is_preserved:
+                current_section.append(line)
+        if is_preserved and current_section:
+            preserved_sections += "\n".join(current_section) + "\n\n"
+
+    # 섹션 순서: 최근 동향 → 이메일 맥락 → 파라메타 서비스 연결점 → ParaScope → 보존 섹션
     new_content = (
         f"# {company_name}\n\n"
         f"## 최근 동향\n- last_searched: {today}\n{news_text}\n\n"
         f"{email_section}\n"
         f"## 파라메타 서비스 연결점\n{connections}\n\n"
         f"{parascope_section}"
-    )
+        f"{preserved_sections}"
+    ).rstrip() + "\n"
     file_id = drive.save_company_info(creds, contacts_folder_id, company_name, new_content, file_id)
     return new_content, file_id
 

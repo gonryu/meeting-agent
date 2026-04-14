@@ -25,6 +25,9 @@ Before Agent  →  During Agent  →  After Agent
 | **After** | 내부용·외부용 회의록 초안 검토/편집 후 Drive 저장 |
 | **After** | 외부용 회의록 Gmail 발송 (사용자 승인 후) |
 | **After** | 액션아이템 추출 → 담당자 DM → 매일 08:00 리마인더 |
+| **검색** | 회의록 검색 (업체명·회의명·날짜 — 자연어 지원: "지난 목요일", "4월 13일", "지난달") |
+| **메모** | 업체 메모 저장 (`카카오 메모 — PoC 예산 확보`) → Drive 업체 Wiki 파일에 기록 |
+| **제안서** | 회의 기반 제안서 개요·초안 생성 (스레드에서 수정 가능) |
 | **Feedback** | 사용자 피드백 (기능 요청·개선·버그) 수집 → 매일 08:00 관리자 다이제스트 발송 |
 
 ---
@@ -431,7 +434,7 @@ ENCRYPTION_KEY=abc123...==
 | `/메모`                     | 미팅 중 노트 추가 (세션 없으면 자동 시작)   |
 | `/미팅종료`                   | 세션 종료 + 회의록 즉시 생성 + 검토 단계   |
 | `/회의록작성`                  | 회의록 수동 생성                   |
-| `/회의록`                    | 저장된 회의록 목록 조회               |
+| `/회의록`                    | 저장된 회의록 목록 조회 (검색어 지원: `/회의록 카카오`, `/회의록 2026-04`) |
 | `/업데이트` / `/update`       | company_knowledge.md 갱신     |
 | `/드림플러스` / `/dreamplus` | 드림플러스 계정 등록/변경              |
 | `/회의실예약`                  | 드림플러스 회의실 예약               |
@@ -444,7 +447,7 @@ ENCRYPTION_KEY=abc123...==
 | `/도움말` / `/help`          | 사용 가능한 커맨드 및 자연어 명령어 안내     |
 
 
-자연어 DM도 지원합니다 (`브리핑 해줘`, `내일 3시 KISA 미팅 잡아줘`, `~기능 추가해줘`, `~버그 같아` 등).
+자연어 DM도 지원합니다 (`브리핑 해줘`, `내일 3시 KISA 미팅 잡아줘`, `지난 목요일 회의록`, `카카오 메모 — PoC 예산 확보`, `~기능 추가해줘`, `~버그 같아` 등).
 
 ---
 
@@ -504,9 +507,11 @@ prompts/templates/
 ```
 MeetingAgent/
 ├── Contacts/
-│   ├── Companies/          # {업체명}.md
+│   ├── Companies/          # {업체명}.md (리서치 결과 + 내부 메모)
 │   └── People/             # {이름}.md
 ├── Minutes/                # {날짜}_{제목}_내부용.md / _외부용.md
+├── Sources/                # 원본 데이터 보관
+│   └── Research/           # {날짜}_{업체명}_web_search.md
 └── company_knowledge.md    # 자사 서비스 요약
 ```
 
@@ -525,6 +530,7 @@ meeting-agent/
 │   ├── before.py           # Before 에이전트 (브리핑, 리서치, 미팅 생성)
 │   ├── during.py           # During 에이전트 (트랜스크립트, 노트, 회의록 검토)
 │   ├── after.py            # After 에이전트 (회의록 발송, 액션아이템, Trello 등록)
+│   ├── proposal.py         # 제안서 에이전트 (개요·초안 생성, 스레드 수정)
 │   ├── card.py             # 명함 OCR 에이전트
 │   ├── room.py             # 드림플러스 회의실 예약·조회·취소 (Slack Modal)
 │   ├── dreamplus.py        # 드림플러스 API 래퍼 (JWT 인증)
@@ -547,7 +553,9 @@ meeting-agent/
 │       ├── briefing_summary.md
 │       ├── company_news.md
 │       ├── person_info.md
-│       └── service_connection.md
+│       ├── service_connection.md
+│       ├── proposal_intake.md
+│       └── proposal_generate.md
 ├── store/
 │   └── user_store.py       # SQLite + Fernet 사용자 토큰 관리
 ├── server/
