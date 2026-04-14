@@ -1698,6 +1698,8 @@ def handle_email_selection(slack_client, body: dict):
     value = body["actions"][0]["value"]
     pending = _pending_meetings.get(user_id)
     if not pending:
+        _post(slack_client, user_id=user_id,
+              text="⚠️ 선택 세션이 만료되었습니다 (서버 재시작 등). 미팅 생성을 다시 요청해주세요.")
         return
 
     _, email = value.split("|", 1)
