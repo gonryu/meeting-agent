@@ -94,11 +94,9 @@ def send_feedback_digest(slack_client) -> None:
             user_tag = f"<@{it['user_id']}>"
             date_str = it["created_at"][:10]
             lines.append(f"  • {it['content']} — {user_tag} ({date_str})")
+            # 요약과 다르면 원문 전체 표시 (B4: 여과·축약 없이 전달)
             if it["original"] != it["content"]:
-                original_preview = it["original"][:80]
-                if len(it["original"]) > 80:
-                    original_preview += "…"
-                lines.append(f"    _{original_preview}_")
+                lines.append(f"    _{it['original']}_")
         lines.append("")
 
     try:

@@ -117,7 +117,7 @@ scheduler.add_job(scheduled_briefing, "cron", hour=9, minute=0)
 scheduler.add_job(scheduled_transcript_check, "interval", minutes=10,
                   next_run_time=_dt.now())
 scheduler.add_job(scheduled_action_item_reminder, "cron", hour=8, minute=0)
-scheduler.add_job(scheduled_feedback_digest, "cron", hour=8, minute=0)
+scheduler.add_job(scheduled_feedback_digest, "cron", hour=22, minute=0)
 
 
 # ── @멘션 처리 ───────────────────────────────────────────────

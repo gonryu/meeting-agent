@@ -1265,6 +1265,11 @@ def create_meeting_from_text(slack_client, user_id: str, user_message: str,
         else:
             missing_names.append(name)
 
+    # 생성자 본인을 항상 참석자에 포함 — Slack 프로필 이메일로 조회 (B5)
+    creator_email = _lookup_slack_email(slack_client, user_id)
+    if creator_email and creator_email.lower() not in {e.lower() for e in attendee_emails}:
+        attendee_emails.insert(0, creator_email)
+
     # 확정된 참석자만으로 일정 먼저 생성 (이메일 미확정·미발견 참석자는 나중에 추가)
     notices = []
     if pending_selections:
@@ -1304,6 +1309,17 @@ def create_meeting_from_text(slack_client, user_id: str, user_message: str,
             slack_client, user_id, company_candidates,
             event_id=created_event_id, channel=channel, thread_ts=thread_ts,
         )
+
+
+def _lookup_slack_email(slack_client, user_id: str) -> str | None:
+    """Slack 사용자 프로필에서 이메일 조회. 실패 시 None."""
+    try:
+        info = slack_client.users_info(user=user_id)
+        email = (info.get("user", {}).get("profile", {}) or {}).get("email", "").strip()
+        return email or None
+    except Exception as e:
+        log.warning(f"Slack 이메일 조회 실패 ({user_id}): {e}")
+        return None
 
 
 def _find_email_candidates(user_id: str, name: str, slack_client) -> list[str]:
