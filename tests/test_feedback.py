@@ -7,8 +7,7 @@ os.environ.setdefault("INTERNAL_DOMAINS", "parametacorp.com,iconloop.com")
 import pytest
 from unittest.mock import patch, MagicMock
 
-with patch("google.genai.Client"), \
-     patch("anthropic.Anthropic"), \
+with patch("anthropic.Anthropic"), \
      patch("tools.calendar._service"), \
      patch("tools.drive._service"), \
      patch("tools.gmail._service"):

@@ -27,8 +27,7 @@ from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-with patch("google.genai.Client"), \
-     patch("anthropic.Anthropic"), \
+with patch("anthropic.Anthropic"), \
      patch("trello.TrelloClient"):
     import agents.during as during
     from agents.during import (

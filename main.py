@@ -29,8 +29,22 @@ from agents.before import (
     generate_text,
     handle_company_confirmation,
     handle_email_selection,
+    cancel_meeting_from_text,
+    suggest_meeting_slots,
+    handle_meeting_cancel_confirm,
+    handle_meeting_cancel_abort,
+    handle_meeting_cancel_with_room,
+    handle_meeting_cancel_event_only,
+    handle_meeting_cancel_abort_both,
+    handle_slot_create_meeting,
+    handle_create_confirm,
+    handle_create_abort,
+    handle_room_offer_show,
+    handle_room_offer_skip,
     _pending_agenda,
     _meeting_drafts,
+    _pending_create_confirm,
+    _pending_room_offer,
 )
 from agents.during import (
     start_session,
@@ -43,11 +57,13 @@ from agents.during import (
     cancel_minutes,
     request_minutes_edit,
     handle_minutes_edit_reply,
+    handle_minutes_source_select,
     handle_event_selection,
     handle_event_title_reply,
     _pending_minutes,
     _pending_inputs,
     _find_draft_for_user,
+    find_draft_by_thread_ts,
     get_session_thread,
 )
 from agents import after
@@ -84,6 +100,26 @@ def _check_registered(client, user_id: str, channel: str = None) -> bool:
     return False
 
 
+# ── 버튼 권한 검증 헬퍼 (I5) ─────────────────────────────────
+
+def _ensure_creator(client, body: dict, expected_user_id: str | None) -> bool:
+    """채널/스레드에 노출된 버튼을 요청자(생성자) 본인만 누를 수 있도록 가드.
+    expected_user_id가 None이거나 클릭한 사용자와 일치하면 True.
+    불일치 시 ephemeral 안내 후 False."""
+    clicker = body.get("user", {}).get("id")
+    if not expected_user_id or expected_user_id == clicker:
+        return True
+    try:
+        client.chat_postEphemeral(
+            channel=body.get("container", {}).get("channel_id") or clicker,
+            user=clicker,
+            text="⚠️ 이 작업은 요청자 본인만 진행할 수 있습니다.",
+        )
+    except Exception as e:
+        log.warning(f"권한 거부 ephemeral 발송 실패: {e}")
+    return False
+
+
 # ── 매일 09:00 자동 브리핑 ───────────────────────────────────
 
 def scheduled_briefing():
@@ -117,7 +153,7 @@ scheduler.add_job(scheduled_briefing, "cron", hour=9, minute=0)
 scheduler.add_job(scheduled_transcript_check, "interval", minutes=10,
                   next_run_time=_dt.now())
 scheduler.add_job(scheduled_action_item_reminder, "cron", hour=8, minute=0)
-scheduler.add_job(scheduled_feedback_digest, "cron", hour=8, minute=0)
+scheduler.add_job(scheduled_feedback_digest, "cron", hour=22, minute=0)
 
 
 # ── @멘션 처리 ───────────────────────────────────────────────
@@ -233,14 +269,14 @@ def handle_message(event, client):
         if not _check_registered(client, user_id):
             return
 
-        # 회의록 수정 요청 스레드 답글 감지 (FR-D14: event_id 키 방식)
+        # 회의록 수정 요청 스레드 답글 감지 — thread_ts로 정확한 초안 매칭 (B3)
         if thread_ts and user_id:
-            _found = _find_draft_for_user(user_id)
-            draft = _found[1] if _found else None
-            if draft and draft.get("draft_ts") == thread_ts:
+            found = find_draft_by_thread_ts(user_id, thread_ts)
+            if found:
                 threading.Thread(
                     target=handle_minutes_edit_reply,
                     args=(client, user_id, text),
+                    kwargs=dict(thread_ts=thread_ts),
                     daemon=True,
                 ).start()
                 return
@@ -356,6 +392,8 @@ _INTENT_PROMPT = """사용자의 Slack 메시지를 분석해서 의도(intent)�
 가능한 intent 목록:
 - briefing: 브리핑 요청 (예: "브리핑 해줘", "오늘 미팅 현황", "brief", "이번주 일정 브리핑", "앞으로 3일 일정")
 - create_meeting: 미팅/일정 생성 (예: "내일 3시에 KISA 미팅 잡아줘", "오늘 15시 홍길동 회의 만들어줘")
+- cancel_meeting: 캘린더 일정 취소 — 드림플러스 회의실 예약 취소가 아니라 *Google Calendar 미팅*을 취소 (예: "내일 3시 카카오 미팅 취소해줘", "오늘 KISA 회의 삭제", "4/18 회의 지워줘")
+- suggest_slots: 여러 참석자의 빈 시간대 추천 (예: "김민환, 홍길동이랑 다음주에 1시간 미팅 가능한 시간 찾아줘", "이번주 중에 팀 전체 2시간 비는 시간 알려줘")
 - start_session: 미팅 시작 (예: "미팅 시작", "회의 시작해줘", "지금부터 KISA 회의 시작")
 - add_note: 메모 추가 — 현재 진행 중인 회의에 내용 기록 (예: "메모: 예산 협의됨", "기록해줘 다음달 계약 예정", "노트 추가")
 - end_session: 미팅 종료 (예: "미팅 종료", "회의 끝났어", "미팅 마무리해줘")
@@ -384,6 +422,8 @@ params 추출 규칙:
   - "이번주"는 이번주 토요일까지, "일주일"/"7일간"은 오늘 기준 7일간 (다름!)
   - 기간 언급 없으면 → start_date와 end_date 모두 null, period_text="향후 24시간" (기본값)
 - create_meeting: params 없음 (원본 메시지 전체를 그대로 사용)
+- cancel_meeting: params 없음 (원본 메시지 전체를 그대로 사용)
+- suggest_slots: params 없음 (원본 메시지 전체를 그대로 사용)
 - start_session: {{"title": "미팅 제목 (없으면 빈 문자열)"}}
 - add_note: {{"note": "메모 내용 ('메모:', '기록해줘' 등 트리거 단어 제거 후)"}}
 - research_company: {{"company": "업체명"}}
@@ -680,6 +720,24 @@ def _route_message(text: str, client, user_id: str, channel: str = None,
         create_meeting_from_text(client, user_id=user_id, user_message=text,
                                  channel=channel, thread_ts=thread_ts,
                                  user_msg_ts=user_msg_ts)
+
+    elif intent == "cancel_meeting":
+        threading.Thread(
+            target=cancel_meeting_from_text,
+            args=(client,),
+            kwargs=dict(user_id=user_id, user_message=text,
+                        channel=channel, thread_ts=thread_ts),
+            daemon=True,
+        ).start()
+
+    elif intent == "suggest_slots":
+        threading.Thread(
+            target=suggest_meeting_slots,
+            args=(client,),
+            kwargs=dict(user_id=user_id, user_message=text,
+                        channel=channel, thread_ts=thread_ts),
+            daemon=True,
+        ).start()
 
     elif intent == "start_session":
         title = params.get("title", "").strip() or "미팅"
@@ -1251,11 +1309,22 @@ app.action("select_meeting_event_new")(_handle_meeting_event_select)
 
 # ── 회의록 검토 액션 핸들러 ─────────────────────────────────
 
+def _draft_owner(draft_key: str | None) -> str | None:
+    """draft_key 소유자 user_id 조회 (없으면 None)"""
+    if not draft_key:
+        return None
+    d = _pending_minutes.get(draft_key)
+    return d.get("user_id") if d else None
+
+
 @app.action("minutes_confirm")
 def handle_minutes_confirm(ack, body, client):
     ack()
-    user_id = body["user"]["id"]
     draft_key = body.get("actions", [{}])[0].get("value", "") or None
+    if not _ensure_creator(client, body, _draft_owner(draft_key)):
+        return
+    # user_id는 draft 소유자로 설정 (클릭한 사람이 아닌)
+    user_id = _draft_owner(draft_key) or body["user"]["id"]
     threading.Thread(
         target=finalize_minutes,
         args=(client, user_id),
@@ -1267,22 +1336,195 @@ def handle_minutes_confirm(ack, body, client):
 @app.action("minutes_edit_request")
 def handle_minutes_edit_request(ack, body, client):
     ack()
-    user_id = body["user"]["id"]
     draft_key = body.get("actions", [{}])[0].get("value", "") or None
+    if not _ensure_creator(client, body, _draft_owner(draft_key)):
+        return
+    user_id = _draft_owner(draft_key) or body["user"]["id"]
     request_minutes_edit(client, user_id, draft_key=draft_key)
 
 
 @app.action("minutes_cancel")
 def handle_minutes_cancel(ack, body, client):
     ack()
-    user_id = body["user"]["id"]
     draft_key = body.get("actions", [{}])[0].get("value", "") or None
+    if not _ensure_creator(client, body, _draft_owner(draft_key)):
+        return
+    user_id = _draft_owner(draft_key) or body["user"]["id"]
     cancel_minutes(client, user_id, draft_key=draft_key)
 
 
 @app.action("minutes_open_doc")
 def handle_minutes_open_doc(ack, body, client):
     ack()  # URL 버튼 — 브라우저에서 열림, 별도 처리 불필요
+
+
+# ── 회의록 소스 선택 액션 핸들러 (I1) ────────────────────────
+
+def _handle_minutes_src(ack, body, client):
+    """I1: /미팅종료 후 회의록 소스 선택 버튼 콜백 (I5: 본인만 허용)"""
+    ack()
+    action = body.get("actions", [{}])[0]
+    action_id = action.get("action_id", "")
+    source = action_id.removeprefix("minutes_src_")  # transcript | notes | wait | cancel
+    event_id = action.get("value", "")
+    if not event_id:
+        return
+    # I5: 소스 선택 대기 payload의 원 소유자만 클릭 가능
+    from agents.during import _pending_source_select
+    payload = _pending_source_select.get(event_id)
+    expected = payload.get("user_id") if payload else None
+    if not _ensure_creator(client, body, expected):
+        return
+    user_id = expected or body["user"]["id"]
+    threading.Thread(
+        target=handle_minutes_source_select,
+        args=(client, user_id, event_id, source),
+        kwargs=dict(body=body),
+        daemon=True,
+    ).start()
+
+for _src in ("transcript", "notes", "wait", "cancel"):
+    app.action(f"minutes_src_{_src}")(_handle_minutes_src)
+
+
+# ── F2: 일정 취소 액션 핸들러 ────────────────────────────────
+
+def _handle_meeting_cancel_confirm(ack, body, client):
+    ack()
+    user_id = body["user"]["id"]
+    event_id = body.get("actions", [{}])[0].get("value", "")
+    if not event_id:
+        return
+    threading.Thread(
+        target=handle_meeting_cancel_confirm,
+        args=(client, user_id, event_id),
+        kwargs=dict(body=body),
+        daemon=True,
+    ).start()
+
+# 단일 후보(확인 블록) + 복수 후보(선택 블록, 인덱스 접미사) 모두 대응
+app.action("meeting_cancel_confirm")(_handle_meeting_cancel_confirm)
+for _i in range(5):
+    app.action(f"meeting_cancel_confirm_{_i}")(_handle_meeting_cancel_confirm)
+
+
+@app.action("meeting_cancel_abort")
+def _handle_meeting_cancel_abort(ack, body, client):
+    ack()
+    user_id = body["user"]["id"]
+    event_id = body.get("actions", [{}])[0].get("value", "")
+    handle_meeting_cancel_abort(client, user_id, event_id, body=body)
+
+
+@app.action("meeting_cancel_with_room")
+def _handle_meeting_cancel_with_room(ack, body, client):
+    ack()
+    user_id = body["user"]["id"]
+    event_id = body.get("actions", [{}])[0].get("value", "")
+    threading.Thread(
+        target=handle_meeting_cancel_with_room,
+        args=(client, user_id, event_id),
+        kwargs=dict(body=body),
+        daemon=True,
+    ).start()
+
+
+@app.action("meeting_cancel_event_only")
+def _handle_meeting_cancel_event_only(ack, body, client):
+    ack()
+    user_id = body["user"]["id"]
+    event_id = body.get("actions", [{}])[0].get("value", "")
+    threading.Thread(
+        target=handle_meeting_cancel_event_only,
+        args=(client, user_id, event_id),
+        kwargs=dict(body=body),
+        daemon=True,
+    ).start()
+
+
+@app.action("meeting_cancel_abort_both")
+def _handle_meeting_cancel_abort_both(ack, body, client):
+    ack()
+    user_id = body["user"]["id"]
+    event_id = body.get("actions", [{}])[0].get("value", "")
+    handle_meeting_cancel_abort_both(client, user_id, event_id, body=body)
+
+
+# ── F1: 슬롯 추천 → 미팅 생성 ───────────────────────────────
+
+def _handle_slot_create(ack, body, client):
+    ack()
+    user_id = body["user"]["id"]
+    slot_value = body.get("actions", [{}])[0].get("value", "")
+    if not slot_value:
+        return
+    threading.Thread(
+        target=handle_slot_create_meeting,
+        args=(client, user_id, slot_value),
+        kwargs=dict(body=body),
+        daemon=True,
+    ).start()
+
+for _i in range(5):
+    app.action(f"slot_create_meeting_{_i}")(_handle_slot_create)
+
+
+# ── I2(a): 미팅 생성 확인 ────────────────────────────────────
+
+@app.action("create_confirm")
+def _handle_create_confirm(ack, body, client):
+    ack()
+    draft_id = body.get("actions", [{}])[0].get("value", "")
+    # I5: 생성 확인은 요청자 본인만
+    payload = _pending_create_confirm.get(draft_id)
+    expected = payload.get("user_id") if payload else None
+    if not _ensure_creator(client, body, expected):
+        return
+    user_id = expected or body["user"]["id"]
+    threading.Thread(
+        target=handle_create_confirm,
+        args=(client, user_id, draft_id),
+        kwargs=dict(body=body),
+        daemon=True,
+    ).start()
+
+
+@app.action("create_abort")
+def _handle_create_abort(ack, body, client):
+    ack()
+    draft_id = body.get("actions", [{}])[0].get("value", "")
+    payload = _pending_create_confirm.get(draft_id)
+    expected = payload.get("user_id") if payload else None
+    if not _ensure_creator(client, body, expected):
+        return
+    user_id = expected or body["user"]["id"]
+    handle_create_abort(client, user_id, draft_id, body=body)
+
+
+# ── I2(b): 회의실 예약 여부 확인 ────────────────────────────
+
+@app.action("room_offer_show")
+def _handle_room_offer_show(ack, body, client):
+    ack()
+    offer_id = body.get("actions", [{}])[0].get("value", "")
+    payload = _pending_room_offer.get(offer_id)
+    expected = payload.get("user_id") if payload else None
+    if not _ensure_creator(client, body, expected):
+        return
+    user_id = expected or body["user"]["id"]
+    handle_room_offer_show(client, user_id, offer_id, body=body)
+
+
+@app.action("room_offer_skip")
+def _handle_room_offer_skip(ack, body, client):
+    ack()
+    offer_id = body.get("actions", [{}])[0].get("value", "")
+    payload = _pending_room_offer.get(offer_id)
+    expected = payload.get("user_id") if payload else None
+    if not _ensure_creator(client, body, expected):
+        return
+    user_id = expected or body["user"]["id"]
+    handle_room_offer_skip(client, user_id, offer_id, body=body)
 
 
 # ── 명함 OCR 액션 핸들러 ────────────────────────────────────

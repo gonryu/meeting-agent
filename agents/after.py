@@ -16,7 +16,6 @@ from datetime import date, timedelta
 from zoneinfo import ZoneInfo
 
 import anthropic
-from google import genai
 
 from store import user_store
 from tools import calendar as cal, drive, gmail, trello
@@ -30,8 +29,6 @@ _person_cache: dict[str, dict] = {}
 # 회의록 요약 캐시 (event_id → summary text) — Trello 카드 description용
 _minutes_summary_cache: dict[str, str] = {}
 
-_gemini = genai.Client(api_key=os.getenv("GOOGLE_API_KEY"))
-_GEMINI_MODEL = "gemini-2.0-flash"
 _claude = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
 _CLAUDE_MODEL = "claude-haiku-4-5"
 
@@ -48,18 +45,13 @@ _FOLLOWUP_PATTERNS = [
 # ── LLM ──────────────────────────────────────────────────────
 
 def _generate(prompt: str) -> str:
-    """Gemini 우선, 실패 시 Claude 폴백"""
-    try:
-        resp = _gemini.models.generate_content(model=_GEMINI_MODEL, contents=prompt)
-        return resp.text.strip()
-    except Exception as e:
-        log.warning(f"Gemini _generate 실패, Claude로 폴백: {e}")
-        resp = _claude.messages.create(
-            model=_CLAUDE_MODEL,
-            max_tokens=2048,
-            messages=[{"role": "user", "content": prompt}],
-        )
-        return resp.content[0].text.strip()
+    """Claude LLM 호출"""
+    resp = _claude.messages.create(
+        model=_CLAUDE_MODEL,
+        max_tokens=2048,
+        messages=[{"role": "user", "content": prompt}],
+    )
+    return resp.content[0].text.strip()
 
 
 # ── 진입점 ───────────────────────────────────────────────────

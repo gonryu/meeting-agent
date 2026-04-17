@@ -12,7 +12,6 @@ import os
 import threading
 
 import anthropic
-from google import genai
 
 from store import user_store
 from tools import drive
@@ -20,8 +19,6 @@ from prompts.briefing import proposal_intake_prompt, proposal_generate_prompt
 
 log = logging.getLogger(__name__)
 
-_gemini = genai.Client(api_key=os.getenv("GOOGLE_API_KEY"))
-_GEMINI_MODEL = "gemini-2.0-flash"
 _claude = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
 _CLAUDE_MODEL = "claude-sonnet-4-5"  # 제안서는 고품질 모델 사용
 
@@ -42,18 +39,13 @@ _proposals_lock = threading.Lock()
 # ── LLM 헬퍼 ───────────────────────────────────────────────────
 
 def _generate(prompt: str) -> str:
-    """Gemini 우선, 실패 시 Claude 폴백"""
-    try:
-        resp = _gemini.models.generate_content(model=_GEMINI_MODEL, contents=prompt)
-        return resp.text.strip()
-    except Exception as e:
-        log.warning(f"Gemini _generate 실패, Claude로 폴백: {e}")
-        resp = _claude.messages.create(
-            model=_CLAUDE_MODEL,
-            max_tokens=4096,
-            messages=[{"role": "user", "content": prompt}],
-        )
-        return resp.content[0].text.strip()
+    """Claude LLM 호출"""
+    resp = _claude.messages.create(
+        model=_CLAUDE_MODEL,
+        max_tokens=4096,
+        messages=[{"role": "user", "content": prompt}],
+    )
+    return resp.content[0].text.strip()
 
 
 def _generate_proposal(prompt: str) -> str:

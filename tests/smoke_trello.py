@@ -21,8 +21,7 @@ logging.basicConfig(level=logging.INFO, format="%(levelname)s  %(message)s")
 from unittest.mock import patch, MagicMock
 
 # 외부 서비스 차단
-with patch("google.genai.Client"), \
-     patch("anthropic.Anthropic"), \
+with patch("anthropic.Anthropic"), \
      patch("tools.calendar._service"), \
      patch("tools.drive._service"), \
      patch("tools.gmail._service"):
