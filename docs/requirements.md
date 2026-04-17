@@ -105,6 +105,7 @@ Before Agent   →   During Agent   →   After Agent
 | `/trello`               | Trello 계정 연결                         | ✅   |
 | `/trello-disconnect`    | Trello 계정 해제                         | ✅   |
 | `/트렐로조회` / `/trello-search` | Trello 카드 목록 조회 / 업체명 검색       | ✅   |
+| `/트렐로주간보고` / `/trello-weekly` | Trello 주간 보고서 수동 생성 (인자로 일수 지정 가능) | ✅   |
 | `/설정`                  | 사용자별 설정 변경                          | ❌   |
 
 
@@ -132,6 +133,7 @@ Before Agent   →   During Agent   →   After Agent
 | `dreamplus_credits` | "크레딧 얼마나 남았어" |
 | `dreamplus_settings` | "드림플러스 설정" |
 | `trello_search` | "트렐로 카드 보여줘", "삼성 트렐로 카드" |
+| `trello_weekly_report` | "주간보고서", "트렐로 주간 보고", "이번주 트렐로 요약", "지난 2주 트렐로 보고서" |
 | `feedback` | "~기능 추가해줘", "~버그 같아" |
 | `help` | "도움말", "help", "사용법 알려줘" |
 
@@ -518,6 +520,23 @@ Slack 초안 메시지 발송 (버튼 4개)
 - SSL 검증 우회: 사내 방화벽 대응 (`session.verify = False`)
 - `DRY_RUN_TRELLO=true`로 API 호출 없이 테스트 가능
 
+### 7.5.1 Trello 주간 보고서 ✅
+
+- 대상 워크스페이스(기본 `CorpDev_BS`)의 **모든 보드**에서 최근 7일간 변경 사항 수집:
+  - 신규 카드 / 코멘트 / 체크리스트 항목 완료 / 다음주 기한(카드 due + 체크리스트 항목 due)
+- 원본 상세 보고서는 **Google Docs**로 Drive에 저장 (폴더: `Trello 주간 보고서` — contacts 폴더 부모 위치에 자동 생성)
+  - `text/markdown` MIME 업로드로 **H1~H3·굵게·링크·리스트·표 서식 자동 적용** (Google Drive 네이티브 변환)
+  - 긴 코멘트(300자 초과)는 LLM으로 2줄 요약, 짧은 코멘트는 원문 그대로 — 카드별 H3 섹션 + 작성자별 블록 구성
+- Slack으로는 **간편 요약본 + Docs 링크** 발송
+  - 코멘트는 카드당 1줄 LLM 요약 (Claude Haiku, 배치 1회 호출)
+- **정기 실행**: 매주 금요일 21:00 KST (`scheduled_trello_weekly` APScheduler Job)
+  - `TRELLO_REPORT_CHANNEL`(없으면 `FEEDBACK_CHANNEL`)로 발송
+- **수동 트리거**: 슬래시 커맨드(`/트렐로주간보고`) 또는 자연어(`trello_weekly_report` 인텐트)
+  - 호출자에게만 회신: 채널 @멘션이면 스레드, DM이면 DM
+  - 인자로 수집 일수 지정 가능 (예: `/트렐로주간보고 14`, "지난 2주 트렐로 보고서")
+- 구현 파일: `agents/trello_report.py`, `tools/drive.create_draft_doc()` (text/markdown 사용)
+- 환경변수: `TRELLO_WORKSPACE`(기본 `CorpDev_BS`), `TRELLO_REPORT_CHANNEL`, `TRELLO_REPORT_USER_ID`, `TRELLO_REPORT_FOLDER_NAME`(기본 "Trello 주간 보고서")
+
 ### 7.6 제안서 워크플로우 ✅
 
 - 회의록 완료 후 "제안서 초안 생성" 버튼 → 개요 생성 → 스레드에서 수정 → 초안 생성 → 스레드에서 수정
@@ -685,6 +704,8 @@ MeetingAgent/
 | Google Meet 트랜스크립트 폴링 | 10분 주기       | ✅   |
 | 사용자별 브리핑 시간 커스터마이징    | —            | ❌   |
 | 액션아이템 리마인더            | 매일 08:00 KST | ✅   |
+| 사용자 피드백 다이제스트         | 매일 22:00 KST | ✅   |
+| Trello 주간 보고서          | 매주 금 21:00 KST | ✅   |
 
 
 ---
@@ -704,6 +725,10 @@ MeetingAgent/
 | `SLACK_ERROR_CHANNEL` | 에러 로깅용 Slack 채널 ID            | ❌   |
 | `TRELLO_API_KEY`      | Trello Power-Up API 키 (앱 공통)  | ✅   |
 | `TRELLO_BOARD_ID`     | 연동할 Trello 보드 ID              | ✅   |
+| `TRELLO_WORKSPACE`    | 주간 보고서 대상 워크스페이스 이름 (기본 `CorpDev_BS`) | ✅   |
+| `TRELLO_REPORT_CHANNEL` | 주간 보고서 정기 발송 Slack 채널 (미설정 시 `FEEDBACK_CHANNEL` 폴백) | ✅   |
+| `TRELLO_REPORT_USER_ID` | 주간 보고서에 사용할 Slack user_id (Trello·Drive 토큰 소유자, 미설정 시 첫 토큰 보유자 자동 선택) | ✅   |
+| `TRELLO_REPORT_FOLDER_NAME` | Drive 저장 폴더명 (기본 `Trello 주간 보고서`) | ✅   |
 | `FEEDBACK_CHANNEL`    | 피드백 다이제스트 발송 대상 (사용자 ID 또는 채널 ID) | ✅   |
 | `DREAMPLUS_BASE_URL`  | Dreamplus API 기본 URL            | ✅   |
 

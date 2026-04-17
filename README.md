@@ -29,7 +29,8 @@ Before Agent  →  During Agent  →  After Agent
 | **검색** | 회의록 검색 (업체명·회의명·날짜 — 자연어 지원: "지난 목요일", "4월 13일", "지난달") |
 | **메모** | 업체 메모 저장 (`카카오 메모 — PoC 예산 확보`) → Drive 업체 Wiki 파일에 기록 |
 | **제안서** | 회의 기반 제안서 개요·초안 생성 (스레드에서 수정 가능) |
-| **Feedback** | 사용자 피드백 (기능 요청·개선·버그) 수집 → 매일 08:00 관리자 다이제스트 발송 |
+| **Feedback** | 사용자 피드백 (기능 요청·개선·버그) 수집 → 매일 22:00 관리자 다이제스트 발송 |
+| **Trello 주간 보고서** | 매주 금 21:00 워크스페이스 전 보드 변경사항 집계 → Google Docs 원본 + Slack 요약 발송 |
 
 ---
 
@@ -37,11 +38,11 @@ Before Agent  →  During Agent  →  After Agent
 
 | 항목 | 내용 |
 |------|------|
-| **LLM** | Gemini `gemini-2.0-flash` (기본) + Claude `claude-haiku-4-5` (폴백 / 명함 OCR) |
+| **LLM** | Claude `claude-haiku-4-5` (기본 / 명함 OCR) + `claude-sonnet-4-5` (회의록 생성·수정, 제안서) |
 | **STT** | Deepgram REST API (`nova-2` 모델, 한국어) |
 | **인터페이스** | Slack Bolt (Socket Mode) |
 | **Google 연동** | Calendar · Drive · Gmail · Docs · Meet API |
-| **스케줄러** | APScheduler (브리핑 09:00, 트랜스크립트 폴링 10분, 리마인더 08:00, 피드백 다이제스트 08:00) |
+| **스케줄러** | APScheduler (브리핑 09:00, 트랜스크립트 폴링 10분, 리마인더 08:00, 피드백 다이제스트 22:00, Trello 주간 보고서 금 21:00) |
 | **저장소** | SQLite + Fernet 암호화 (사용자 토큰), Google Drive (Contacts · 회의록) |
 
 ---
@@ -279,6 +280,11 @@ OAUTH_CALLBACK_URL=https://meeting.yourdomain.com/oauth/callback
 # Trello 연동 시 추가
 TRELLO_API_KEY=...
 TRELLO_BOARD_ID=...
+
+# Trello 주간 보고서 (선택 — 미설정 시 FEEDBACK_CHANNEL·첫 토큰 보유자로 폴백)
+TRELLO_WORKSPACE=CorpDev_BS
+TRELLO_REPORT_CHANNEL=C0123456789
+TRELLO_REPORT_USER_ID=U0123456789
 ```
 
 **4. Google Cloud Console 설정**
@@ -455,10 +461,11 @@ ENCRYPTION_KEY=abc123...==
 | `/trello`                 | Trello 계정 연결                |
 | `/trello-disconnect`      | Trello 연결 해제                |
 | `/트렐로조회` / `/trello-search` | Trello 카드 검색            |
+| `/트렐로주간보고` / `/trello-weekly` | Trello 주간 보고서 생성 (인자: 일수, 기본 7) |
 | `/도움말` / `/help`          | 사용 가능한 커맨드 및 자연어 명령어 안내     |
 
 
-자연어 DM도 지원합니다 (`브리핑 해줘`, `내일 3시 KISA 미팅 잡아줘`, `지난 목요일 회의록`, `카카오 메모 — PoC 예산 확보`, `~기능 추가해줘`, `~버그 같아` 등).
+자연어 DM도 지원합니다 (`브리핑 해줘`, `내일 3시 KISA 미팅 잡아줘`, `지난 목요일 회의록`, `카카오 메모 — PoC 예산 확보`, `주간보고서`, `지난 2주 트렐로 보고서`, `~기능 추가해줘`, `~버그 같아` 등).
 
 ---
 
@@ -545,7 +552,8 @@ meeting-agent/
 │   ├── card.py             # 명함 OCR 에이전트
 │   ├── room.py             # 드림플러스 회의실 예약·조회·취소 (Slack Modal)
 │   ├── dreamplus.py        # 드림플러스 API 래퍼 (JWT 인증)
-│   └── feedback.py         # 피드백 수집·분류·다이제스트 에이전트
+│   ├── feedback.py         # 피드백 수집·분류·다이제스트 에이전트
+│   └── trello_report.py    # Trello 주간 보고서 (Google Docs + Slack 요약)
 ├── tools/
 │   ├── calendar.py         # Google Calendar API
 │   ├── docs.py             # Google Docs API (트랜스크립트 읽기)

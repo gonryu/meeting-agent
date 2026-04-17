@@ -8,11 +8,13 @@
 
 | 역할 | 모델 | 비고 |
 |------|------|------|
-| 기본 | Gemini `gemini-2.0-flash` | Google Search 도구 포함 |
-| 폴백 | Claude `claude-haiku-4-5` | Gemini 실패(429 등) 시 자동 전환 |
-| 회의록 생성·수정 전용 | Claude `claude-sonnet-4-5` | `agents/during.py` `_generate_minutes()`, Gemini 폴백 없음 |
-| 제안서 생성 전용 | Claude `claude-sonnet-4-5` | `agents/proposal.py`, Gemini 폴백 없음 |
-| 명함 OCR 전용 | Claude `claude-haiku-4-5` (Vision) | `agents/card.py` 단독 사용, Gemini 미사용 |
+| 기본 | Claude `claude-haiku-4-5` | 대부분의 텍스트 생성·분석·분류 |
+| 웹 검색 포함 | Claude `claude-haiku-4-5` + web-search 베타 툴 | Before Agent 업체/인물 리서치 (`_search`) |
+| 회의록 생성·수정 전용 | Claude `claude-sonnet-4-5` | `agents/during.py` `_generate_minutes()` (고품질) |
+| 제안서 생성 전용 | Claude `claude-sonnet-4-5` | `agents/proposal.py` (고품질) |
+| 명함 OCR 전용 | Claude `claude-haiku-4-5` (Vision) | `agents/card.py` |
+
+> Gemini는 2026-04-17 이전에 모든 경로에서 제거되어 Claude로 통일되었습니다.
 
 ---
 
@@ -20,9 +22,9 @@
 
 | 함수 | 에이전트 | 도구 | 용도 |
 |------|----------|------|------|
-| `_search(prompt)` | Before | Gemini + GoogleSearch / Claude + web_search | 웹 검색이 필요한 경우 |
-| `_generate(prompt)` | Before, During, After | Gemini / Claude (검색 없음) | 텍스트 생성·분석만 필요한 경우 |
-| `_generate_minutes(prompt)` | During | Claude Sonnet 직접 호출 | 회의록 생성·수정 전용 (Gemini 폴백 없음) |
+| `_search(prompt)` | Before | Claude Haiku + web-search 베타 툴 | 웹 검색이 필요한 경우 |
+| `_generate(prompt)` / `generate_text()` | Before, During, After, Feedback, Trello 주간 | Claude Haiku (검색 없음) | 텍스트 생성·분석만 필요한 경우 |
+| `_generate_minutes(prompt)` | During | Claude Sonnet 직접 호출 | 회의록 생성·수정 전용 |
 | `ocr_business_card(image_bytes)` | Card | Claude Haiku Vision (직접 호출) | 명함 이미지 OCR + 구조화 |
 
 > **STT (음성→텍스트)**: LLM 미사용. Deepgram REST API (`nova-2`, `tools/stt.py`) 별도 처리.
@@ -381,6 +383,7 @@ JSON으로만 응답해줘:
 - dreamplus_settings: 드림플러스 계정 설정
 - get_minutes: 회의록 조회·검색 (params: query — 업체명, 날짜, 기간 등 원본 그대로. 단순 목록 조회면 빈 문자열)
 - trello_search: Trello 카드 조회/검색 (params: query)
+- trello_weekly_report: Trello 워크스페이스 주간 보고서 생성 (params: days — 수집 기간 일수, 기본 7)
 - company_memo: 업체 관련 메모 저장 (params: company, memo)
 - feedback: 기능 요청·개선 제안·버그 리포트
 - help: 도움말·사용법 요청
@@ -397,7 +400,7 @@ JSON으로만 응답해줘:
 ### 5.5.1 제안서 개요 생성 (Intake)
 
 - **위치**: `agents/proposal.py` → 개요 생성
-- **함수**: `_generate` (Gemini/Claude 폴백)
+- **함수**: `_generate` (Claude Haiku)
 - **프롬프트**: `prompts/templates/proposal_intake.md`
 - **입력**: 내부용 회의록 전문
 - **출력**: 제안서 개요 (목적, 범위, 핵심 요소 등)
@@ -415,6 +418,30 @@ JSON으로만 응답해줘:
 - **트리거**: 개요/초안 스레드에 답글
 - **함수**: Claude `claude-sonnet-4-5` 직접 호출
 - **동작**: 기존 개요/초안 + 수정 요청 → 재생성
+
+---
+
+## 5.6 Trello 주간 보고서 LLM 호출
+
+- **위치**: `agents/trello_report.py`
+- **함수**: `generate_text` (Claude `claude-haiku-4-5`)
+- **호출 횟수**: 주간 보고 1회 실행 당 최대 2회 (모두 배치 1회 호출, 토큰 절약)
+
+### 5.6.1 카드별 코멘트 한 줄 요약 (Slack 요약본용)
+
+- **함수**: `_summarize_comments_one_liner(by_card)` — 코멘트가 있는 카드 전체를 단일 프롬프트로 배치 요약
+- **입력**: 카드별 코멘트 텍스트 concat (마크다운 제거, 600자 컷)
+- **출력**: JSON 배열 `[{"idx": N, "summary": "40자 이내 한국어 한 줄"}, ...]`
+- **용도**: Slack으로 보내는 간편 요약의 카드별 한 줄 설명
+- **실패 시 폴백**: 원문 60자 축약 (마크다운 제거 후)
+
+### 5.6.2 긴 코멘트 2줄 요약 (Google Docs 원본용)
+
+- **함수**: `_summarize_long_comments(comments, char_threshold=300)`
+- **입력**: 300자 초과 코멘트만 선별 (짧은 코멘트는 원문 유지)
+- **출력**: JSON 배열 `[{"idx": N, "summary": "첫째줄\\n둘째줄"}, ...]` — 한 줄 60자 이내, 최대 2줄
+- **용도**: Google Docs 원본 보고서에서 회의록급 긴 코멘트를 가독성 있게 표시
+- **실패 시 폴백**: 원문 그대로 유지
 
 ---
 
