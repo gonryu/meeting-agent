@@ -6,18 +6,55 @@ import uuid
 from threading import Thread
 from urllib.parse import urlencode
 
+from pathlib import Path
 from fastapi import FastAPI, Request
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from google_auth_oauthlib.flow import Flow
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaInMemoryUpload
 
 from store import user_store
+from server.admin import router as admin_router
 
 log = logging.getLogger(__name__)
 
 app = FastAPI()
+
+# 관리자 프론트엔드(로컬 dev)와 프로덕션 프론트엔드 URL 허용
+_admin_origins = [
+    "http://localhost:3030",
+    "http://127.0.0.1:3030",
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+]
+_extra = os.getenv("ADMIN_FRONTEND_ORIGINS", "")
+if _extra:
+    _admin_origins.extend([o.strip() for o in _extra.split(",") if o.strip()])
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=_admin_origins,
+    allow_credentials=False,
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type"],
+)
+
+app.include_router(admin_router)
+
+# 관리자 프론트엔드 정적 서빙 — `/admin/api/*`는 위의 APIRouter가 먼저 처리하므로 충돌 없음.
+# 배포 환경에서 `meeting.parametacorp.com/admin/` → index.html
+_frontend_dir = Path(__file__).resolve().parent.parent / "frontend"
+if _frontend_dir.is_dir():
+    app.mount(
+        "/admin",
+        StaticFiles(directory=str(_frontend_dir), html=True),
+        name="admin-frontend",
+    )
+else:
+    log.warning(f"프론트엔드 디렉터리 없음: {_frontend_dir}")
 
 SCOPES = [
     "https://www.googleapis.com/auth/calendar",
@@ -57,6 +94,9 @@ _pending_flows: dict[str, "Flow"] = {}
 def set_slack_client(client):
     global _slack_client
     _slack_client = client
+    # 관리자 API도 동일 클라이언트를 사용해 Slack 프로필 조회
+    from server import admin as admin_module
+    admin_module.set_slack_client(client)
 
 
 def _notify_deploy(version: str, changelog: str):
