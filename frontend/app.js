@@ -62,6 +62,50 @@
     return res.json();
   }
 
+  async function apiPost(path, body) {
+    const auth = getAuth();
+    if (!auth) throw new Error("인증 취소됨");
+    const res = await fetch(BACKEND + "/admin/api" + path, {
+      method: "POST",
+      headers: {
+        Authorization: auth,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(body),
+    });
+    if (res.status === 401) {
+      clearAuth();
+      throw new Error("인증 실패");
+    }
+    if (!res.ok) {
+      let msg = "API 오류 " + res.status;
+      try { const j = await res.json(); if (j.detail) msg += " — " + j.detail; } catch (_) {}
+      throw new Error(msg);
+    }
+    return res.json();
+  }
+
+  const RESOLUTION_LABEL = {
+    pending: '<span class="tag">미반영</span>',
+    applied: '<span class="tag ok">반영됨</span>',
+    on_hold: '<span class="tag warn">보류</span>',
+  };
+
+  function resolutionCell(f) {
+    const current = f.resolution || "pending";
+    const label = RESOLUTION_LABEL[current] || RESOLUTION_LABEL.pending;
+    let actions;
+    if (current === "pending") {
+      actions = `
+        <button class="act-btn" data-fid="${f.id}" data-status="applied">반영</button>
+        <button class="act-btn" data-fid="${f.id}" data-status="on_hold">보류</button>
+      `;
+    } else {
+      actions = `<button class="act-btn" data-fid="${f.id}" data-status="pending">되돌리기</button>`;
+    }
+    return `${label}<div class="actions">${actions}</div>`;
+  }
+
   // ── 렌더링 ──────────────────────────────────────────────
   function setLoading(label) {
     main.innerHTML = '<div class="card"><div class="empty">' + escapeHtml(label) + "</div></div>";
@@ -164,7 +208,14 @@
 
     const filters = `
       <div class="filters">
-        ${filterLink("all", "전체")}${filterLink("pending", "미전송")}${filterLink("notified", "전송됨")}
+        <div class="filter-group">
+          <span class="filter-label">전송</span>
+          ${filterLink("all", "전체")}${filterLink("pending", "미전송")}${filterLink("notified", "전송됨")}
+        </div>
+        <div class="filter-group">
+          <span class="filter-label">반영</span>
+          ${filterLink("unresolved", "아직 반영 안됨")}${filterLink("applied", "반영됨")}${filterLink("on_hold", "보류됨")}
+        </div>
       </div>
     `;
 
@@ -186,6 +237,7 @@
           <div class="muted small" style="margin-top:6px">원문: ${escapeHtml(f.original)}</div>
         </td>
         <td>${f.notified ? '<span class="tag ok">전송됨</span>' : '<span class="tag warn">대기</span>'}</td>
+        <td>${resolutionCell(f)}</td>
       </tr>`).join("");
 
     main.innerHTML = filters + `
@@ -193,13 +245,30 @@
         <h2>피드백 <span class="muted">(${items.length}건)</span></h2>
         <table>
           <thead><tr>
-            <th>시각</th><th>유형</th><th>사용자</th><th>내용</th><th>상태</th>
+            <th>시각</th><th>유형</th><th>사용자</th><th>내용</th><th>전송</th><th>반영</th>
           </tr></thead>
           <tbody>${rows}</tbody>
         </table>
       </div>
     `;
   }
+
+  // 피드백 반영 상태 변경 버튼 — 이벤트 위임
+  main.addEventListener("click", async (e) => {
+    const btn = e.target.closest(".act-btn");
+    if (!btn) return;
+    const fid = btn.getAttribute("data-fid");
+    const status = btn.getAttribute("data-status");
+    if (!fid || !status) return;
+    btn.disabled = true;
+    try {
+      await apiPost(`/feedback/${fid}/resolution`, { status });
+      await renderFeedback();
+    } catch (err) {
+      alert("반영 상태 변경 실패: " + err.message);
+      btn.disabled = false;
+    }
+  });
 
   // ── 라우터 ──────────────────────────────────────────────
   const routes = {

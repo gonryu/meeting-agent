@@ -103,9 +103,15 @@ def init_db():
                 content     TEXT NOT NULL,
                 original    TEXT NOT NULL,
                 notified    INTEGER DEFAULT 0,
+                resolution  TEXT DEFAULT 'pending',
                 created_at  TEXT NOT NULL
             )
         """)
+        # 기존 DB에 resolution 컬럼이 없을 경우 추가
+        try:
+            conn.execute("ALTER TABLE feedback ADD COLUMN resolution TEXT DEFAULT 'pending'")
+        except Exception:
+            pass  # 이미 존재하면 무시
 
         # INF-10: 회의록 검색 인덱스
         conn.execute("""
@@ -508,15 +514,33 @@ def admin_counts() -> dict:
     }
 
 
-def list_all_feedback(notified: int | None = None, limit: int = 200) -> list[dict]:
-    """전체 피드백 조회 (관리자용). notified=None이면 전체."""
+def list_all_feedback(notified: int | None = None,
+                      resolution: str | None = None,
+                      limit: int = 200) -> list[dict]:
+    """전체 피드백 조회 (관리자용). 인자 미지정 시 전체 반환."""
     query = "SELECT * FROM feedback"
+    conditions: list[str] = []
     params: list = []
     if notified is not None:
-        query += " WHERE notified = ?"
+        conditions.append("notified = ?")
         params.append(notified)
+    if resolution is not None:
+        conditions.append("resolution = ?")
+        params.append(resolution)
+    if conditions:
+        query += " WHERE " + " AND ".join(conditions)
     query += " ORDER BY created_at DESC LIMIT ?"
     params.append(limit)
     with _conn() as conn:
         rows = conn.execute(query, params).fetchall()
     return [dict(r) for r in rows]
+
+
+def update_feedback_resolution(feedback_id: int, resolution: str) -> bool:
+    """피드백 반영 상태 갱신. 존재하지 않으면 False."""
+    with _conn() as conn:
+        cur = conn.execute(
+            "UPDATE feedback SET resolution = ? WHERE id = ?",
+            (resolution, feedback_id),
+        )
+        return cur.rowcount > 0
