@@ -254,8 +254,12 @@ def find_meet_transcript(creds: Credentials, meeting_title: str,
 
 
 def create_draft_doc(creds: Credentials, name: str, content: str, parent_id: str) -> str:
-    """마크다운 텍스트로 편집 가능한 Google Docs 초안 생성. Returns: doc_id"""
-    media = MediaInMemoryUpload(content.encode("utf-8"), mimetype="text/plain")
+    """마크다운 텍스트로 편집 가능한 Google Docs 초안 생성. Returns: doc_id
+
+    content는 Markdown으로 간주. Google Drive의 Markdown 네이티브 변환을 통해
+    제목(H1~H6)·굵게·기울임·링크·리스트·표 서식이 Google Docs에 그대로 반영됩니다.
+    """
+    media = MediaInMemoryUpload(content.encode("utf-8"), mimetype="text/markdown")
     svc = _service(creds)
     metadata = {
         "name": name,
