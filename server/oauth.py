@@ -45,7 +45,7 @@ app.add_middleware(
 app.include_router(admin_router)
 
 # Cloudflare 등 CDN이 /admin/* 자산을 캐시해 배포 직후에도 구버전을 서빙하는 문제 방지.
-# 번들/해시 URL 체계가 없으므로 전면 no-store가 가장 안전.
+# 번들/해시 URL 체계가 없으므로 전면 no-store가 가장 안전 (브라우저 캐시 차단).
 @app.middleware("http")
 async def _admin_no_cache(request: Request, call_next):
     response = await call_next(request)
@@ -56,9 +56,46 @@ async def _admin_no_cache(request: Request, call_next):
     return response
 
 
-# 관리자 프론트엔드 정적 서빙 — `/admin/api/*`는 위의 APIRouter가 먼저 처리하므로 충돌 없음.
-# 배포 환경에서 `meeting.parametacorp.com/admin/` → index.html
 _frontend_dir = Path(__file__).resolve().parent.parent / "frontend"
+
+
+def _compute_asset_version() -> str:
+    """자산 URL에 붙일 버전 문자열. 배포(systemctl restart)마다 새 커밋 해시로 바뀐다.
+    Cloudflare 등 CDN 설정을 건드릴 수 없는 환경에서 캐시 무효화용."""
+    import subprocess, time
+    try:
+        return subprocess.check_output(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=str(_frontend_dir.parent),
+            text=True, stderr=subprocess.DEVNULL, timeout=2,
+        ).strip() or str(int(time.time()))
+    except Exception:
+        return str(int(time.time()))
+
+
+_ASSET_VERSION = _compute_asset_version()
+
+
+# /admin/ 과 /admin HTML은 StaticFiles 마운트보다 먼저 등록해 우선순위 확보.
+# HTML은 CF가 `DYNAMIC`으로 캐시하지 않지만 안 안의 ./app.js 등 자산은 CF가 4h 캐시하므로,
+# 여기서 ?v=<git-hash> 쿼리스트링을 주입해 배포마다 새 URL을 만들어 캐시를 우회한다.
+@app.get("/admin/", include_in_schema=False)
+@app.get("/admin", include_in_schema=False)
+async def _admin_index():
+    index_path = _frontend_dir / "index.html"
+    if not index_path.is_file():
+        return HTMLResponse("<h1>Frontend not deployed</h1>", status_code=404)
+    html = index_path.read_text(encoding="utf-8")
+    for asset in ("app.js", "config.js", "style.css"):
+        html = html.replace(
+            f'"./{asset}"',
+            f'"./{asset}?v={_ASSET_VERSION}"',
+        )
+    return HTMLResponse(html)
+
+
+# 관리자 프론트엔드 정적 서빙 — `/admin/api/*`는 APIRouter, `/admin` + `/admin/`은 위 라우트 우선.
+# 나머지 경로(./app.js?v=xxx 등)는 여기가 처리. 쿼리스트링은 StaticFiles가 무시해서 동일 파일 반환.
 if _frontend_dir.is_dir():
     app.mount(
         "/admin",
