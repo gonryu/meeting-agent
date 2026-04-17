@@ -23,3 +23,28 @@ jobs:
           if [ "$HTTP_CODE" -ge 400 ]; then
             exit 1
           fi
+
+      - name: Wait for service restart
+        run: sleep 12
+
+      - name: Verify API health
+        run: |
+          CODE=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 "${{ secrets.DEPLOY_URL }}/health")
+          echo "/health → HTTP $CODE"
+          [ "$CODE" = "200" ] || { echo "❌ /health 실패"; exit 1; }
+
+      - name: Verify admin frontend
+        run: |
+          # /admin/ 는 frontend/index.html 을 반환해야 함
+          RESP=$(curl -s --max-time 10 "${{ secrets.DEPLOY_URL }}/admin/")
+          echo "$RESP" | head -3
+          echo "$RESP" | grep -q "Meeting Agent Admin" || { echo "❌ /admin/ 에서 index.html 미노출"; exit 1; }
+          echo "✅ /admin/ OK"
+
+      - name: Verify admin API is auth-protected
+        run: |
+          # 인증 없이 호출 시 401 을 반환해야 함 (JSON API 정상 동작 + 비인가 접근 차단 확인)
+          CODE=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 "${{ secrets.DEPLOY_URL }}/admin/api/dashboard")
+          echo "/admin/api/dashboard (no auth) → HTTP $CODE"
+          [ "$CODE" = "401" ] || { echo "❌ /admin/api/dashboard: 401 예상, $CODE 반환"; exit 1; }
+          echo "✅ admin API 인증 정상"

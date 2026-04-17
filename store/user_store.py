@@ -481,3 +481,42 @@ def update_meeting_proposal_flag(event_id: str, user_id: str) -> None:
             "UPDATE meeting_index SET has_proposal = 1 WHERE event_id = ? AND user_id = ?",
             (event_id, user_id),
         )
+
+
+# ── 관리자 페이지용 집계/조회 ────────────────────────────────
+
+def admin_counts() -> dict:
+    """관리자 대시보드 집계값"""
+    with _conn() as conn:
+        users = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+        meetings = conn.execute("SELECT COUNT(*) FROM meeting_index").fetchone()[0]
+        feedback_total = conn.execute("SELECT COUNT(*) FROM feedback").fetchone()[0]
+        feedback_pending = conn.execute(
+            "SELECT COUNT(*) FROM feedback WHERE notified = 0"
+        ).fetchone()[0]
+        action_open = conn.execute(
+            "SELECT COUNT(*) FROM action_items WHERE status = 'open'"
+        ).fetchone()[0]
+        action_total = conn.execute("SELECT COUNT(*) FROM action_items").fetchone()[0]
+    return {
+        "users": users,
+        "meetings": meetings,
+        "feedback_total": feedback_total,
+        "feedback_pending": feedback_pending,
+        "action_open": action_open,
+        "action_total": action_total,
+    }
+
+
+def list_all_feedback(notified: int | None = None, limit: int = 200) -> list[dict]:
+    """전체 피드백 조회 (관리자용). notified=None이면 전체."""
+    query = "SELECT * FROM feedback"
+    params: list = []
+    if notified is not None:
+        query += " WHERE notified = ?"
+        params.append(notified)
+    query += " ORDER BY created_at DESC LIMIT ?"
+    params.append(limit)
+    with _conn() as conn:
+        rows = conn.execute(query, params).fetchall()
+    return [dict(r) for r in rows]
