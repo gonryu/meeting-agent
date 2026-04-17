@@ -33,6 +33,9 @@ from agents.before import (
     suggest_meeting_slots,
     handle_meeting_cancel_confirm,
     handle_meeting_cancel_abort,
+    handle_meeting_cancel_with_room,
+    handle_meeting_cancel_event_only,
+    handle_meeting_cancel_abort_both,
     handle_slot_create_meeting,
     handle_create_confirm,
     handle_create_abort,
@@ -1386,7 +1389,6 @@ for _src in ("transcript", "notes", "wait", "cancel"):
 
 # ── F2: 일정 취소 액션 핸들러 ────────────────────────────────
 
-@app.action("meeting_cancel_confirm")
 def _handle_meeting_cancel_confirm(ack, body, client):
     ack()
     user_id = body["user"]["id"]
@@ -1400,6 +1402,11 @@ def _handle_meeting_cancel_confirm(ack, body, client):
         daemon=True,
     ).start()
 
+# 단일 후보(확인 블록) + 복수 후보(선택 블록, 인덱스 접미사) 모두 대응
+app.action("meeting_cancel_confirm")(_handle_meeting_cancel_confirm)
+for _i in range(5):
+    app.action(f"meeting_cancel_confirm_{_i}")(_handle_meeting_cancel_confirm)
+
 
 @app.action("meeting_cancel_abort")
 def _handle_meeting_cancel_abort(ack, body, client):
@@ -1409,9 +1416,42 @@ def _handle_meeting_cancel_abort(ack, body, client):
     handle_meeting_cancel_abort(client, user_id, event_id, body=body)
 
 
+@app.action("meeting_cancel_with_room")
+def _handle_meeting_cancel_with_room(ack, body, client):
+    ack()
+    user_id = body["user"]["id"]
+    event_id = body.get("actions", [{}])[0].get("value", "")
+    threading.Thread(
+        target=handle_meeting_cancel_with_room,
+        args=(client, user_id, event_id),
+        kwargs=dict(body=body),
+        daemon=True,
+    ).start()
+
+
+@app.action("meeting_cancel_event_only")
+def _handle_meeting_cancel_event_only(ack, body, client):
+    ack()
+    user_id = body["user"]["id"]
+    event_id = body.get("actions", [{}])[0].get("value", "")
+    threading.Thread(
+        target=handle_meeting_cancel_event_only,
+        args=(client, user_id, event_id),
+        kwargs=dict(body=body),
+        daemon=True,
+    ).start()
+
+
+@app.action("meeting_cancel_abort_both")
+def _handle_meeting_cancel_abort_both(ack, body, client):
+    ack()
+    user_id = body["user"]["id"]
+    event_id = body.get("actions", [{}])[0].get("value", "")
+    handle_meeting_cancel_abort_both(client, user_id, event_id, body=body)
+
+
 # ── F1: 슬롯 추천 → 미팅 생성 ───────────────────────────────
 
-@app.action("slot_create_meeting")
 def _handle_slot_create(ack, body, client):
     ack()
     user_id = body["user"]["id"]
@@ -1424,6 +1464,9 @@ def _handle_slot_create(ack, body, client):
         kwargs=dict(body=body),
         daemon=True,
     ).start()
+
+for _i in range(5):
+    app.action(f"slot_create_meeting_{_i}")(_handle_slot_create)
 
 
 # ── I2(a): 미팅 생성 확인 ────────────────────────────────────

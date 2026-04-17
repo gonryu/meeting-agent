@@ -173,13 +173,13 @@ class TestCancelMeeting:
                    return_value=MagicMock()):
             cancel_meeting_from_text(slack, _TEST_USER, "카카오 미팅 취소")
 
-        # 두 이벤트 모두 버튼으로 제시되어야 함
+        # 두 이벤트 모두 버튼으로 제시되어야 함 (인덱스 접미사 포함한 action_id)
         calls = slack.chat_postMessage.call_args_list
         all_values = []
         for c in calls:
             for b in c[1].get("blocks", []) or []:
                 for el in b.get("elements", []) or []:
-                    if el.get("action_id") == "meeting_cancel_confirm":
+                    if el.get("action_id", "").startswith("meeting_cancel_confirm"):
                         all_values.append(el.get("value"))
         assert "e1" in all_values and "e2" in all_values
 
@@ -197,21 +197,89 @@ class TestCancelMeeting:
 
     def test_confirm_calls_delete_event(self):
         slack = _slack()
+        # location에 드림플러스 없음 → 바로 삭제
+        ev = {"summary": "KISA 미팅", "location": "",
+              "start": {"dateTime": "2026-04-20T15:00:00+09:00"},
+              "end": {"dateTime": "2026-04-20T16:00:00+09:00"}}
         with patch("agents.before.user_store.get_credentials",
                    return_value=MagicMock()), \
-             patch("agents.before.cal.get_event",
-                   return_value={"summary": "KISA 미팅"}), \
+             patch("agents.before.cal.get_event", return_value=ev), \
              patch("agents.before.cal.delete_event") as mock_delete:
             handle_meeting_cancel_confirm(slack, _TEST_USER, "evt_target")
 
         mock_delete.assert_called_once()
         args, kwargs = mock_delete.call_args
-        # positional: (creds, event_id) 또는 kwargs 중 event_id 확인
         event_id = args[1] if len(args) > 1 else kwargs.get("event_id")
         assert event_id == "evt_target"
-        # 성공 메시지에 제목 포함
         text = slack.chat_postMessage.call_args[1].get("text", "")
         assert "KISA 미팅" in text
+
+    def test_confirm_with_reservation_shows_with_room_prompt(self):
+        """location에 드림플러스 + 예약 매칭되면 '함께 취소?' 프롬프트 발송"""
+        from agents.before import _pending_meeting_cancel_with_room
+        _pending_meeting_cancel_with_room.clear()
+
+        slack = _slack()
+        ev = {"summary": "팀 회의", "location": "드림플러스 강남 Meeting Room 8A",
+              "start": {"dateTime": "2026-04-20T15:00:00+09:00"},
+              "end": {"dateTime": "2026-04-20T16:00:00+09:00"}}
+        with patch("agents.before.user_store.get_credentials",
+                   return_value=MagicMock()), \
+             patch("agents.before.cal.get_event", return_value=ev), \
+             patch("agents.before.cal.delete_event") as mock_delete, \
+             patch("agents.dreamplus.find_reservation_for_meeting",
+                   return_value=777):
+            handle_meeting_cancel_confirm(slack, _TEST_USER, "evt_with_room",
+                                          body={"container": {"channel_id": "C", "message_ts": "1"}})
+
+        # 이 시점엔 삭제 X, 프롬프트만 발송
+        mock_delete.assert_not_called()
+        assert "evt_with_room" in _pending_meeting_cancel_with_room
+        assert _pending_meeting_cancel_with_room["evt_with_room"]["reservation_id"] == 777
+        all_ids = set()
+        for c in slack.chat_postMessage.call_args_list:
+            all_ids |= _blocks_action_ids(c)
+        assert "meeting_cancel_with_room" in all_ids
+        assert "meeting_cancel_event_only" in all_ids
+        assert "meeting_cancel_abort_both" in all_ids
+
+    def test_cancel_with_room_invokes_both_deletions(self):
+        """'함께 취소' 버튼 → delete_event + cancel_reservation_by_id 모두 호출"""
+        from agents.before import (_pending_meeting_cancel_with_room,
+                                    handle_meeting_cancel_with_room)
+        _pending_meeting_cancel_with_room["evt_both"] = {
+            "user_id": _TEST_USER, "event_id": "evt_both",
+            "reservation_id": 777, "summary": "팀 회의", "location": "드림플러스 강남 8A",
+        }
+        slack = _slack()
+        with patch("agents.before.user_store.get_credentials",
+                   return_value=MagicMock()), \
+             patch("agents.before.cal.delete_event") as mock_del, \
+             patch("agents.dreamplus.cancel_reservation_by_id") as mock_cancel:
+            handle_meeting_cancel_with_room(slack, _TEST_USER, "evt_both",
+                                            body={"container": {"channel_id": "C", "message_ts": "1"}})
+        mock_del.assert_called_once()
+        mock_cancel.assert_called_once()
+        assert mock_cancel.call_args[0][1] == 777
+        assert "evt_both" not in _pending_meeting_cancel_with_room
+
+    def test_cancel_event_only_skips_reservation(self):
+        """'일정만 취소' → delete_event만 호출, 예약 취소는 안 함"""
+        from agents.before import (_pending_meeting_cancel_with_room,
+                                    handle_meeting_cancel_event_only)
+        _pending_meeting_cancel_with_room["evt_only"] = {
+            "user_id": _TEST_USER, "event_id": "evt_only",
+            "reservation_id": 888, "summary": "팀 회의", "location": "드림플러스 강남 8A",
+        }
+        slack = _slack()
+        with patch("agents.before.user_store.get_credentials",
+                   return_value=MagicMock()), \
+             patch("agents.before.cal.delete_event") as mock_del, \
+             patch("agents.dreamplus.cancel_reservation_by_id") as mock_cancel:
+            handle_meeting_cancel_event_only(slack, _TEST_USER, "evt_only",
+                                              body={"container": {"channel_id": "C", "message_ts": "1"}})
+        mock_del.assert_called_once()
+        mock_cancel.assert_not_called()
 
     def test_abort_does_not_call_delete(self):
         slack = _slack()
@@ -362,11 +430,11 @@ class TestSuggestSlots:
             suggest_meeting_slots(slack, _TEST_USER,
                                   "김민환이랑 내일 1시간 잡을 시간 찾아줘")
 
-        # slot_create_meeting 액션 버튼 최소 1개
+        # slot_create_meeting_{i} 액션 버튼 최소 1개 (인덱스 접미사)
         all_ids = set()
         for c in slack.chat_postMessage.call_args_list:
             all_ids |= _blocks_action_ids(c)
-        assert "slot_create_meeting" in all_ids
+        assert any(aid.startswith("slot_create_meeting") for aid in all_ids)
 
     def test_slot_click_creates_event(self):
         slack = _slack()

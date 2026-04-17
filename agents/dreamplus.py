@@ -395,6 +395,74 @@ def confirm_room_booking(slack_client, body: dict):
                   f"⚠️ 예약은 완료됐지만 캘린더 장소 업데이트에 실패했어요: {e}")
 
 
+# ── 미팅 ↔ 예약 매칭 / 내부 취소 헬퍼 ─────────────────────────
+
+def find_reservation_for_meeting(user_id: str, start_dt: datetime,
+                                   end_dt: datetime) -> int | None:
+    """Google Calendar 이벤트의 시간대와 일치하는 드림플러스 예약 ID 반환.
+    일치 기준: 시작/종료 시각 5분 오차 이내 + 활성(531) + 본인 예약."""
+    try:
+        jwt, pub_key, member_id, company_id = _get_session(user_id)
+    except ValueError:
+        return None
+    try:
+        items = dp.get_reservations(jwt, company_id=company_id or None)
+    except (dp.TokenExpiredError, RuntimeError):
+        try:
+            jwt, pub_key, member_id, company_id = _get_session(user_id, force_refresh=True)
+            items = dp.get_reservations(jwt, company_id=company_id or None)
+        except Exception as e:
+            log.warning(f"드림플러스 예약 조회 실패 (매칭): {e}")
+            return None
+    except Exception as e:
+        log.warning(f"드림플러스 예약 조회 실패 (매칭): {e}")
+        return None
+
+    if not member_id:
+        return None
+    items = [i for i in items
+             if i.get("memberId") == member_id
+             and i.get("reservationState") == 531]
+    # KST naive datetime으로 비교 (Dreamplus는 KST, GCal은 +09:00)
+    ev_start = start_dt.replace(tzinfo=None) if start_dt.tzinfo else start_dt
+    ev_end = end_dt.replace(tzinfo=None) if end_dt.tzinfo else end_dt
+
+    for it in items:
+        st = str(it.get("startTime") or "")
+        et = str(it.get("endTime") or "")
+        res_start = _parse_dp_datetime(st)
+        res_end = _parse_dp_datetime(et)
+        if not (res_start and res_end):
+            continue
+        if abs((res_start - ev_start).total_seconds()) <= 300 \
+           and abs((res_end - ev_end).total_seconds()) <= 300:
+            return it.get("id")
+    return None
+
+
+def _parse_dp_datetime(s: str) -> datetime | None:
+    """Dreamplus 예약 응답의 시각 문자열을 datetime으로 (naive KST)."""
+    if not s:
+        return None
+    for fmt in ("%Y.%m.%d %H:%M:%S", "%Y.%m.%d %H:%M",
+                "%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M"):
+        try:
+            return datetime.strptime(s, fmt)
+        except Exception:
+            continue
+    return None
+
+
+def cancel_reservation_by_id(user_id: str, reservation_id: int) -> None:
+    """reservation_id로 드림플러스 예약 취소 (다른 모듈에서 호출하기 위한 단순 래퍼)."""
+    jwt, pub_key, _, _ = _get_session(user_id)
+    try:
+        dp.cancel_reservation(jwt, pub_key, reservation_id)
+    except dp.TokenExpiredError:
+        jwt, pub_key, _, _ = _get_session(user_id, force_refresh=True)
+        dp.cancel_reservation(jwt, pub_key, reservation_id)
+
+
 # ── /회의실조회 ───────────────────────────────────────────────
 
 def list_reservations(slack_client, user_id: str,
