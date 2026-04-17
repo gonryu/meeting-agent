@@ -44,6 +44,18 @@ app.add_middleware(
 
 app.include_router(admin_router)
 
+# Cloudflare 등 CDN이 /admin/* 자산을 캐시해 배포 직후에도 구버전을 서빙하는 문제 방지.
+# 번들/해시 URL 체계가 없으므로 전면 no-store가 가장 안전.
+@app.middleware("http")
+async def _admin_no_cache(request: Request, call_next):
+    response = await call_next(request)
+    if request.url.path.startswith("/admin"):
+        response.headers["Cache-Control"] = "no-store, must-revalidate"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
+    return response
+
+
 # 관리자 프론트엔드 정적 서빙 — `/admin/api/*`는 위의 APIRouter가 먼저 처리하므로 충돌 없음.
 # 배포 환경에서 `meeting.parametacorp.com/admin/` → index.html
 _frontend_dir = Path(__file__).resolve().parent.parent / "frontend"
