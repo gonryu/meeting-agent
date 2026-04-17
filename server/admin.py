@@ -9,8 +9,11 @@ import secrets
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
+from pydantic import BaseModel
 
 from store import user_store
+
+VALID_RESOLUTIONS = {"pending", "applied", "on_hold"}
 
 log = logging.getLogger(__name__)
 
@@ -110,11 +113,39 @@ def api_users(_: str = Depends(_require_admin)):
 @router.get("/feedback")
 def api_feedback(request: Request, _: str = Depends(_require_admin)):
     filter_param = request.query_params.get("filter", "all")
+    kwargs: dict = {"limit": 300}
     if filter_param == "pending":
-        items = user_store.list_all_feedback(notified=0, limit=300)
+        kwargs["notified"] = 0
     elif filter_param == "notified":
-        items = user_store.list_all_feedback(notified=1, limit=300)
+        kwargs["notified"] = 1
+    elif filter_param == "unresolved":
+        kwargs["resolution"] = "pending"
+    elif filter_param == "applied":
+        kwargs["resolution"] = "applied"
+    elif filter_param == "on_hold":
+        kwargs["resolution"] = "on_hold"
     else:
         filter_param = "all"
-        items = user_store.list_all_feedback(limit=300)
+    items = user_store.list_all_feedback(**kwargs)
     return {"filter": filter_param, "items": _enrich_feedback(items)}
+
+
+class _ResolutionPayload(BaseModel):
+    status: str  # pending | applied | on_hold
+
+
+@router.post("/feedback/{feedback_id}/resolution")
+def api_feedback_resolution(
+    feedback_id: int,
+    payload: _ResolutionPayload,
+    _: str = Depends(_require_admin),
+):
+    if payload.status not in VALID_RESOLUTIONS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"허용되지 않은 status: {payload.status}",
+        )
+    ok = user_store.update_feedback_resolution(feedback_id, payload.status)
+    if not ok:
+        raise HTTPException(status_code=404, detail="피드백을 찾을 수 없습니다")
+    return {"ok": True, "id": feedback_id, "status": payload.status}
