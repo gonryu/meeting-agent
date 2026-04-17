@@ -1270,45 +1270,127 @@ def create_meeting_from_text(slack_client, user_id: str, user_message: str,
     if creator_email and creator_email.lower() not in {e.lower() for e in attendee_emails}:
         attendee_emails.insert(0, creator_email)
 
-    # 확정된 참석자만으로 일정 먼저 생성 (이메일 미확정·미발견 참석자는 나중에 추가)
-    notices = []
+    # I2(a): 참석자·정보 확인 후 생성 — preview 블록 후 사용자 승인
+    _post_create_preview(
+        slack_client, user_id=user_id,
+        info=info, company=company, attendee_emails=attendee_emails,
+        pending_selections=pending_selections, missing_names=missing_names,
+        channel=channel, thread_ts=thread_ts, user_msg_ts=user_msg_ts,
+    )
+
+
+def _post_create_preview(slack_client, *, user_id: str, info: dict,
+                          company: str | None, attendee_emails: list[str],
+                          pending_selections: list, missing_names: list,
+                          channel: str | None, thread_ts: str | None,
+                          user_msg_ts: str | None):
+    """I2(a): 생성 직전 참석자·일정 확인 블록 발송. 승인 시 실제 생성."""
+    # 미리보기 텍스트 구성
+    title = info.get("title", "미팅")
+    date = info.get("date") or "?"
+    time_ = info.get("time") or "?"
+    duration = info.get("duration_minutes", 60)
+    lines = [
+        f"📋 *{title}* — 아래 내용으로 생성할까요?",
+        f"• 일시: {date} {time_} ({duration}분)",
+    ]
+    if company:
+        lines.append(f"• 업체: {company}")
+    if attendee_emails:
+        lines.append(f"• 참석자: {', '.join(attendee_emails)}")
     if pending_selections:
         names = [s["name"] for s in pending_selections]
-        notices.append(f"⏳ *{', '.join(names)}*은(는) 이메일 선택 후 참석자에 추가됩니다.")
+        lines.append(f"• ⏳ 이메일 후보 복수 — 생성 후 선택: {', '.join(names)}")
     if missing_names:
-        notices.append(f"⚠️ *{', '.join(missing_names)}*의 이메일을 찾지 못했습니다.")
-    if notices:
-        _post(slack_client, user_id=user_id, channel=channel, thread_ts=thread_ts,
-              text="\n".join(notices))
+        lines.append(f"• ⚠️ 이메일 미발견: {', '.join(missing_names)}")
+    agenda = info.get("agenda") or ""
+    if agenda:
+        lines.append(f"• 어젠다: {agenda[:100]}")
+    preview_text = "\n".join(lines)
+
+    # draft 저장 (승인 시 실제 생성에 사용)
+    draft_id = f"{user_id}:{int(datetime.now().timestamp())}"
+    _pending_create_confirm[draft_id] = {
+        "user_id": user_id,
+        "info": dict(info),
+        "company": company,
+        "attendee_emails": list(attendee_emails),
+        "pending_selections": pending_selections or [],
+        "missing_names": missing_names or [],
+        "channel": channel,
+        "thread_ts": thread_ts,
+        "user_msg_ts": user_msg_ts,
+    }
+    blocks = [
+        {"type": "section", "text": {"type": "mrkdwn", "text": preview_text}},
+        {"type": "actions", "elements": [
+            {"type": "button", "style": "primary",
+                "text": {"type": "plain_text", "text": "✅ 확인하고 생성"},
+                "action_id": "create_confirm", "value": draft_id},
+            {"type": "button", "style": "danger",
+                "text": {"type": "plain_text", "text": "❌ 취소"},
+                "action_id": "create_abort", "value": draft_id},
+        ]},
+        {"type": "context", "elements": [{"type": "mrkdwn",
+            "text": "_생성 후에도 이 메시지 스레드에 답글로 제목·참석자·어젠다를 수정할 수 있어요._"}]},
+    ]
+    _post(slack_client, user_id=user_id, channel=channel, thread_ts=thread_ts,
+          text=f"미팅 생성 확인: {title}", blocks=blocks)
+
+
+def handle_create_confirm(slack_client, user_id: str, draft_id: str,
+                           body: dict = None):
+    """확인 버튼 콜백 — 실제 생성 경로로 진입"""
+    payload = _pending_create_confirm.pop(draft_id, None)
+    if not payload:
+        _post(slack_client, user_id=user_id, text="⚠️ 만료된 미팅 확인 요청입니다.")
+        return
+
+    _replace_block(slack_client, body, "✅ 확인됨 — 미팅을 생성합니다...")
 
     created_event_id = _create_calendar_event(
-        slack_client, user_id, info, company, attendee_emails,
-        channel, thread_ts, user_msg_ts=user_msg_ts,
+        slack_client, user_id,
+        payload["info"], payload["company"], payload["attendee_emails"],
+        payload.get("channel"), payload.get("thread_ts"),
+        user_msg_ts=payload.get("user_msg_ts"),
     )
 
     if not created_event_id:
         return
 
-    # 일정 생성 완료 후, 이메일 미확정 참석자 선택 UI 표시
-    if pending_selections:
+    # 이메일 미확정 참석자 선택 UI
+    if payload["pending_selections"]:
         _pending_meetings[user_id] = {
             "event_id": created_event_id,
-            "channel": channel,
-            "thread_ts": thread_ts,
-            "pending_selections": pending_selections,
+            "channel": payload.get("channel"),
+            "thread_ts": payload.get("thread_ts"),
+            "pending_selections": payload["pending_selections"],
         }
         try:
-            _post_email_selection(slack_client, user_id, pending_selections[0], channel, thread_ts)
+            _post_email_selection(slack_client, user_id,
+                                  payload["pending_selections"][0],
+                                  payload.get("channel"), payload.get("thread_ts"))
         except Exception as e:
             log.exception(f"이메일 선택 블록 발송 실패: {e}")
-            del _pending_meetings[user_id]
+            _pending_meetings.pop(user_id, None)
 
-    # 업체명 후보가 있지만 확정 안 됨 → 일정 생성 후 별도로 확인 요청
-    if company_candidates and not company_confirmed:
+    # 업체명 후보가 있지만 확정 안 됨 → 확인 요청
+    info = payload["info"]
+    cand = info.get("company_candidates") or []
+    confirmed = info.get("company_confirmed", False)
+    if cand and not confirmed:
         _post_company_confirmation(
-            slack_client, user_id, company_candidates,
-            event_id=created_event_id, channel=channel, thread_ts=thread_ts,
+            slack_client, user_id, cand,
+            event_id=created_event_id,
+            channel=payload.get("channel"),
+            thread_ts=payload.get("thread_ts"),
         )
+
+
+def handle_create_abort(slack_client, user_id: str, draft_id: str,
+                         body: dict = None):
+    _pending_create_confirm.pop(draft_id, None)
+    _replace_block(slack_client, body, "❌ 미팅 생성을 취소했습니다.")
 
 
 def _lookup_slack_email(slack_client, user_id: str) -> str | None:
@@ -1417,6 +1499,13 @@ def _save_meeting_drafts():
 
 
 _meeting_drafts: dict[str, dict] = _load_meeting_drafts()
+
+# F2: 일정 취소 확정 대기 — key=event_id (UI 리마인드용)
+_pending_cancel: dict[str, dict] = {}
+# I2(a): 미팅 생성 확인 대기 — key=draft_id, value={info, company, attendee_emails, ...}
+_pending_create_confirm: dict[str, dict] = {}
+# I2(b): 드림플러스 회의실 자동 추천 수락 대기 — key=slack user_id, value={start_dt, end_dt, title, attendee_count, channel, thread_ts, event_id}
+_pending_room_offer: dict[str, dict] = {}
 
 
 def _migrate_pending_agenda():
@@ -1686,23 +1775,31 @@ def _create_calendar_event(slack_client, user_id: str, info: dict, company: str 
             except Exception as e:
                 log.warning(f"업체명 extendedProperties 저장 실패: {e}")
 
-        # 드림플러스 회의실 자동 추천 먼저 (계정 미설정 시 스킵)
+        # I2(b): 드림플러스 회의실 자동 추천 대신 "예약할까요?" 확인 먼저
         attendee_count = len(attendee_emails) + 1  # 참석자 + 주최자
-        threading.Thread(
-            target=dreamplus_agent.auto_book_room,
-            kwargs=dict(
-                slack_client=slack_client,
-                user_id=user_id,
-                start_dt=start_dt,
-                end_dt=end_dt,
+        # 계정 미설정이면 offer 대신 기존 auto_book_room 내부 안내 경로로 흘려보냄 (dreamplus가 설정 링크 안내 처리)
+        dp_creds = user_store.get_dreamplus_credentials(user_id)
+        if dp_creds:
+            offer_room_booking(
+                slack_client, user_id=user_id,
+                start_dt=start_dt, end_dt=end_dt,
                 title=info.get("title", "미팅"),
                 attendee_count=attendee_count,
-                channel=channel,
-                thread_ts=thread_ts,
+                channel=channel, thread_ts=thread_ts,
                 event_id=event_id,
-            ),
-            daemon=True,
-        ).start()
+            )
+        else:
+            threading.Thread(
+                target=dreamplus_agent.auto_book_room,
+                kwargs=dict(
+                    slack_client=slack_client, user_id=user_id,
+                    start_dt=start_dt, end_dt=end_dt,
+                    title=info.get("title", "미팅"),
+                    attendee_count=attendee_count,
+                    channel=channel, thread_ts=thread_ts, event_id=event_id,
+                ),
+                daemon=True,
+            ).start()
 
         return event_id
 
@@ -1945,3 +2042,489 @@ def update_company_knowledge(slack_client, user_id: str,
         msg = ("⚠️ Gemini API 할당량 초과. 잠시 후 다시 시도해주세요."
                if "429" in err or "RESOURCE_EXHAUSTED" in err else f"⚠️ 갱신 실패: {err[:200]}")
         _post(slack_client, user_id=user_id, channel=channel, thread_ts=thread_ts, text=msg)
+
+
+# ═══════════════════════════════════════════════════════════════════
+# F2: 일정 취소
+# ═══════════════════════════════════════════════════════════════════
+
+_CANCEL_PARSE_PROMPT = """다음 메시지에서 취소할 미팅을 찾기 위한 정보를 추출해줘.
+
+메시지: "{text}"
+
+오늘 날짜: {today}
+
+JSON으로만 반환 (설명 없이):
+{{"title_hint": "미팅 제목 키워드 (없으면 빈 문자열)", "date": "YYYY-MM-DD (언급 없으면 null)"}}"""
+
+
+def cancel_meeting_from_text(slack_client, user_id: str, user_message: str,
+                              channel: str = None, thread_ts: str = None):
+    """자연어로 일정 취소 — 후보 조회 후 확인 버튼 발송"""
+    try:
+        creds = user_store.get_credentials(user_id)
+    except Exception as e:
+        _post(slack_client, user_id=user_id, channel=channel, thread_ts=thread_ts,
+              text=f"⚠️ 인증 오류: {e}")
+        return
+
+    today = datetime.now(KST).strftime("%Y-%m-%d")
+    title_hint = ""
+    date = None
+    try:
+        raw = _generate(_CANCEL_PARSE_PROMPT.format(
+            text=user_message.replace('"', "'"), today=today,
+        ))
+        cleaned = re.sub(r"```(?:json)?", "", raw).strip().strip("`")
+        m = re.search(r"\{.*\}", cleaned, re.DOTALL)
+        if m:
+            info = json.loads(m.group())
+            title_hint = (info.get("title_hint") or "").strip().lower()
+            if info.get("date") and info["date"] != "null":
+                date = info["date"]
+    except Exception as e:
+        log.warning(f"취소 파싱 실패 (무시): {e}")
+
+    # 후보 조회 — date가 있으면 당일, 없으면 향후 2주
+    try:
+        if date:
+            events = cal.get_upcoming_meetings(creds, start_date=date, end_date=date)
+        else:
+            events = cal.get_upcoming_meetings(creds, days=14, from_now=True)
+    except Exception as e:
+        _post(slack_client, user_id=user_id, channel=channel, thread_ts=thread_ts,
+              text=f"❌ 캘린더 조회 실패: {e}")
+        return
+
+    if title_hint:
+        events = [ev for ev in events
+                  if title_hint in (ev.get("summary", "") or "").lower()]
+
+    if not events:
+        hint = f" ({date})" if date else " (향후 2주 내)"
+        _post(slack_client, user_id=user_id, channel=channel, thread_ts=thread_ts,
+              text=f"⚠️ 취소할 미팅을 찾지 못했어요.{hint}")
+        return
+
+    if len(events) == 1:
+        _post_cancel_confirm(slack_client, user_id, events[0], channel, thread_ts)
+    else:
+        _post_cancel_select(slack_client, user_id, events[:5], channel, thread_ts)
+
+
+def _post_cancel_confirm(slack_client, user_id, event, channel, thread_ts):
+    summary = event.get("summary", "(제목 없음)")
+    start_str = event.get("start", {}).get("dateTime", "")
+    try:
+        time_str = format_time(start_str)
+    except Exception:
+        time_str = start_str
+    event_id = event["id"]
+    blocks = [
+        {"type": "section", "text": {"type": "mrkdwn",
+            "text": f"🗑 이 미팅을 취소할까요?\n*{summary}* — {time_str}"}},
+        {"type": "actions", "elements": [
+            {"type": "button", "style": "danger",
+                "text": {"type": "plain_text", "text": "취소 확정"},
+                "action_id": "meeting_cancel_confirm", "value": event_id},
+            {"type": "button",
+                "text": {"type": "plain_text", "text": "유지"},
+                "action_id": "meeting_cancel_abort", "value": event_id},
+        ]},
+    ]
+    _post(slack_client, user_id=user_id, channel=channel, thread_ts=thread_ts,
+          text=f"이 미팅을 취소할까요? {summary}", blocks=blocks)
+
+
+def _post_cancel_select(slack_client, user_id, events, channel, thread_ts):
+    elements = []
+    for ev in events:
+        summary = (ev.get("summary", "(제목 없음)") or "")[:35]
+        start_str = ev.get("start", {}).get("dateTime", "")
+        try:
+            time_str = format_time(start_str)
+        except Exception:
+            time_str = start_str
+        elements.append({
+            "type": "button", "style": "danger",
+            "text": {"type": "plain_text", "text": f"🗑 {summary} {time_str}"[:75]},
+            "action_id": "meeting_cancel_confirm",
+            "value": ev["id"],
+        })
+    blocks = [
+        {"type": "section", "text": {"type": "mrkdwn",
+            "text": f"여러 미팅이 조건과 일치합니다 ({len(events)}건). 취소할 미팅을 선택해주세요."}},
+        {"type": "actions", "elements": elements},
+    ]
+    _post(slack_client, user_id=user_id, channel=channel, thread_ts=thread_ts,
+          text="취소할 미팅을 선택해주세요", blocks=blocks)
+
+
+def handle_meeting_cancel_confirm(slack_client, user_id: str, event_id: str,
+                                   body: dict = None):
+    """취소 확정 버튼 콜백 — cal.delete_event 실행"""
+    summary = "미팅"
+    try:
+        creds = user_store.get_credentials(user_id)
+        try:
+            ev = cal.get_event(creds, event_id)
+            summary = ev.get("summary", "미팅")
+        except Exception:
+            pass
+        cal.delete_event(creds, event_id)
+    except Exception as e:
+        log.exception(f"일정 취소 실패: {e}")
+        _post(slack_client, user_id=user_id, text=f"❌ 일정 취소 실패: {e}")
+        return
+
+    # 원본 버튼 메시지 교체
+    _replace_block(slack_client, body,
+                   f"🗑 *{summary}* 취소 완료")
+
+    _post(slack_client, user_id=user_id,
+          text=f"✅ *{summary}* 일정을 취소했습니다. 참석자에게 취소 알림이 자동 발송됩니다.")
+
+
+def handle_meeting_cancel_abort(slack_client, user_id: str, event_id: str,
+                                 body: dict = None):
+    """유지 버튼 콜백 — 원본 메시지만 업데이트"""
+    _replace_block(slack_client, body, "❌ 일정 취소를 취소했습니다. (유지)")
+
+
+def _replace_block(slack_client, body: dict, text: str):
+    """버튼 클릭 body에서 원본 메시지를 단일 섹션 텍스트로 교체."""
+    if not body:
+        return
+    container = body.get("container", {}) or {}
+    ch = container.get("channel_id")
+    ts = container.get("message_ts")
+    if not (ch and ts):
+        return
+    try:
+        slack_client.chat_update(
+            channel=ch, ts=ts, text=text,
+            blocks=[{"type": "section",
+                     "text": {"type": "mrkdwn", "text": text}}],
+        )
+    except Exception as e:
+        log.warning(f"블록 교체 실패: {e}")
+
+
+# ═══════════════════════════════════════════════════════════════════
+# F1: FreeBusy 기반 최적 시간대 제안
+# ═══════════════════════════════════════════════════════════════════
+
+_SLOT_PARSE_PROMPT = """다음 메시지에서 공통 빈 시간대 추천에 필요한 정보를 추출해줘.
+
+메시지: "{text}"
+
+오늘 날짜: {today} (요일: {weekday})
+
+JSON으로만 반환 (설명 없이):
+{{
+  "participants": ["이름1", "이름2"],
+  "duration_minutes": 60,
+  "range_start": "YYYY-MM-DD",
+  "range_end": "YYYY-MM-DD"
+}}
+
+규칙:
+- participants: 참석자 이름 (사용자 본인 제외)
+- duration_minutes: 언급 없으면 60
+- range_start/end: 기간 언급 없으면 today부터 today+7
+- "다음주" = 다음주 월~금, "이번주" = 오늘~토"""
+
+
+def suggest_meeting_slots(slack_client, user_id: str, user_message: str,
+                           channel: str = None, thread_ts: str = None):
+    """참석자 캘린더 FreeBusy 조회 → 공통 빈 시간대 제안"""
+    try:
+        creds = user_store.get_credentials(user_id)
+    except Exception as e:
+        _post(slack_client, user_id=user_id, channel=channel, thread_ts=thread_ts,
+              text=f"⚠️ 인증 오류: {e}")
+        return
+
+    today = datetime.now(KST).strftime("%Y-%m-%d")
+    weekday = ["월", "화", "수", "목", "금", "토", "일"][datetime.now(KST).weekday()]
+    info = {}
+    try:
+        raw = _generate(_SLOT_PARSE_PROMPT.format(
+            text=user_message.replace('"', "'"), today=today, weekday=weekday,
+        ))
+        cleaned = re.sub(r"```(?:json)?", "", raw).strip().strip("`")
+        m = re.search(r"\{.*\}", cleaned, re.DOTALL)
+        if m:
+            info = json.loads(m.group())
+    except Exception as e:
+        log.warning(f"슬롯 파싱 실패: {e}")
+
+    participants = info.get("participants") or []
+    duration = int(info.get("duration_minutes") or 60)
+    range_start = info.get("range_start") or today
+    range_end = info.get("range_end")
+    if not range_end:
+        try:
+            range_end = (datetime.fromisoformat(range_start).date()
+                         + timedelta(days=7)).isoformat()
+        except Exception:
+            range_end = today
+
+    if not participants:
+        _post(slack_client, user_id=user_id, channel=channel, thread_ts=thread_ts,
+              text=("⚠️ 누구 일정을 확인할지 알려주세요.\n"
+                    "예: `김민환, 홍길동이랑 다음주에 1시간 미팅 잡을 시간 찾아줘`"))
+        return
+
+    _post(slack_client, user_id=user_id, channel=channel, thread_ts=thread_ts,
+          text=f"🔎 *{', '.join(participants)}*의 일정을 확인하고 있어요...")
+
+    # 이메일 해석
+    emails: list[str] = []
+    missing: list[str] = []
+    for name in participants:
+        cands = _find_email_candidates(user_id, name, slack_client)
+        if cands:
+            emails.append(cands[0])
+        else:
+            missing.append(name)
+    creator = _lookup_slack_email(slack_client, user_id)
+    if creator and creator.lower() not in {e.lower() for e in emails}:
+        emails.insert(0, creator)
+
+    if missing:
+        _post(slack_client, user_id=user_id, channel=channel, thread_ts=thread_ts,
+              text=f"⚠️ 이메일을 찾지 못한 참석자: {', '.join(missing)}. 나머지만으로 검색합니다.")
+    if not emails:
+        return
+
+    # FreeBusy 조회
+    try:
+        time_min = datetime.fromisoformat(f"{range_start}T00:00:00+09:00")
+        time_max = datetime.fromisoformat(f"{range_end}T23:59:59+09:00")
+    except Exception as e:
+        _post(slack_client, user_id=user_id, channel=channel, thread_ts=thread_ts,
+              text=f"⚠️ 기간 파싱 실패: {e}")
+        return
+
+    try:
+        fb = cal.freebusy_query(creds, emails, time_min, time_max)
+    except Exception as e:
+        log.exception(f"freebusy 조회 실패: {e}")
+        _post(slack_client, user_id=user_id, channel=channel, thread_ts=thread_ts,
+              text=f"❌ FreeBusy 조회 실패: {e}")
+        return
+
+    errors = fb.pop("errors", [])
+    if errors:
+        err_emails = sorted({e["email"] for e in errors})
+        _post(slack_client, user_id=user_id, channel=channel, thread_ts=thread_ts,
+              text=(f"⚠️ 권한 없는 이메일: {', '.join(err_emails)}. "
+                    f"해당 인원의 바쁜 시간은 반영되지 않습니다."))
+
+    all_busy: list[tuple] = []
+    for em, busy in fb.items():
+        all_busy.extend(busy)
+
+    candidates = _find_free_slots(time_min, time_max, all_busy, duration,
+                                   preferred_hours=list(range(9, 18)),
+                                   max_results=5)
+    if not candidates:
+        _post(slack_client, user_id=user_id, channel=channel, thread_ts=thread_ts,
+              text="⚠️ 공통 빈 시간대를 찾지 못했어요. 기간을 늘려 다시 시도해주세요.")
+        return
+
+    weekday_kr = ["월", "화", "수", "목", "금", "토", "일"]
+    elements = []
+    for i, (s, e) in enumerate(candidates):
+        wd = weekday_kr[s.weekday()]
+        label = f"{s.strftime('%m/%d')} ({wd}) {s.strftime('%H:%M')}~{e.strftime('%H:%M')}"
+        elements.append({
+            "type": "button",
+            "text": {"type": "plain_text", "text": label[:75]},
+            "action_id": "slot_create_meeting",
+            "value": f"{s.isoformat()}|{e.isoformat()}|{','.join(emails)}",
+        })
+    blocks = [
+        {"type": "section", "text": {"type": "mrkdwn",
+            "text": (f"📅 *{', '.join(participants)}* 와의 공통 빈 시간 ({duration}분)\n"
+                     f"시간대를 선택하면 해당 시간으로 미팅을 생성합니다.")}},
+        {"type": "actions", "elements": elements},
+    ]
+    _post(slack_client, user_id=user_id, channel=channel, thread_ts=thread_ts,
+          text="공통 빈 시간 추천", blocks=blocks)
+
+
+def _find_free_slots(time_min, time_max, busy: list[tuple], duration_min: int,
+                     preferred_hours: list[int], max_results: int = 5,
+                     step_min: int = 30) -> list[tuple]:
+    """공통 빈 시간대 계산. busy: 합친 바쁨 시간대 리스트."""
+    # 병합·정렬
+    busy_sorted = sorted([(s, e) for s, e in busy], key=lambda x: x[0])
+    merged = []
+    for s, e in busy_sorted:
+        if merged and s <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], e))
+        else:
+            merged.append((s, e))
+
+    results = []
+    cur = time_min
+    # 첫 preferred_hour로 정렬
+    if cur.hour not in preferred_hours:
+        valid = [h for h in preferred_hours if h > cur.hour]
+        if valid:
+            cur = cur.replace(hour=valid[0], minute=0, second=0, microsecond=0)
+        else:
+            cur = (cur.replace(hour=preferred_hours[0], minute=0, second=0,
+                               microsecond=0) + timedelta(days=1))
+
+    loop_limit = 1000  # 안전장치
+    while cur < time_max and len(results) < max_results and loop_limit > 0:
+        loop_limit -= 1
+        # 주말 skip
+        if cur.weekday() >= 5:
+            cur = cur.replace(hour=preferred_hours[0], minute=0) + timedelta(days=1)
+            continue
+        # 선호 시간대 밖이면 점프
+        if cur.hour not in preferred_hours:
+            valid = [h for h in preferred_hours if h > cur.hour]
+            if valid:
+                cur = cur.replace(hour=valid[0], minute=0)
+            else:
+                cur = cur.replace(hour=preferred_hours[0], minute=0) + timedelta(days=1)
+            continue
+
+        slot_start = cur
+        slot_end = cur + timedelta(minutes=duration_min)
+        # slot_end의 종료 시각이 마지막 preferred_hour+1 밖이면 skip
+        last_pref = max(preferred_hours) + 1
+        if slot_end.hour > last_pref or (slot_end.hour == last_pref and slot_end.minute > 0):
+            cur = cur.replace(hour=preferred_hours[0], minute=0) + timedelta(days=1)
+            continue
+
+        # 충돌 검사
+        conflict_until = None
+        for bs, be in merged:
+            if slot_start < be and bs < slot_end:
+                conflict_until = be
+                break
+        if conflict_until:
+            cur = conflict_until
+            # step_min 경계로 올림
+            mins_to_next = (step_min - cur.minute % step_min) % step_min
+            if mins_to_next:
+                cur = cur + timedelta(minutes=mins_to_next)
+        else:
+            results.append((slot_start, slot_end))
+            cur = slot_start + timedelta(minutes=step_min)
+
+    return results
+
+
+def handle_slot_create_meeting(slack_client, user_id: str, slot_value: str,
+                                body: dict = None):
+    """슬롯 버튼 콜백 — 선택한 시간으로 실제 미팅 생성"""
+    try:
+        parts = slot_value.split("|", 2)
+        start_dt = datetime.fromisoformat(parts[0])
+        end_dt = datetime.fromisoformat(parts[1])
+        emails = [em for em in (parts[2] if len(parts) > 2 else "").split(",") if em]
+    except Exception as e:
+        _post(slack_client, user_id=user_id, text=f"⚠️ 슬롯 파싱 실패: {e}")
+        return
+
+    try:
+        creds = user_store.get_credentials(user_id)
+        event = cal.create_event(
+            creds, summary="신규 미팅 (슬롯 추천)",
+            start_dt=start_dt, end_dt=end_dt,
+            attendee_emails=emails,
+            description="",
+        )
+        meet_link = event.get("hangoutLink") or ""
+        msg = (f"✅ 미팅이 생성되었습니다: "
+               f"{start_dt.strftime('%m/%d %H:%M')}~{end_dt.strftime('%H:%M')}\n"
+               f"참석자: {', '.join(emails) if emails else '없음'}")
+        if meet_link:
+            msg += f"\n🎥 Google Meet: <{meet_link}|회의 참여>"
+        msg += "\n_스레드 답글로 제목·어젠다 등을 알려주시면 업데이트해드려요._"
+        _post(slack_client, user_id=user_id, text=msg)
+        _replace_block(slack_client, body,
+                       f"✅ 선택됨: {start_dt.strftime('%m/%d %H:%M')}~{end_dt.strftime('%H:%M')}")
+    except Exception as e:
+        log.exception(f"슬롯 → 미팅 생성 실패: {e}")
+        _post(slack_client, user_id=user_id, text=f"❌ 미팅 생성 실패: {e}")
+
+
+# ═══════════════════════════════════════════════════════════════════
+# I2(b): 드림플러스 회의실 자동 추천 전 예약 여부 확인
+# ═══════════════════════════════════════════════════════════════════
+
+def offer_room_booking(slack_client, *, user_id: str, start_dt: datetime,
+                        end_dt: datetime, title: str, attendee_count: int,
+                        channel: str = None, thread_ts: str = None,
+                        event_id: str = None):
+    """_create_calendar_event가 직접 auto_book_room을 호출하는 대신, 먼저 사용자에게
+    '회의실을 예약할까요?'를 묻고 동의 시 auto_book_room 실행."""
+    offer_id = f"{user_id}:{int(start_dt.timestamp())}"
+    _pending_room_offer[offer_id] = {
+        "user_id": user_id,
+        "start_dt_iso": start_dt.isoformat(),
+        "end_dt_iso": end_dt.isoformat(),
+        "title": title,
+        "attendee_count": attendee_count,
+        "channel": channel,
+        "thread_ts": thread_ts,
+        "event_id": event_id,
+    }
+    date_str = start_dt.strftime("%m/%d")
+    time_str = f"{start_dt.strftime('%H:%M')}~{end_dt.strftime('%H:%M')}"
+    blocks = [
+        {"type": "section", "text": {"type": "mrkdwn",
+            "text": (f"🏢 *{title}* — 드림플러스 회의실을 예약할까요?\n"
+                     f"{date_str} {time_str} · {attendee_count}인 기준")}},
+        {"type": "actions", "elements": [
+            {"type": "button", "style": "primary",
+                "text": {"type": "plain_text", "text": "🏢 추천 보기"},
+                "action_id": "room_offer_show", "value": offer_id},
+            {"type": "button",
+                "text": {"type": "plain_text", "text": "건너뛰기"},
+                "action_id": "room_offer_skip", "value": offer_id},
+        ]},
+    ]
+    _post(slack_client, user_id=user_id, channel=channel, thread_ts=thread_ts,
+          text="드림플러스 회의실을 예약할까요?", blocks=blocks)
+
+
+def handle_room_offer_show(slack_client, user_id: str, offer_id: str,
+                            body: dict = None):
+    """추천 보기 → auto_book_room 실제 호출"""
+    payload = _pending_room_offer.pop(offer_id, None)
+    if not payload:
+        _post(slack_client, user_id=user_id, text="⚠️ 만료된 요청입니다.")
+        return
+    _replace_block(slack_client, body,
+                   f"🏢 *{payload['title']}* — 회의실 추천을 조회합니다...")
+    from agents import dreamplus as dreamplus_agent
+    threading.Thread(
+        target=dreamplus_agent.auto_book_room,
+        kwargs=dict(
+            slack_client=slack_client,
+            user_id=user_id,
+            start_dt=datetime.fromisoformat(payload["start_dt_iso"]),
+            end_dt=datetime.fromisoformat(payload["end_dt_iso"]),
+            title=payload["title"],
+            attendee_count=payload["attendee_count"],
+            channel=payload.get("channel"),
+            thread_ts=payload.get("thread_ts"),
+            event_id=payload.get("event_id"),
+        ),
+        daemon=True,
+    ).start()
+
+
+def handle_room_offer_skip(slack_client, user_id: str, offer_id: str,
+                            body: dict = None):
+    _pending_room_offer.pop(offer_id, None)
+    _replace_block(slack_client, body, "⏭ 회의실 예약을 건너뛰었습니다.")

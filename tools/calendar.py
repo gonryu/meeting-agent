@@ -203,6 +203,47 @@ def get_event(creds: Credentials, event_id: str) -> dict:
     ).execute()
 
 
+def delete_event(creds: Credentials, event_id: str, send_updates: str = "all") -> None:
+    """캘린더 이벤트 삭제. send_updates: 'all'|'externalOnly'|'none'.
+    참석자 전원에게 취소 알림(기본값). Google이 자동으로 취소 메일 발송."""
+    _service(creds).events().delete(
+        calendarId="primary", eventId=event_id,
+        sendUpdates=send_updates,
+    ).execute()
+
+
+def freebusy_query(creds: Credentials, emails: list[str],
+                   time_min: datetime, time_max: datetime,
+                   timezone: str = "Asia/Seoul") -> dict:
+    """Google Calendar FreeBusy API로 여러 이메일의 바쁜 시간대 조회.
+    Returns: {email: [(busy_start, busy_end), ...], "errors": [{email, reason}]}"""
+    body = {
+        "timeMin": time_min.isoformat(),
+        "timeMax": time_max.isoformat(),
+        "timeZone": timezone,
+        "items": [{"id": e} for e in emails],
+    }
+    result = _service(creds).freebusy().query(body=body).execute()
+    calendars = result.get("calendars", {})
+    out = {"errors": []}
+    for email in emails:
+        info = calendars.get(email, {})
+        errs = info.get("errors") or []
+        if errs:
+            out["errors"].extend([{"email": email, "reason": e.get("reason")} for e in errs])
+            continue
+        busy = []
+        for b in info.get("busy", []):
+            try:
+                s = datetime.fromisoformat(b["start"])
+                e = datetime.fromisoformat(b["end"])
+                busy.append((s, e))
+            except Exception:
+                continue
+        out[email] = busy
+    return out
+
+
 def get_event_attendees(creds: Credentials, event_id: str) -> list[dict]:
     """캘린더 이벤트에서 외부 참석자 이름+이메일 반환 (내부 도메인 제외)
     Returns: [{"name": "...", "email": "..."}]
