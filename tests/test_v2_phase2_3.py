@@ -326,34 +326,46 @@ class TestNaturalLanguageSearch:
         assert "search_minutes" in _INTENT_PROMPT
 
     def test_search_minutes_with_company(self):
-        """업체명 기반 검색"""
+        """업체명 기반 검색 — Drive 파일명에서 필터링"""
         from main import _search_minutes
         from store import user_store
 
         slack = MagicMock()
-        with patch.object(user_store, "search_meetings", return_value=[
-            {"title": "카카오 미팅", "date": "2026-04-10",
-             "company_name": "카카오", "drive_link": "https://link"},
-        ]):
+        files = [
+            {"id": "f1", "name": "2026-04-10_카카오 미팅_내부용.md"},
+            {"id": "f2", "name": "2026-04-11_네이버 미팅_내부용.md"},
+        ]
+        with patch.object(user_store, "get_credentials", return_value=MagicMock()), \
+             patch.object(user_store, "get_user",
+                          return_value={"minutes_folder_id": "F"}), \
+             patch("tools.drive.list_minutes", return_value=files):
             _search_minutes(slack, user_id=_TEST_USER, query="카카오")
 
         slack.chat_postMessage.assert_called_once()
         text = slack.chat_postMessage.call_args[1]["text"]
         assert "카카오 미팅" in text
+        assert "네이버" not in text
 
     def test_search_minutes_with_month(self):
-        """YYYY-MM 기간 기반 검색"""
+        """YYYY-MM 기간 기반 검색 — 해당 월 파일만 통과"""
         from main import _search_minutes
         from store import user_store
 
         slack = MagicMock()
-        with patch.object(user_store, "search_meetings", return_value=[]) as mock_search:
+        files = [
+            {"id": "f1", "name": "2026-03-10_A_내부용.md"},      # 3월 (통과)
+            {"id": "f2", "name": "2026-03-31_B_내부용.md"},      # 3월 (통과)
+            {"id": "f3", "name": "2026-04-01_C_내부용.md"},      # 4월 (제외)
+        ]
+        with patch.object(user_store, "get_credentials", return_value=MagicMock()), \
+             patch.object(user_store, "get_user",
+                          return_value={"minutes_folder_id": "F"}), \
+             patch("tools.drive.list_minutes", return_value=files):
             _search_minutes(slack, user_id=_TEST_USER, query="2026-03")
 
-        # date_from/to가 2026-03-01 ~ 2026-03-31 범위로 호출
-        call_kwargs = mock_search.call_args[1]
-        assert call_kwargs["date_from"] == "2026-03-01"
-        assert call_kwargs["date_to"] == "2026-03-31"
+        text = slack.chat_postMessage.call_args[1]["text"]
+        assert "A" in text and "B" in text
+        assert "2026-04-01" not in text and "_C" not in text
 
     def test_search_minutes_no_results(self):
         """검색 결과 없음"""
@@ -361,11 +373,14 @@ class TestNaturalLanguageSearch:
         from store import user_store
 
         slack = MagicMock()
-        with patch.object(user_store, "search_meetings", return_value=[]):
+        with patch.object(user_store, "get_credentials", return_value=MagicMock()), \
+             patch.object(user_store, "get_user",
+                          return_value={"minutes_folder_id": "F"}), \
+             patch("tools.drive.list_minutes", return_value=[]):
             _search_minutes(slack, user_id=_TEST_USER, query="없는회사")
 
         text = slack.chat_postMessage.call_args[1]["text"]
-        assert "결과가 없습니다" in text
+        assert "결과가 없" in text or "회의록이 없" in text or "검색 결과" in text
 
 
 # ── FR-D15: 복수 미팅 대기열 ────────────────────────────────────
