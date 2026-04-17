@@ -325,18 +325,25 @@ def confirm_room_booking(slack_client, body: dict):
     msg_channel = container.get("channel_id")
     msg_ts = container.get("message_ts")
 
-    def _replace_blocks(text: str):
-        """원본 회의실 선택 메시지를 정보성 텍스트로 교체 (버튼 제거)."""
+    def _delete_original():
+        """원본 회의실 선택 메시지 삭제 (B6: 중복 예약 방지 + UX 중복 제거).
+        실패 시 chat_update로 폴백하여 최소한 버튼은 제거."""
         if not (msg_channel and msg_ts):
             return
         try:
+            slack_client.chat_delete(channel=msg_channel, ts=msg_ts)
+            return
+        except Exception as e:
+            log.warning(f"회의실 선택 메시지 삭제 실패, 업데이트로 폴백: {e}")
+        try:
             slack_client.chat_update(
                 channel=msg_channel, ts=msg_ts,
-                text=text,
-                blocks=[{"type": "section", "text": {"type": "mrkdwn", "text": text}}],
+                text="✅ 선택 완료 — 예약 결과는 아래 메시지를 확인하세요.",
+                blocks=[{"type": "section", "text": {"type": "mrkdwn",
+                         "text": "✅ _선택 완료 — 예약 결과는 아래 메시지를 확인하세요._"}}],
             )
         except Exception as e:
-            log.warning(f"회의실 선택 메시지 업데이트 실패: {e}")
+            log.warning(f"회의실 선택 메시지 업데이트도 실패: {e}")
 
     # value: {roomCode}|{start}|{end}|{title}|{roomName}|{event_id?}
     try:
@@ -368,10 +375,8 @@ def confirm_room_booking(slack_client, body: dict):
     time_str = f"{start_dt.strftime('%m/%d %H:%M')}~{end_dt.strftime('%H:%M')}"
     location_str = f"드림플러스 강남 {room_name}"
 
-    # 원본 메시지를 "예약됨"으로 교체해 남은 버튼들로 중복 예약되는 것을 차단
-    _replace_blocks(
-        f"✅ *드림플러스 회의실 예약 완료*\n*{room_name}* | {time_str} | {meeting_title}"
-    )
+    # 원본 선택 메시지 삭제 → 결과 메시지 하나만 남김
+    _delete_original()
 
     _post(slack_client, user_id,
           f"✅ 드림플러스 회의실 예약 완료!\n*{room_name}* | {time_str} | {meeting_title}")
