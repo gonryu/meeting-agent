@@ -292,48 +292,70 @@ class TestEndSession:
         assert _TEST_USER not in _active_sessions
 
     def test_session_removed_after_end_with_event(self):
-        """이벤트 있는 세션: 종료 후 _active_sessions에서 삭제, 백그라운드 스레드 실행"""
+        """I1: event_id 있는 세션 종료 시 _active_sessions 제거 + 소스 선택 대기 등록"""
+        from agents.during import _pending_source_select
+        _pending_source_select.clear()
         self._init_session(event_id="evt_kakao")
         slack = _slack()
 
-        with _mock_store(), \
-             patch("agents.during.threading.Thread") as mock_thread:  # 백그라운드 스레드 차단
+        with _mock_store():
             end_session(slack, _TEST_USER)
 
         assert _TEST_USER not in _active_sessions
-        # 백그라운드 스레드가 _generate_from_session_end로 실행됨
-        mock_thread.assert_called_once()
-        call_kwargs = mock_thread.call_args[1]["kwargs"]
-        assert call_kwargs["event_id"] == "evt_kakao"
-        assert call_kwargs["user_id"] == _TEST_USER
+        # I1: 즉시 생성이 아니라 _pending_source_select에 등록되고 선택 블록 발송
+        assert "evt_kakao" in _pending_source_select
+        payload = _pending_source_select["evt_kakao"]
+        assert payload["user_id"] == _TEST_USER
+        assert payload["title"] == "카카오 미팅"
+        assert len(payload["notes"]) == 2
 
-    def test_background_thread_when_event_id_known(self):
-        """event_id 있으면 _generate_from_session_end를 백그라운드 스레드로 실행"""
+    def test_source_selection_block_posted_with_event(self):
+        """I1: event_id 있는 세션 종료 시 소스 선택 Slack 블록 발송"""
+        from agents.during import _pending_source_select
+        _pending_source_select.clear()
         self._init_session(event_id="evt123")
         slack = _slack()
 
-        with _mock_store(), \
-             patch("agents.during.threading.Thread") as mock_thread:
+        with _mock_store():
             end_session(slack, _TEST_USER)
 
-        # 백그라운드 스레드가 실행됨
+        # 두 번 호출됨: 종료 확인 메시지 + 소스 선택 블록
+        calls = slack.chat_postMessage.call_args_list
+        texts = [c[1].get("text", "") for c in calls]
+        assert any("세션 종료" in t for t in texts)
+        # 소스 선택 블록에는 4개 버튼(transcript/notes/wait/cancel)
+        block_calls = [c for c in calls if c[1].get("blocks")]
+        found_src_buttons = False
+        for c in block_calls:
+            for block in c[1]["blocks"]:
+                for el in block.get("elements", []) or []:
+                    if el.get("action_id", "").startswith("minutes_src_"):
+                        found_src_buttons = True
+        assert found_src_buttons, "minutes_src_* 버튼이 있어야 함"
+
+    def test_source_select_transcript_spawns_generation_thread(self):
+        """I1: '트랜스크립트 탐색' 선택 시 _generate_from_session_end가 백그라운드 스레드로 실행"""
+        from agents.during import _pending_source_select, handle_minutes_source_select
+        _pending_source_select["evt123"] = {
+            "user_id": _TEST_USER,
+            "title": "카카오 미팅",
+            "notes": [{"time": "14:05", "text": "n1"}, {"time": "14:10", "text": "n2"}],
+            "started_at": "2026-03-25 14:00",
+            "ended_at": "15:00",
+            "post_channel": None,
+            "post_thread_ts": None,
+        }
+        slack = _slack()
+        with patch("agents.during.threading.Thread") as mock_thread:
+            handle_minutes_source_select(slack, _TEST_USER, "evt123", "transcript")
+
+        assert "evt123" not in _pending_source_select
         mock_thread.assert_called_once()
         call_kwargs = mock_thread.call_args[1]["kwargs"]
+        assert call_kwargs["event_id"] == "evt123"
         assert call_kwargs["title"] == "카카오 미팅"
         assert len(call_kwargs["notes"]) == 2
-        assert call_kwargs["event_id"] == "evt123"
-
-    def test_deferred_sends_wait_message(self):
-        """event_id 있는 경우 트랜스크립트 대기 안내 메시지 발송"""
-        self._init_session(event_id="evt123")
-        slack = _slack()
-
-        with _mock_store(), \
-             patch("agents.during.threading.Thread"):  # 즉시 폴링 스레드 차단
-            end_session(slack, _TEST_USER)
-
-        text = slack.chat_postMessage.call_args[1]["text"]
-        assert "트랜스크립트" in text or "90분" in text
+        assert call_kwargs["source"] == "transcript"
 
     def test_immediate_generation_when_no_event_id(self):
         """event_id 없으면 즉시 내부용 생성 후 검토 대기 (draft)"""
@@ -822,7 +844,9 @@ class TestSessionPersistence:
         assert not (isolated_sessions_dir / f"active_{_TEST_USER}.json").exists()
 
     def test_active_file_deleted_on_end_with_event(self, isolated_sessions_dir):
-        """event_id 있는 세션 종료 시 active 파일 삭제 + 백그라운드 스레드 실행"""
+        """event_id 있는 세션 종료 시 active 파일 삭제 + 소스 선택 대기 등록 (I1)"""
+        from agents.during import _pending_source_select
+        _pending_source_select.clear()
         event_id = "evt_persist"
         _active_sessions[_TEST_USER] = {
             "title": "폴러 위임 테스트",
@@ -832,17 +856,16 @@ class TestSessionPersistence:
         }
         during._save_active_session(_TEST_USER)
 
-        with _mock_store(), \
-             patch("agents.during.threading.Thread") as mock_thread:  # 백그라운드 스레드 차단
+        with _mock_store():
             end_session(_slack(), _TEST_USER)
 
         # active 파일 삭제됨
         assert not (isolated_sessions_dir / f"active_{_TEST_USER}.json").exists()
-        # 백그라운드 스레드가 올바른 인자로 실행됨
-        mock_thread.assert_called_once()
-        call_kwargs = mock_thread.call_args[1]["kwargs"]
-        assert call_kwargs["title"] == "폴러 위임 테스트"
-        assert len(call_kwargs["notes"]) == 1
+        # I1: 즉시 생성이 아니라 소스 선택 대기 payload가 등록됨
+        assert event_id in _pending_source_select
+        payload = _pending_source_select[event_id]
+        assert payload["title"] == "폴러 위임 테스트"
+        assert len(payload["notes"]) == 1
 
     def test_completed_note_file_deleted_after_transcript_processing(self, isolated_sessions_dir):
         """폴러가 트랜스크립트 처리 후 completed 파일 삭제"""

@@ -281,12 +281,18 @@ cd frontend && ./serve.sh           # http://localhost:3030 → config.js의 BAC
 
 **생성 경로 (4가지):**
 
-- **경로 A — `/미팅종료`**: `end_session()` → `_generate_from_session_end()`. 노트(필수) + 트랜스크립트(1회 탐색). 트랜스크립트 없으면 경로 D로 대기 등록.
+- **경로 A — `/미팅종료`**: `end_session()` → **소스 선택 블록**(`🎙️ 트랜스크립트 / 📝 노트만 / 🕐 트랜스크립트 대기 / ❌ 취소`) → 사용자 선택 → `handle_minutes_source_select()` → `_generate_from_session_end(source=...)`. `transcript`면 1회 탐색 후 없으면 경로 D 등록. `notes`면 즉시 노트만으로 생성. `wait`면 경로 D만 등록하고 즉시 생성 안 함.
 - **경로 B — 자동 폴링**: `check_transcripts()` → `_check_transcripts_for_user()`. 10분 주기로 최근 종료(10~90분) 미팅의 트랜스크립트 탐색. 트랜스크립트(필수) + 노트(있으면).
 - **경로 C — 노트 fallback**: `_flush_expired_notes()`. 90분 경과 후 트랜스크립트 없이 노트만으로 생성.
 - **경로 D — 트랜스크립트 늦게 도착 보강**: `_check_awaiting_transcripts()`. 경로 A에서 트랜스크립트 없이 생성 후, `_awaiting_transcript` 딕셔너리에 등록. 10분 주기 폴링으로 90분간 트랜스크립트 도착 체크. 도착 시 트랜스크립트 + 기존 노트로 보강 회의록 재생성 → 사용자 검토.
 
 모든 경로 → `_generate_and_post_minutes()` → 내부용·외부용 회의록 생성 (Claude Sonnet) → Slack 초안 발송 (✅저장/✏️수정/❌취소) → 사용자 확인 후 Drive 저장 + After Agent 트리거.
+
+**채널/스레드 유지 (B2):** 세션이 채널에서 시작된 경우(`session_channel`/`session_thread_ts`), 종료 알림·소스 선택 블록·회의록 초안·최종 링크 메시지가 모두 같은 채널(+스레드)에 발송됨. DM에서 시작된 세션은 DM으로 유지. `_generate_and_post_minutes`·`_post_minutes_draft`·`_post_combined_minutes`·`_check_awaiting_transcripts`가 `post_channel`/`post_thread_ts`를 전파.
+
+**스레드 메모 대상 확정 (B3):** 회의록 초안 스레드에 수정 요청을 달면 `find_draft_by_thread_ts(user_id, thread_ts)`로 해당 스레드의 초안을 정확히 식별해 수정. 복수 초안이 있어도 엉뚱한 회의록에 반영되지 않음.
+
+**복수 후보 미팅 모호성 해소 (B1):** `/미팅시작`에 현재 시각 진행 중인 이벤트가 2개 이상이면 자동 선택 대신 선택 UI를 발송. 해당 클릭 흐름은 `_prompt_event_selection` → `handle_event_selection` (기존 헬퍼 재사용).
 
 ---
 

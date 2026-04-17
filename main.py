@@ -43,11 +43,13 @@ from agents.during import (
     cancel_minutes,
     request_minutes_edit,
     handle_minutes_edit_reply,
+    handle_minutes_source_select,
     handle_event_selection,
     handle_event_title_reply,
     _pending_minutes,
     _pending_inputs,
     _find_draft_for_user,
+    find_draft_by_thread_ts,
     get_session_thread,
 )
 from agents import after
@@ -233,14 +235,14 @@ def handle_message(event, client):
         if not _check_registered(client, user_id):
             return
 
-        # 회의록 수정 요청 스레드 답글 감지 (FR-D14: event_id 키 방식)
+        # 회의록 수정 요청 스레드 답글 감지 — thread_ts로 정확한 초안 매칭 (B3)
         if thread_ts and user_id:
-            _found = _find_draft_for_user(user_id)
-            draft = _found[1] if _found else None
-            if draft and draft.get("draft_ts") == thread_ts:
+            found = find_draft_by_thread_ts(user_id, thread_ts)
+            if found:
                 threading.Thread(
                     target=handle_minutes_edit_reply,
                     args=(client, user_id, text),
+                    kwargs=dict(thread_ts=thread_ts),
                     daemon=True,
                 ).start()
                 return
@@ -1283,6 +1285,29 @@ def handle_minutes_cancel(ack, body, client):
 @app.action("minutes_open_doc")
 def handle_minutes_open_doc(ack, body, client):
     ack()  # URL 버튼 — 브라우저에서 열림, 별도 처리 불필요
+
+
+# ── 회의록 소스 선택 액션 핸들러 (I1) ────────────────────────
+
+def _handle_minutes_src(ack, body, client):
+    """I1: /미팅종료 후 회의록 소스 선택 버튼 콜백"""
+    ack()
+    user_id = body["user"]["id"]
+    action = body.get("actions", [{}])[0]
+    action_id = action.get("action_id", "")
+    source = action_id.removeprefix("minutes_src_")  # transcript | notes | wait | cancel
+    event_id = action.get("value", "")
+    if not event_id:
+        return
+    threading.Thread(
+        target=handle_minutes_source_select,
+        args=(client, user_id, event_id, source),
+        kwargs=dict(body=body),
+        daemon=True,
+    ).start()
+
+for _src in ("transcript", "notes", "wait", "cancel"):
+    app.action(f"minutes_src_{_src}")(_handle_minutes_src)
 
 
 # ── 명함 OCR 액션 핸들러 ────────────────────────────────────
