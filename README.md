@@ -84,6 +84,14 @@ INTERNAL_DOMAINS=parametacorp.com,iconloop.com
 # 피드백 다이제스트 발송 채널 (Slack 채널 ID 또는 관리자 사용자 ID)
 FEEDBACK_CHANNEL=C0123456789
 
+# Trello 주간 보고서 설정 (선택)
+# - TRELLO_WORKSPACE: 대상 워크스페이스 이름/displayName (기본 CorpDev_BS)
+# - TRELLO_REPORT_CHANNEL: 보고서 발송 Slack 채널 (미설정 시 FEEDBACK_CHANNEL 사용)
+# - TRELLO_REPORT_USER_ID: Drive·Trello 토큰을 사용할 Slack user_id (미설정 시 자동 선택)
+# - TRELLO_REPORT_FOLDER_NAME: Drive 저장 폴더명 (기본 "Trello 주간 보고서")
+TRELLO_WORKSPACE=CorpDev_BS
+TRELLO_REPORT_CHANNEL=C0123456789
+
 # ParaScope 연동 (선택)
 PARASCOPE_BOT_ID=...
 PARASCOPE_BOT_APP_ID=...
