@@ -11,8 +11,6 @@ KST = ZoneInfo("Asia/Seoul")
 
 import logging
 import anthropic
-from google import genai
-from google.genai import types as genai_types
 from dotenv import load_dotenv
 from slack_sdk import WebClient
 
@@ -42,8 +40,6 @@ from store import user_store
 
 load_dotenv(override=True)
 
-_gemini = genai.Client(api_key=os.getenv("GOOGLE_API_KEY"))
-_GEMINI_MODEL = "gemini-2.0-flash"
 _claude = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
 _CLAUDE_MODEL = "claude-haiku-4-5"
 
@@ -213,49 +209,33 @@ def _post(slack_client, *, user_id: str, channel=None, thread_ts=None,
     return slack_client.chat_postMessage(**kwargs)
 
 
-# ── LLM 호출 헬퍼 (Gemini 우선, 실패 시 Claude 폴백) ────────
+# ── LLM 호출 헬퍼 (Claude 단일) ────────────────────────────
 
 def _search(prompt: str) -> str:
-    """웹 검색 포함 LLM 호출 — Gemini 우선, 실패 시 Claude"""
-    try:
-        resp = _gemini.models.generate_content(
-            model=_GEMINI_MODEL,
-            contents=prompt,
-            config=genai_types.GenerateContentConfig(
-                tools=[genai_types.Tool(google_search=genai_types.GoogleSearch())]
-            ),
-        )
-        return resp.text.strip()
-    except Exception as e:
-        log.warning(f"Gemini _search 실패, Claude로 폴백: {e}")
-        resp = _claude.beta.messages.create(
-            model=_CLAUDE_MODEL,
-            max_tokens=2048,
-            tools=[{"type": "web_search_20250305", "name": "web_search"}],
-            messages=[{"role": "user", "content": prompt}],
-            betas=["web-search-2025-03-05"],
-        )
-        return "\n".join(block.text for block in resp.content if hasattr(block, "text")).strip()
+    """웹 검색 포함 LLM 호출 — Claude web_search 도구 사용"""
+    resp = _claude.beta.messages.create(
+        model=_CLAUDE_MODEL,
+        max_tokens=2048,
+        tools=[{"type": "web_search_20250305", "name": "web_search"}],
+        messages=[{"role": "user", "content": prompt}],
+        betas=["web-search-2025-03-05"],
+    )
+    return "\n".join(block.text for block in resp.content if hasattr(block, "text")).strip()
 
 
 def generate_text(prompt: str) -> str:
-    """일반 LLM 호출 (public) — Gemini 우선, 실패 시 Claude"""
+    """일반 LLM 호출 (public) — Claude"""
     return _generate(prompt)
 
 
 def _generate(prompt: str) -> str:
-    """일반 LLM 호출 — Gemini 우선, 실패 시 Claude"""
-    try:
-        resp = _gemini.models.generate_content(model=_GEMINI_MODEL, contents=prompt)
-        return resp.text.strip()
-    except Exception as e:
-        log.warning(f"Gemini _generate 실패, Claude로 폴백: {e}")
-        resp = _claude.messages.create(
-            model=_CLAUDE_MODEL,
-            max_tokens=2048,
-            messages=[{"role": "user", "content": prompt}],
-        )
-        return resp.content[0].text.strip()
+    """일반 LLM 호출 — Claude"""
+    resp = _claude.messages.create(
+        model=_CLAUDE_MODEL,
+        max_tokens=2048,
+        messages=[{"role": "user", "content": prompt}],
+    )
+    return resp.content[0].text.strip()
 
 
 # ── 이메일→이름 변환 ─────────────────────────────────────────
@@ -980,7 +960,7 @@ def _run_briefing_research(
             company_content, _ = research_company(user_id, company_name)
         except Exception as e:
             err = str(e)
-            msg = ("⚠️ Gemini API 할당량 초과. 잠시 후 다시 시도해주세요."
+            msg = ("⚠️ AI API 할당량 초과. 잠시 후 다시 시도해주세요."
                    if "429" in err else f"⚠️ 업체 리서치 오류: {err[:200]}")
             _post(slack_client, user_id=user_id, channel=channel, thread_ts=thread_ts, text=msg)
 
@@ -1216,7 +1196,7 @@ def create_meeting_from_text(slack_client, user_id: str, user_message: str,
         err = str(e)
         if "429" in err or "RESOURCE_EXHAUSTED" in err:
             _post(slack_client, user_id=user_id, channel=channel, thread_ts=thread_ts,
-                  text="⚠️ Gemini API 할당량 초과입니다. 잠시 후 다시 시도해주세요.")
+                  text="⚠️ AI API 할당량 초과입니다. 잠시 후 다시 시도해주세요.")
         else:
             _post(slack_client, user_id=user_id, channel=channel, thread_ts=thread_ts,
                   text=f"⚠️ AI 호출 오류: {err[:200]}")
@@ -2044,7 +2024,7 @@ def update_company_knowledge(slack_client, user_id: str,
               text="✅ company_knowledge.md 갱신 완료")
     except Exception as e:
         err = str(e)
-        msg = ("⚠️ Gemini API 할당량 초과. 잠시 후 다시 시도해주세요."
+        msg = ("⚠️ AI API 할당량 초과. 잠시 후 다시 시도해주세요."
                if "429" in err or "RESOURCE_EXHAUSTED" in err else f"⚠️ 갱신 실패: {err[:200]}")
         _post(slack_client, user_id=user_id, channel=channel, thread_ts=thread_ts, text=msg)
 

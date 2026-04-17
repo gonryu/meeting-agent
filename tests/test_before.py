@@ -1,16 +1,15 @@
 """agents/before.py 단위 테스트"""
 import os
-# import 전에 환경변수 설정 (genai.Client 초기화에 필요)
-os.environ.setdefault("GOOGLE_API_KEY", "test-key")
+# import 전에 환경변수 설정 (Anthropic 클라이언트 초기화용)
+os.environ.setdefault("ANTHROPIC_API_KEY", "test-key")
 os.environ.setdefault("ENCRYPTION_KEY", "dGVzdC1rZXktMzItYnl0ZXMtZm9yLWZlcm5ldC0h")
 os.environ.setdefault("INTERNAL_DOMAINS", "parametacorp.com,iconloop.com")
 
 import pytest
 from unittest.mock import patch, MagicMock, call
 
-# Gemini/Claude client와 google auth 모두 차단
-with patch("google.genai.Client"), \
-     patch("anthropic.Anthropic"), \
+# Claude client와 google auth 차단
+with patch("anthropic.Anthropic"), \
      patch("tools.calendar._service"), \
      patch("tools.drive._service"), \
      patch("tools.gmail._service"):

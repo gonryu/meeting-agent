@@ -11,8 +11,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-with patch("google.genai.Client"), \
-     patch("anthropic.Anthropic"):
+with patch("anthropic.Anthropic"):
     import agents.during as during
     from agents.during import (
         start_session,
@@ -713,37 +712,19 @@ class TestGetMinutesList:
         assert "4개" in text  # 14 - 10 = 4개 더 있음
 
 
-# ── _generate fallback ────────────────────────────────────────
+# ── _generate (Claude 단일) ───────────────────────────────────
 
-class TestGenerateFallback:
-    def test_claude_called_on_gemini_failure(self):
-        """Gemini 실패 시 Claude 폴백 호출"""
-        mock_gemini = MagicMock()
-        mock_gemini.models.generate_content.side_effect = Exception("429 Quota")
+class TestGenerate:
+    def test_claude_called(self):
+        """_generate → Claude messages.create 호출, 응답 텍스트 반환"""
         mock_claude = MagicMock()
         mock_claude.messages.create.return_value = MagicMock(
-            content=[MagicMock(text="Claude 생성 결과")]
+            content=[MagicMock(text="  Claude 결과  ")]
         )
-
-        with patch.object(during, "_gemini", mock_gemini), \
-             patch.object(during, "_claude", mock_claude):
+        with patch.object(during, "_claude", mock_claude):
             result = during._generate("테스트 프롬프트")
-
         mock_claude.messages.create.assert_called_once()
-        assert result == "Claude 생성 결과"
-
-    def test_gemini_success_no_claude(self):
-        """Gemini 성공 시 Claude 미호출"""
-        mock_gemini = MagicMock()
-        mock_gemini.models.generate_content.return_value = MagicMock(text="  Gemini 결과  ")
-        mock_claude = MagicMock()
-
-        with patch.object(during, "_gemini", mock_gemini), \
-             patch.object(during, "_claude", mock_claude):
-            result = during._generate("테스트")
-
-        mock_claude.messages.create.assert_not_called()
-        assert result == "Gemini 결과"
+        assert result == "Claude 결과"
 
 
 # ── _format_notes / _parse_meeting_meta ───────────────────────

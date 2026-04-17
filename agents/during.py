@@ -17,7 +17,6 @@ from zoneinfo import ZoneInfo
 
 import os
 import anthropic
-from google import genai
 
 from store import user_store
 from tools import drive, docs, calendar as cal
@@ -29,8 +28,6 @@ log = logging.getLogger(__name__)
 
 KST = ZoneInfo("Asia/Seoul")
 
-_gemini = genai.Client(api_key=os.getenv("GOOGLE_API_KEY"))
-_GEMINI_MODEL = "gemini-2.0-flash"
 _claude = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
 _CLAUDE_MODEL = "claude-haiku-4-5"
 _CLAUDE_MINUTES_MODEL = "claude-sonnet-4-5"  # 회의록 생성 전용
@@ -227,18 +224,13 @@ _pending_minutes.update(_load_pending_minutes())
 
 
 def _generate(prompt: str) -> str:
-    """텍스트 생성 — Gemini 우선, 실패 시 Claude 폴백"""
-    try:
-        resp = _gemini.models.generate_content(model=_GEMINI_MODEL, contents=prompt)
-        return resp.text.strip()
-    except Exception as e:
-        log.warning(f"Gemini _generate 실패, Claude로 폴백: {e}")
-        msg = _claude.messages.create(
-            model=_CLAUDE_MODEL,
-            max_tokens=4096,
-            messages=[{"role": "user", "content": prompt}],
-        )
-        return msg.content[0].text.strip()
+    """텍스트 생성 — Claude"""
+    msg = _claude.messages.create(
+        model=_CLAUDE_MODEL,
+        max_tokens=4096,
+        messages=[{"role": "user", "content": prompt}],
+    )
+    return msg.content[0].text.strip()
 
 
 # ── 회의록 품질 검증 (FR-D09, FR-D10) ────────────────────────
@@ -325,17 +317,12 @@ def _summarize_transcript_chunk(chunk: str, chunk_idx: int, total_chunks: int,
         f"원문의 구체적 수치·이름·날짜는 그대로 보존하세요.\n\n"
         f"[트랜스크립트 파트 {chunk_idx + 1}/{total_chunks}]\n{chunk}"
     )
-    try:
-        resp = _gemini.models.generate_content(model=_GEMINI_MODEL, contents=prompt)
-        return resp.text.strip()
-    except Exception as e:
-        log.warning(f"청크 요약 실패 (Gemini), Claude 폴백: {e}")
-        msg = _claude.messages.create(
-            model=_CLAUDE_MODEL,
-            max_tokens=4096,
-            messages=[{"role": "user", "content": prompt}],
-        )
-        return msg.content[0].text.strip()
+    msg = _claude.messages.create(
+        model=_CLAUDE_MODEL,
+        max_tokens=4096,
+        messages=[{"role": "user", "content": prompt}],
+    )
+    return msg.content[0].text.strip()
 
 
 def _preprocess_transcript(transcript: str, meeting_title: str) -> str:

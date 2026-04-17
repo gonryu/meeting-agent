@@ -22,8 +22,7 @@ os.environ.setdefault("TRELLO_API_KEY", "test-trello-key")
 os.environ.setdefault("TRELLO_BOARD_ID", "test-board-id")
 os.environ.setdefault("FEEDBACK_CHANNEL", "C_FEEDBACK")
 
-with patch("google.genai.Client"), \
-     patch("anthropic.Anthropic"), \
+with patch("anthropic.Anthropic"), \
      patch("slack_bolt.App"), \
      patch("slack_bolt.adapter.socket_mode.SocketModeHandler"):
     from agents import proposal

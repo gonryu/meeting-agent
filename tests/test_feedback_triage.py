@@ -18,7 +18,7 @@ from unittest.mock import patch, MagicMock
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
-with patch("google.genai.Client"), patch("anthropic.Anthropic"):
+with patch("anthropic.Anthropic"):
     import agents.before as before
     import agents.during as during
     from agents.before import (

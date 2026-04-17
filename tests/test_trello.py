@@ -12,7 +12,6 @@ from unittest.mock import patch, MagicMock
 
 # TrelloClient 및 외부 서비스 차단
 with patch("trello.TrelloClient"), \
-     patch("google.genai.Client"), \
      patch("anthropic.Anthropic"), \
      patch("tools.calendar._service"), \
      patch("tools.drive._service"), \
