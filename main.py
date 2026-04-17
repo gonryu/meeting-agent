@@ -86,6 +86,26 @@ def _check_registered(client, user_id: str, channel: str = None) -> bool:
     return False
 
 
+# ── 버튼 권한 검증 헬퍼 (I5) ─────────────────────────────────
+
+def _ensure_creator(client, body: dict, expected_user_id: str | None) -> bool:
+    """채널/스레드에 노출된 버튼을 요청자(생성자) 본인만 누를 수 있도록 가드.
+    expected_user_id가 None이거나 클릭한 사용자와 일치하면 True.
+    불일치 시 ephemeral 안내 후 False."""
+    clicker = body.get("user", {}).get("id")
+    if not expected_user_id or expected_user_id == clicker:
+        return True
+    try:
+        client.chat_postEphemeral(
+            channel=body.get("container", {}).get("channel_id") or clicker,
+            user=clicker,
+            text="⚠️ 이 작업은 요청자 본인만 진행할 수 있습니다.",
+        )
+    except Exception as e:
+        log.warning(f"권한 거부 ephemeral 발송 실패: {e}")
+    return False
+
+
 # ── 매일 09:00 자동 브리핑 ───────────────────────────────────
 
 def scheduled_briefing():
@@ -1253,11 +1273,22 @@ app.action("select_meeting_event_new")(_handle_meeting_event_select)
 
 # ── 회의록 검토 액션 핸들러 ─────────────────────────────────
 
+def _draft_owner(draft_key: str | None) -> str | None:
+    """draft_key 소유자 user_id 조회 (없으면 None)"""
+    if not draft_key:
+        return None
+    d = _pending_minutes.get(draft_key)
+    return d.get("user_id") if d else None
+
+
 @app.action("minutes_confirm")
 def handle_minutes_confirm(ack, body, client):
     ack()
-    user_id = body["user"]["id"]
     draft_key = body.get("actions", [{}])[0].get("value", "") or None
+    if not _ensure_creator(client, body, _draft_owner(draft_key)):
+        return
+    # user_id는 draft 소유자로 설정 (클릭한 사람이 아닌)
+    user_id = _draft_owner(draft_key) or body["user"]["id"]
     threading.Thread(
         target=finalize_minutes,
         args=(client, user_id),
@@ -1269,16 +1300,20 @@ def handle_minutes_confirm(ack, body, client):
 @app.action("minutes_edit_request")
 def handle_minutes_edit_request(ack, body, client):
     ack()
-    user_id = body["user"]["id"]
     draft_key = body.get("actions", [{}])[0].get("value", "") or None
+    if not _ensure_creator(client, body, _draft_owner(draft_key)):
+        return
+    user_id = _draft_owner(draft_key) or body["user"]["id"]
     request_minutes_edit(client, user_id, draft_key=draft_key)
 
 
 @app.action("minutes_cancel")
 def handle_minutes_cancel(ack, body, client):
     ack()
-    user_id = body["user"]["id"]
     draft_key = body.get("actions", [{}])[0].get("value", "") or None
+    if not _ensure_creator(client, body, _draft_owner(draft_key)):
+        return
+    user_id = _draft_owner(draft_key) or body["user"]["id"]
     cancel_minutes(client, user_id, draft_key=draft_key)
 
 
@@ -1290,15 +1325,21 @@ def handle_minutes_open_doc(ack, body, client):
 # ── 회의록 소스 선택 액션 핸들러 (I1) ────────────────────────
 
 def _handle_minutes_src(ack, body, client):
-    """I1: /미팅종료 후 회의록 소스 선택 버튼 콜백"""
+    """I1: /미팅종료 후 회의록 소스 선택 버튼 콜백 (I5: 본인만 허용)"""
     ack()
-    user_id = body["user"]["id"]
     action = body.get("actions", [{}])[0]
     action_id = action.get("action_id", "")
     source = action_id.removeprefix("minutes_src_")  # transcript | notes | wait | cancel
     event_id = action.get("value", "")
     if not event_id:
         return
+    # I5: 소스 선택 대기 payload의 원 소유자만 클릭 가능
+    from agents.during import _pending_source_select
+    payload = _pending_source_select.get(event_id)
+    expected = payload.get("user_id") if payload else None
+    if not _ensure_creator(client, body, expected):
+        return
+    user_id = expected or body["user"]["id"]
     threading.Thread(
         target=handle_minutes_source_select,
         args=(client, user_id, event_id, source),

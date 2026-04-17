@@ -1557,20 +1557,28 @@ def _post_combined_minutes(slack_client, *, user_id: str, title: str,
                             source_label: str, internal_body: str, external_body: str,
                             internal_file_id: str | None, external_file_id: str | None,
                             post_channel: str | None = None,
-                            post_thread_ts: str | None = None):
-    """내부용·외부용 회의록 Drive 링크를 Slack으로 발송 (B2: 채널/스레드 유지)"""
+                            post_thread_ts: str | None = None,
+                            minutes_folder_id: str | None = None):
+    """내부용·외부용 회의록 Drive 링크를 Slack으로 발송 (B2: 채널/스레드 유지, I3: 클릭 링크 + 폴더)"""
     def drive_link(file_id: str) -> str:
         return f"https://drive.google.com/file/d/{file_id}/view"
 
+    # I3: mrkdwn `<url|text>` 형식으로 클릭 가능한 링크
     if internal_file_id:
-        internal_line = f"📄 *내부용*: {drive_link(internal_file_id)}"
+        internal_line = f"📄 *내부용*: <{drive_link(internal_file_id)}|Drive에서 열기>"
     else:
         internal_line = "📄 *내부용*: Drive 저장 실패"
 
     if external_file_id:
-        external_line = f"📤 *외부용* (상대방 공유 가능): {drive_link(external_file_id)}"
+        external_line = f"📤 *외부용* (상대방 공유 가능): <{drive_link(external_file_id)}|Drive에서 열기>"
     else:
         external_line = "📤 *외부용*: Drive 저장 실패"
+
+    # I3: 저장 폴더 링크 — Minutes 폴더로 바로 이동 가능
+    folder_line = ""
+    if minutes_folder_id:
+        folder_url = f"https://drive.google.com/drive/folders/{minutes_folder_id}"
+        folder_line = f"\n📁 *저장 위치*: <{folder_url}|Minutes 폴더>"
 
     slack_client.chat_postMessage(
         channel=post_channel or user_id,
@@ -1579,6 +1587,7 @@ def _post_combined_minutes(slack_client, *, user_id: str, title: str,
             f"*📋 회의록이 생성되었습니다: {title}*  |  _소스: {source_label}_\n"
             f"{internal_line}\n"
             f"{external_line}"
+            f"{folder_line}"
         ),
     )
 
@@ -1904,6 +1913,7 @@ def finalize_minutes(slack_client, user_id: str, draft_key: str = None):
         external_file_id=external_file_id,
         post_channel=draft.get("channel"),
         post_thread_ts=draft.get("thread_ts"),
+        minutes_folder_id=minutes_folder_id,
     )
 
     threading.Thread(

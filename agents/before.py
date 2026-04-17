@@ -1641,11 +1641,21 @@ def _create_calendar_event(slack_client, user_id: str, info: dict, company: str 
         if conference_id:
             cal.enable_meet_transcription(creds, conference_id)
 
+        # I4: 생성 응답에 Google Meet 링크 포함 (hangoutLink 우선, 없으면 entryPoints에서 video 타입)
+        meet_link = event.get("hangoutLink") or ""
+        if not meet_link:
+            for ep in (event.get("conferenceData") or {}).get("entryPoints", []) or []:
+                if ep.get("entryPointType") == "video":
+                    meet_link = ep.get("uri", "")
+                    break
+
         time_str = format_time(event["start"]["dateTime"])
         attendee_display = ", ".join(attendee_emails) if attendee_emails else "없음"
         msg = f"✅ 미팅이 생성되었습니다.\n*{info.get('title', '미팅')}* — {time_str}\n참석자: {attendee_display}"
         if company:
             msg += f"\n업체: {company}"
+        if meet_link:
+            msg += f"\n🎥 *Google Meet*: <{meet_link}|회의 참여>"
         msg += "\n_이 메시지에 스레드 답글로 제목, 참석자, 어젠다를 알려주시면 업데이트해드릴게요._"
         resp = _post(slack_client, user_id=user_id, channel=channel, thread_ts=thread_ts, text=msg)
         reply_ts = resp.get("ts") if resp else None
