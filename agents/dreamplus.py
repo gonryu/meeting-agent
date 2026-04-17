@@ -178,14 +178,16 @@ def _recommend_rooms(rooms: list[dict], attendee_count: int,
 
 
 def _room_block(room: dict, start_dt: datetime, end_dt: datetime,
-                meeting_title: str = "") -> dict:
-    """회의실 선택 버튼 Block (section + button)"""
+                meeting_title: str = "", event_id: str | None = None) -> dict:
+    """회의실 선택 버튼 Block (section + button).
+    value 포맷: {roomCode}|{start}|{end}|{title}|{roomName}|{event_id}"""
     duration_min = int((end_dt - start_dt).total_seconds() / 60)
     total_pt = room.get("_total_point", room.get("point", 0) * duration_min // 30)
     pt_str = f"{total_pt:,}pt" if total_pt else "무료"
     time_str = f"{start_dt.strftime('%H:%M')}~{end_dt.strftime('%H:%M')}"
     room_name = room.get("roomName", "")
-    value = f"{room['roomCode']}|{start_dt.isoformat()}|{end_dt.isoformat()}|{meeting_title}|{room_name}"
+    value = (f"{room['roomCode']}|{start_dt.isoformat()}|{end_dt.isoformat()}"
+             f"|{meeting_title}|{room_name}|{event_id or ''}")
     return {
         "type": "section",
         "text": {
@@ -315,7 +317,8 @@ def book_room(slack_client, user_id: str, text: str,
 
 def confirm_room_booking(slack_client, body: dict):
     """dreamplus_book_room 버튼 핸들러 — 예약 확정.
-    성공 시 원본 선택 메시지를 `✅ 예약됨` 상태로 chat_update 하여 중복 클릭(중복 예약) 방지 (B6)."""
+    성공 시 원본 선택 메시지를 `✅ 예약됨` 상태로 chat_update 하여 중복 클릭(중복 예약) 방지 (B6).
+    value 6번째 필드에 event_id가 실려 오면 Google Calendar 일정의 location도 함께 업데이트."""
     user_id = body["user"]["id"]
     value = body["actions"][0]["value"]
     container = body.get("container", {}) or {}
@@ -335,13 +338,15 @@ def confirm_room_booking(slack_client, body: dict):
         except Exception as e:
             log.warning(f"회의실 선택 메시지 업데이트 실패: {e}")
 
+    # value: {roomCode}|{start}|{end}|{title}|{roomName}|{event_id?}
     try:
-        parts = value.split("|", 4)
+        parts = value.split("|", 5)
         room_code = int(parts[0])
         start_dt = datetime.fromisoformat(parts[1])
         end_dt = datetime.fromisoformat(parts[2])
         meeting_title = parts[3] if len(parts) > 3 else "회의"
         room_name = parts[4] if len(parts) > 4 else f"드림플러스 Room {room_code}"
+        event_id = parts[5].strip() if len(parts) > 5 else ""
     except Exception:
         _post(slack_client, user_id, "⚠️ 예약 정보를 파싱하지 못했습니다.")
         return
@@ -371,8 +376,7 @@ def confirm_room_booking(slack_client, body: dict):
     _post(slack_client, user_id,
           f"✅ 드림플러스 회의실 예약 완료!\n*{room_name}* | {time_str} | {meeting_title}")
 
-    # 캘린더 이벤트에 장소 업데이트 — event_id는 현재 버튼 value에 없으므로 스킵 (후속 PR에서 전달 예정)
-    event_id = None
+    # 캘린더 이벤트 장소 업데이트 (auto_book_room 경로에서 event_id 전달됨)
     if event_id:
         try:
             import tools.calendar as cal
@@ -382,6 +386,8 @@ def confirm_room_booking(slack_client, body: dict):
                   f"📍 캘린더 일정 장소가 *{location_str}* 으로 업데이트되었습니다.")
         except Exception as e:
             log.warning(f"캘린더 location 업데이트 실패: {e}")
+            _post(slack_client, user_id,
+                  f"⚠️ 예약은 완료됐지만 캘린더 장소 업데이트에 실패했어요: {e}")
 
 
 # ── /회의실조회 ───────────────────────────────────────────────
@@ -489,7 +495,8 @@ def _nav_buttons(page: int, has_next: bool, nav_value: str) -> dict:
 
 
 def _navigate_rooms(slack_client, body: dict):
-    """이전/다음 버튼 공통 핸들러"""
+    """이전/다음 버튼 공통 핸들러.
+    nav_value 포맷: {start}|{end}|{title}|{attendee}|{page}|{pref_floor}|{pref_cap}|{event_id?}"""
     user_id = body["user"]["id"]
     value = body["actions"][0]["value"]
 
@@ -502,6 +509,7 @@ def _navigate_rooms(slack_client, body: dict):
         page = int(parts[4]) if len(parts) > 4 and parts[4].isdigit() else 0
         preferred_floor = int(parts[5]) if len(parts) > 5 and parts[5].isdigit() else None
         preferred_capacity = int(parts[6]) if len(parts) > 6 and parts[6].isdigit() else None
+        event_id = parts[7].strip() if len(parts) > 7 else ""
     except Exception:
         _post(slack_client, user_id, "⚠️ 회의실 목록을 불러오지 못했습니다.")
         return
@@ -532,7 +540,9 @@ def _navigate_rooms(slack_client, body: dict):
     if preferred_capacity:
         cond_str += f" · {preferred_capacity}인실 우선"
 
-    nav_value = f"{start_dt.isoformat()}|{end_dt.isoformat()}|{meeting_title}|{attendee_count}|{{page}}|{preferred_floor or ''}|{preferred_capacity or ''}"
+    nav_value = (f"{start_dt.isoformat()}|{end_dt.isoformat()}|{meeting_title}|"
+                 f"{attendee_count}|{{page}}|{preferred_floor or ''}|"
+                 f"{preferred_capacity or ''}|{event_id or ''}")
 
     if not batch:
         # 범위 벗어난 경우 (이전 누르다가 0 미만 등) 첫 페이지로
@@ -553,7 +563,8 @@ def _navigate_rooms(slack_client, body: dict):
         {"type": "divider"},
     ]
     for room in batch:
-        blocks.append(_room_block(room, start_dt, end_dt, meeting_title))
+        blocks.append(_room_block(room, start_dt, end_dt, meeting_title,
+                                   event_id=event_id))
     has_next = len(all_candidates) > (page + 1) * 3
     blocks.append(_nav_buttons(page, has_next=has_next, nav_value=nav_value))
 
@@ -709,9 +720,11 @@ def auto_book_room(slack_client, *, user_id: str, start_dt: datetime,
         {"type": "divider"},
     ]
     page = 0
-    nav_value = f"{start_dt.isoformat()}|{end_dt.isoformat()}|{title}|{attendee_count}|{{page}}||"
+    # nav_value 포맷: {start}|{end}|{title}|{attendee_count}|{page}|{pref_floor}|{pref_capacity}|{event_id}
+    nav_value = (f"{start_dt.isoformat()}|{end_dt.isoformat()}|{title}|"
+                 f"{attendee_count}|{{page}}|||{event_id or ''}")
     for room in recommended:
-        blocks.append(_room_block(room, start_dt, end_dt, title))
+        blocks.append(_room_block(room, start_dt, end_dt, title, event_id=event_id))
     blocks.append(_nav_buttons(page, has_next=len(all_candidates) > 3, nav_value=nav_value))
     _post(slack_client, user_id,
           f"드림플러스 회의실 예약 제안: {title}", blocks=blocks,
