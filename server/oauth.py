@@ -79,8 +79,14 @@ _ASSET_VERSION = _compute_asset_version()
 # /admin/ 과 /admin HTML은 StaticFiles 마운트보다 먼저 등록해 우선순위 확보.
 # HTML은 CF가 `DYNAMIC`으로 캐시하지 않지만 안 안의 ./app.js 등 자산은 CF가 4h 캐시하므로,
 # 여기서 ?v=<git-hash> 쿼리스트링을 주입해 배포마다 새 URL을 만들어 캐시를 우회한다.
-@app.get("/admin/", include_in_schema=False)
+# /admin(trailing slash 없음)으로 오면 ./style.css 같은 상대 경로가 /style.css로 해석돼
+# 404가 나므로 /admin/로 리다이렉트한다. 브라우저가 fragment(#/dashboard)는 자동 보존.
 @app.get("/admin", include_in_schema=False)
+async def _admin_redirect():
+    return RedirectResponse(url="/admin/", status_code=301)
+
+
+@app.get("/admin/", include_in_schema=False)
 async def _admin_index():
     index_path = _frontend_dir / "index.html"
     if not index_path.is_file():
