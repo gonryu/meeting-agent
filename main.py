@@ -1369,9 +1369,14 @@ def _handle_meeting_event_select(ack, body, client):
     action_id = action.get("action_id", "")
 
     if action_id == "select_meeting_event_new":
-        # "새 미팅으로 기록" — 제목 입력 안내
+        # "새 미팅으로 기록"
         pending = _pending_inputs.get(user_id)
-        if pending:
+        # F3: 사용자가 /미팅시작 시 제목을 이미 입력했다면 (pending.custom_title)
+        # 스레드 답글 요청 없이 즉시 ad-hoc 세션 시작
+        if pending and pending.get("custom_title"):
+            handle_event_selection(client, user_id, selected_event_id=None,
+                                    custom_title=pending["custom_title"])
+        elif pending:
             client.chat_postMessage(
                 channel=user_id,
                 thread_ts=pending.get("prompt_ts"),

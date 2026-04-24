@@ -573,8 +573,13 @@ def _prompt_event_confirm(slack_client, user_id: str, event: dict, distance_min:
     pending["prompt_ts"] = resp["ts"] if resp and resp.get("ok") else None
 
 
-def _prompt_event_selection(slack_client, user_id: str, events: list[dict]):
-    """여러 캘린더 이벤트 중 선택하도록 Slack 버튼 발송."""
+def _prompt_event_selection(slack_client, user_id: str, events: list[dict],
+                             custom_title: str | None = None):
+    """여러 캘린더 이벤트 중 선택하도록 Slack 버튼 발송.
+
+    custom_title: 사용자가 /미팅시작 시 입력한 제목. "새 미팅 추가" 버튼 레이블에
+    반영됨. 있으면 클릭 즉시 ad-hoc 세션으로 진입 (스레드 답글 요청 생략).
+    """
     buttons = []
     for i, ev in enumerate(events[:5]):  # 최대 5개
         summary = ev["summary"]
@@ -591,10 +596,14 @@ def _prompt_event_selection(slack_client, user_id: str, events: list[dict]):
             "value": ev["id"],
         })
 
-    # "직접 입력" 옵션
+    # "새 미팅 추가" 옵션 — custom_title이 있으면 그 제목을 버튼에 표시
+    new_label = (
+        f'📝 새 미팅 추가 ("{custom_title}")'[:75]
+        if custom_title else "📝 새 미팅으로 기록"
+    )
     buttons.append({
         "type": "button",
-        "text": {"type": "plain_text", "text": "📝 새 미팅으로 기록"},
+        "text": {"type": "plain_text", "text": new_label},
         "action_id": "select_meeting_event_new",
     })
 
@@ -602,7 +611,7 @@ def _prompt_event_selection(slack_client, user_id: str, events: list[dict]):
         {
             "type": "section",
             "text": {"type": "mrkdwn",
-                     "text": "📅 현재 시간대에 여러 일정이 있습니다. 어떤 미팅에 대한 기록인가요?"},
+                     "text": "📅 어떤 미팅에 대한 기록인가요?"},
         },
         {"type": "actions", "elements": buttons},
     ]
@@ -721,12 +730,15 @@ def handle_event_selection(slack_client, user_id: str, selected_event_id: str | 
         if matched:
             _start_session_with_event(slack_client, user_id, matched)
         else:
-            # fallback: 제목으로 시작
-            start_session(slack_client, user_id, custom_title or "미팅")
+            # fallback: 제목으로 시작 (force_ad_hoc으로 재귀 방지)
+            start_session(slack_client, user_id,
+                          custom_title or pending.get("custom_title") or "미팅",
+                          force_ad_hoc=True)
     else:
-        # 새 미팅
-        title = custom_title or "미팅"
-        start_session(slack_client, user_id, title)
+        # 새 미팅 — custom_title 우선 (버튼 콜백 직접 인자), 없으면 pending에 저장된 값
+        title = custom_title or pending.get("custom_title") or "미팅"
+        # F3: force_ad_hoc=True로 재귀적 선택 UI 방지 (사용자가 방금 "새 미팅"을 고름)
+        start_session(slack_client, user_id, title, force_ad_hoc=True)
 
     # B2: 선택 프롬프트 이전에 보존한 채널/스레드를 세션에 주입
     if user_id in _active_sessions and (pending_channel or pending_thread_ts):
@@ -758,8 +770,17 @@ def handle_event_title_reply(slack_client, user_id: str, title_text: str):
 
 
 def start_session(slack_client, user_id: str, title: str,
-                   channel: str = None, thread_ts: str = None):
-    """/미팅시작 {제목} — 수동 노트 세션 시작"""
+                   channel: str = None, thread_ts: str = None,
+                   force_ad_hoc: bool = False):
+    """/미팅시작 {제목} — 수동 노트 세션 시작.
+
+    F3 정책(2026-04): 후보 이벤트가 1건이라도 있으면 **항상** 선택 UI를 띄움.
+    사용자가 원하는 미팅을 명시적으로 선택하거나 "새 미팅 추가"로 ad-hoc 세션을
+    만들 수 있게 함. 캘린더 이벤트 의존성을 완화.
+
+    force_ad_hoc=True: 이벤트 탐색을 건너뛰고 즉시 ad-hoc 세션 생성.
+    "새 미팅 추가" 버튼 클릭 흐름(handle_event_selection)에서 재귀 방지용으로 사용.
+    """
     try:
         creds, _ = _get_creds_and_config(user_id)
     except Exception as e:
@@ -773,20 +794,22 @@ def start_session(slack_client, user_id: str, title: str,
                    f"`/미팅종료` 후 다시 시작해주세요.")
         return
 
-    # 진행 중인 캘린더 이벤트 매칭
-    # 우선순위: 1) 현재 진행 중  2) 30분 내 시작 예정  3) 제목 일치
-    # B1: 각 버킷에서 복수 후보가 나오면 자동 선택 대신 사용자에게 선택 UI 제시
-    event_id = None
-    event_summary = None
-    event_time_str = None
     title_to_use = title or "미팅"
+
+    # force_ad_hoc=True면 이벤트 탐색 없이 바로 ad-hoc 세션 생성
+    if force_ad_hoc:
+        _create_ad_hoc_session(slack_client, user_id, title_to_use, channel, thread_ts)
+        return
+
+    # 후보 이벤트 수집: 진행 중·30분 내 시작·제목 일치 — 중복 제거 (우선순위 순)
+    candidates: list[dict] = []
     try:
         now = datetime.now(KST)
         events = cal.get_upcoming_meetings(creds, days=1)
 
-        ongoing: list[tuple] = []
-        upcoming: list[tuple] = []
-        by_title: list[tuple] = []
+        ongoing: list[dict] = []
+        upcoming: list[dict] = []
+        by_title: list[dict] = []
 
         for ev in events:
             parsed = cal.parse_event(ev)
@@ -801,69 +824,57 @@ def start_session(slack_client, user_id: str, title: str,
                 continue
 
             if start_dt <= now <= end_dt:
-                ongoing.append((parsed, start_str, end_str))
+                ongoing.append(parsed)
             elif now < start_dt <= now + timedelta(minutes=30):
-                upcoming.append((parsed, start_str, end_str))
-            if title_to_use.lower() in parsed["summary"].lower():
-                by_title.append((parsed, start_str, end_str))
+                upcoming.append(parsed)
+            if title and title.lower() in parsed["summary"].lower():
+                by_title.append(parsed)
 
-        # B1: 복수 후보 → 선택 UI로 프롬프트 (세션 생성하지 않음, 클릭 대기)
-        def _prompt_and_return(candidates):
-            _pending_inputs[user_id] = {
-                "inputs": [],
-                "events": [c[0] for c in candidates],
-                # B2: 원래 호출 컨텍스트(채널/스레드)를 보존해 선택 후 세션에 주입
-                "session_channel": channel,
-                "session_thread_ts": thread_ts,
-            }
-            _prompt_event_selection(slack_client, user_id, [c[0] for c in candidates])
-
-        if len(ongoing) > 1:
-            _prompt_and_return(ongoing)
-            return
-        if len(ongoing) == 1:
-            matched = ongoing[0]
-        elif len(upcoming) > 1:
-            _prompt_and_return(upcoming)
-            return
-        elif len(upcoming) == 1:
-            matched = upcoming[0]
-        elif len(by_title) > 1:
-            _prompt_and_return(by_title)
-            return
-        elif len(by_title) == 1:
-            matched = by_title[0]
-        else:
-            matched = None
-
-        if matched:
-            parsed, start_str, end_str = matched
-            event_id = parsed["id"]
-            event_summary = parsed["summary"]
-            event_time_str = f"{format_time(start_str)} ~ {format_time(end_str)}"
-            # 일정이 매칭되면 세션 제목도 캘린더 제목으로 덮어쓰기
-            title_to_use = event_summary
+        seen = set()
+        for bucket in (ongoing, upcoming, by_title):
+            for ev in bucket:
+                ev_id = ev.get("id")
+                if ev_id and ev_id not in seen:
+                    candidates.append(ev)
+                    seen.add(ev_id)
     except Exception as e:
         log.warning(f"캘린더 이벤트 매칭 실패: {e}")
 
+    if not candidates:
+        # 후보 0건 → 즉시 ad-hoc 세션 생성 (선택 UI 띄울 게 없음)
+        _create_ad_hoc_session(slack_client, user_id, title_to_use, channel, thread_ts)
+        return
+
+    # 후보 1건 이상 → 항상 선택 UI 표시 (F3)
+    _pending_inputs[user_id] = {
+        "inputs": [],
+        "events": candidates,
+        # B2: 원래 호출 컨텍스트(채널/스레드)를 보존해 선택 후 세션에 주입
+        "session_channel": channel,
+        "session_thread_ts": thread_ts,
+        # F3: "새 미팅 추가" 클릭 시 사용자가 입력한 제목을 그대로 사용 (스레드 답글 생략)
+        "custom_title": title if title else None,
+    }
+    _prompt_event_selection(slack_client, user_id, candidates,
+                            custom_title=title if title else None)
+
+
+def _create_ad_hoc_session(slack_client, user_id: str, title: str,
+                           channel: str | None, thread_ts: str | None):
+    """캘린더 이벤트 없이 ad-hoc 세션 생성 + 확인 메시지."""
     _active_sessions[user_id] = {
-        "title": title_to_use,
+        "title": title,
         "started_at": datetime.now(KST).strftime("%Y-%m-%d %H:%M"),
         "notes": [],
-        "event_id": event_id,
-        "event_summary": event_summary,
-        "event_time_str": event_time_str,
+        "event_id": None,
+        "event_summary": None,
+        "event_time_str": None,
         "session_channel": channel,
         "session_thread_ts": thread_ts,
     }
     _save_active_session(user_id)
-
-    if event_id:
-        event_line = f"\n📅 연동된 일정: *{event_summary}* ({event_time_str})"
-    else:
-        event_line = "\n_(캘린더 일정 미연동)_"
     _post(slack_client, user_id=user_id, channel=channel, thread_ts=thread_ts,
-          text=f"✅ *{title_to_use}* 노트 세션 시작{event_line}\n"
+          text=f"✅ *{title}* 노트 세션 시작\n_(캘린더 일정 미연동)_\n"
                f"`/메모 내용` 으로 실시간 메모를 기록하세요.\n"
                f"미팅이 끝나면 `/미팅종료` 를 입력해주세요.")
 
