@@ -306,9 +306,9 @@ cd frontend && ./serve.sh           # http://localhost:3030 → config.js의 BAC
 | Google Meet 트랜스크립트 | 자동 (Drive에 생성) | 폴링으로 수집 → `transcript_text` |
 | 수동 텍스트 노트 | 세션 스레드에 직접 타이핑 | `input_type="note"` → `notes_text` |
 | 음성 파일 STT | DM에 오디오 파일 첨부 | Deepgram → `input_type="audio"` → `notes_text` |
-| 텍스트 문서 업로드 | DM에 텍스트/문서 파일 첨부 | 텍스트 추출 → `input_type="document"` → `notes_text` |
+| 텍스트 문서 업로드 | DM에 텍스트/문서 파일 첨부 | **세션 중**: 텍스트 추출 → `input_type="document"` → `notes_text`. **세션 없을 때 (F4)**: 추출 텍스트를 `transcript_text`로 사용해 회의록 초안 바로 생성 (경로 E) |
 
-수동 노트·음성 STT·문서 업로드는 모두 세션 노트로 합쳐져 `notes_text`가 되고, 트랜스크립트는 별도 `transcript_text`로 회의록 생성에 들어감.
+수동 노트·음성 STT는 세션 노트로 합쳐져 `notes_text`가 되고, 트랜스크립트는 `transcript_text`로 회의록 생성에 들어감. 문서 업로드는 세션 유무에 따라 분기.
 
 **생성 경로 (4가지):**
 
@@ -324,7 +324,7 @@ cd frontend && ./serve.sh           # http://localhost:3030 → config.js의 BAC
 
 **스레드 메모 대상 확정 (B3):** 회의록 초안 스레드에 수정 요청을 달면 `find_draft_by_thread_ts(user_id, thread_ts)`로 해당 스레드의 초안을 정확히 식별해 수정. 복수 초안이 있어도 엉뚱한 회의록에 반영되지 않음.
 
-**복수 후보 미팅 모호성 해소 (B1):** `/미팅시작`에 현재 시각 진행 중인 이벤트가 2개 이상이면 자동 선택 대신 선택 UI를 발송. 해당 클릭 흐름은 `_prompt_event_selection` → `handle_event_selection` (기존 헬퍼 재사용).
+**미팅 선택·추가 UI (F3, 2026-04 기준):** `/미팅시작`에 후보 이벤트가 **1건이라도** 있으면 자동 바인딩 대신 선택 UI를 발송 (과거: 2건 이상일 때만 표시). 선택 UI에는 `📝 새 미팅 추가` 버튼이 포함되어 캘린더에 없는 ad-hoc 세션도 시작 가능. `/미팅시작 카카오`처럼 제목을 입력하면 버튼 라벨이 `📝 새 미팅 추가 ("카카오")`로 바뀌고 클릭 시 스레드 답글 없이 즉시 ad-hoc 진입. `start_session(..., force_ad_hoc=True)`는 '새 미팅' 분기에서 재귀 진입을 막기 위한 플래그. 후보 0건이면 선택 UI 없이 바로 `_create_ad_hoc_session()`. 클릭 흐름은 `_prompt_event_selection` → `handle_event_selection`.
 
 ---
 
