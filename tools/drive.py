@@ -204,10 +204,13 @@ def find_meet_transcript(creds: Credentials, meeting_title: str,
 
     recordings_id = recordings_folders[0]["id"]
 
-    # 회의명 서브폴더 탐색 (NFD/NFC 대응)
+    # 회의명 서브폴더 탐색 (NFD/NFC 대응).
+    # 1) 정확 매칭 (name='{title}')
+    # 2) 실패 시 부분 매칭 (name contains) — 반복 미팅의 '{title} (YYYY-MM-DD HH:MM)' 폴더 대응
     meeting_folder_id = None
     for form in ("NFD", "NFC"):
         normalized = unicodedata.normalize(form, meeting_title)
+        # 1) 정확 매칭
         q2 = (f"name='{normalized}' "
               f"and '{recordings_id}' in parents "
               f"and mimeType='application/vnd.google-apps.folder' "
@@ -217,40 +220,54 @@ def find_meet_transcript(creds: Credentials, meeting_title: str,
         if folders:
             meeting_folder_id = folders[0]["id"]
             break
+        # 2) 부분 매칭 — 가장 최근 수정된 폴더 선택
+        q2b = (f"name contains '{normalized}' "
+               f"and '{recordings_id}' in parents "
+               f"and mimeType='application/vnd.google-apps.folder' "
+               f"and trashed=false")
+        r2b = svc.files().list(q=q2b, fields="files(id,name,modifiedTime)",
+                                orderBy="modifiedTime desc").execute()
+        folders = r2b.get("files", [])
+        if folders:
+            meeting_folder_id = folders[0]["id"]
+            break
 
     transcript_mime = "application/vnd.google-apps.document"
+
+    # modifiedTime 하한 필터 — 정기 회의(같은 제목 반복)에서 과거 회차 트랜스크립트가
+    # 잘못 매칭되는 것을 방지. 서브폴더/루트 양쪽에 동일하게 적용.
+    ended_after_clause = ""
+    if ended_after:
+        ended_after_utc = ended_after.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        ended_after_clause = f" and modifiedTime > '{ended_after_utc}'"
 
     if meeting_folder_id:
         # 서브폴더 내 탐색: 'Transcript' 또는 'Gemini가 작성한 회의록' 포함 파일
         q3 = (f"'{meeting_folder_id}' in parents "
               f"and mimeType='{transcript_mime}' "
               f"and (name contains 'Transcript' or name contains 'Gemini가 작성한 회의록') "
-              f"and trashed=false")
-    else:
-        # 서브폴더 없음 → 루트 Meet Recordings에서 회의명 포함 파일 탐색
-        # Gemini 회의록은 미팅 시작 직후 생성되므로 ended_after 필터 미적용
-        # (제목 포함 + modifiedTime 내림차순으로 가장 최근 파일 반환)
-        for form in ("NFD", "NFC"):
-            normalized_title = unicodedata.normalize(form, meeting_title)
-            q3 = (f"'{recordings_id}' in parents "
-                  f"and mimeType='{transcript_mime}' "
-                  f"and name contains '{normalized_title}' "
-                  f"and trashed=false")
-            r3 = svc.files().list(q=q3, fields="files(id,name,mimeType,modifiedTime)",
-                                  orderBy="modifiedTime desc").execute()
-            files = r3.get("files", [])
-            if files:
-                return files[0]
-        return None
+              f"and trashed=false"
+              + ended_after_clause)
+        r3 = svc.files().list(q=q3, fields="files(id,name,mimeType,modifiedTime)",
+                              orderBy="modifiedTime desc").execute()
+        files = r3.get("files", [])
+        return files[0] if files else None
 
-    if ended_after:
-        ended_after_utc = ended_after.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-        q3 += f" and modifiedTime > '{ended_after_utc}'"
-
-    r3 = svc.files().list(q=q3, fields="files(id,name,mimeType,modifiedTime)",
-                          orderBy="modifiedTime desc").execute()
-    files = r3.get("files", [])
-    return files[0] if files else None
+    # 서브폴더 없음 → 루트 Meet Recordings에서 회의명 포함 파일 탐색.
+    # ended_after 필터를 적용해 과거 회차 파일을 배제한다.
+    for form in ("NFD", "NFC"):
+        normalized_title = unicodedata.normalize(form, meeting_title)
+        q3 = (f"'{recordings_id}' in parents "
+              f"and mimeType='{transcript_mime}' "
+              f"and name contains '{normalized_title}' "
+              f"and trashed=false"
+              + ended_after_clause)
+        r3 = svc.files().list(q=q3, fields="files(id,name,mimeType,modifiedTime)",
+                              orderBy="modifiedTime desc").execute()
+        files = r3.get("files", [])
+        if files:
+            return files[0]
+    return None
 
 
 def create_draft_doc(creds: Credentials, name: str, content: str, parent_id: str) -> str:
