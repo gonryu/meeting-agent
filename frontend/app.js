@@ -270,11 +270,114 @@
     }
   });
 
+  // ── 프롬프트 템플릿 ─────────────────────────────────────
+  function fmtBytes(n) {
+    if (n < 1024) return n + " B";
+    return (n / 1024).toFixed(1) + " KB";
+  }
+
+  async function apiPut(path, body) {
+    const auth = getAuth();
+    if (!auth) throw new Error("인증 취소됨");
+    const res = await fetch(BACKEND + "/admin/api" + path, {
+      method: "PUT",
+      headers: { Authorization: auth, "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    if (res.status === 401) {
+      clearAuth();
+      throw new Error("인증 실패");
+    }
+    if (!res.ok) {
+      let msg = "API 오류 " + res.status;
+      try { const j = await res.json(); if (j.detail) msg += " — " + j.detail; } catch (_) {}
+      throw new Error(msg);
+    }
+    return res.json();
+  }
+
+  async function renderPrompts() {
+    const hash = location.hash;
+    const params = new URLSearchParams(hash.split("?")[1] || "");
+    const editing = params.get("edit");
+    if (editing) return renderPromptEditor(editing);
+
+    setLoading("프롬프트 목록 불러오는 중...");
+    const items = await api("/prompts");
+    if (items.length === 0) {
+      main.innerHTML = '<div class="card"><h2>프롬프트 템플릿</h2><div class="empty">편집 가능한 템플릿이 없습니다.</div></div>';
+      return;
+    }
+    const rows = items.map((it) => `
+      <tr>
+        <td><a href="#/prompts?edit=${encodeURIComponent(it.name)}"><code>${escapeHtml(it.name)}</code></a></td>
+        <td class="nowrap">${fmtBytes(it.size)}</td>
+        <td class="nowrap">${escapeHtml(fmtDt(it.modified_at))}</td>
+      </tr>`).join("");
+    main.innerHTML = `
+      <div class="card">
+        <h2>프롬프트 템플릿 <span class="muted">(${items.length}개)</span></h2>
+        <p class="muted small">
+          <code>prompts/templates/</code> 하위 <code>.md</code> 파일. 저장 시 이전 내용은 자동으로 <code>{name}.bak.{timestamp}</code>로 백업됩니다.
+          서버 재시작 없이 즉시 반영됩니다.
+        </p>
+        <table>
+          <thead><tr><th>파일명</th><th>크기</th><th>수정 시각</th></tr></thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>
+    `;
+  }
+
+  async function renderPromptEditor(name) {
+    setLoading("템플릿 불러오는 중...");
+    const data = await api("/prompts/" + encodeURIComponent(name));
+    main.innerHTML = `
+      <div class="card">
+        <h2>
+          <a href="#/prompts" class="small">← 목록</a>
+          &nbsp;<code>${escapeHtml(data.name)}</code>
+        </h2>
+        <p class="muted small" id="p-meta">
+          ${fmtBytes(data.size)} · 최종 수정: ${escapeHtml(fmtDt(data.modified_at))}
+        </p>
+        <textarea id="p-content" class="prompt-editor" spellcheck="false"></textarea>
+        <div class="prompt-actions">
+          <button id="p-save" class="btn-primary">저장</button>
+          <a href="#/prompts" class="btn-cancel">취소</a>
+          <span id="p-status" class="muted small"></span>
+        </div>
+      </div>
+    `;
+    const textarea = document.getElementById("p-content");
+    const statusEl = document.getElementById("p-status");
+    const saveBtn = document.getElementById("p-save");
+    textarea.value = data.content;
+    saveBtn.addEventListener("click", async () => {
+      saveBtn.disabled = true;
+      statusEl.textContent = "저장 중...";
+      try {
+        const r = await apiPut("/prompts/" + encodeURIComponent(name),
+                                { content: textarea.value });
+        statusEl.textContent = `저장 완료 — 백업: ${r.backup}`;
+        statusEl.classList.add("ok");
+        document.getElementById("p-meta").textContent =
+          `${fmtBytes(r.size)} · 최종 수정: ${fmtDt(r.modified_at)}`;
+      } catch (err) {
+        statusEl.textContent = "저장 실패: " + err.message;
+        statusEl.classList.add("err");
+      } finally {
+        saveBtn.disabled = false;
+      }
+    });
+  }
+
   // ── 라우터 ──────────────────────────────────────────────
   const routes = {
     "#/dashboard": renderDashboard,
     "#/users": renderUsers,
     "#/feedback": renderFeedback,
+    "#/prompts": renderPrompts,
   };
 
   function updateNav() {
