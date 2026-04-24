@@ -68,6 +68,7 @@ class TestStartSession:
         _active_sessions.clear()
         _completed_notes.clear()
         _processed_events.clear()
+        _pending_inputs.clear()
 
     def test_creates_session(self):
         """세션 생성 후 _active_sessions에 등록"""
@@ -111,8 +112,9 @@ class TestStartSession:
         assert "테스트 미팅" in text
         assert "/메모" in text or "노트" in text
 
-    def test_calendar_event_matched(self):
-        """진행 중인 캘린더 이벤트와 자동 매칭"""
+    def test_single_ongoing_event_shows_selection_ui(self):
+        """F3(2026-04): 후보 이벤트가 1건이라도 있으면 자동 바인딩 대신 선택 UI 표시.
+        사용자가 '이 미팅이 맞나' 또는 '새 미팅 추가'를 명시적으로 고를 수 있게 함."""
         now = datetime.now(KST)
         start = (now.replace(minute=0, second=0)).isoformat()
         end = (now.replace(hour=now.hour + 1, minute=0, second=0) if now.hour < 23 else now).isoformat()
@@ -120,6 +122,7 @@ class TestStartSession:
         events = [{"id": "evt1", "summary": "카카오 미팅", "start": {"dateTime": start},
                    "attendees": [], "end": {"dateTime": end}}]
 
+        slack = _slack()
         with _mock_store(), patch("agents.during.cal") as mock_cal:
             mock_cal.get_upcoming_meetings.return_value = events
             mock_cal.parse_event.return_value = {
@@ -127,9 +130,56 @@ class TestStartSession:
                 "start_time": start, "attendees": [],
                 "location": "", "meet_link": "", "description": "",
             }
-            start_session(_slack(), _TEST_USER, "카카오 미팅")
+            start_session(slack, _TEST_USER, "카카오 미팅")
 
-        assert _active_sessions[_TEST_USER]["event_id"] == "evt1"
+        # 세션은 아직 생성 안 됨 — 사용자 클릭 대기
+        assert _TEST_USER not in _active_sessions
+        # pending에 후보 이벤트 + 원본 제목(custom_title) 보존
+        assert _TEST_USER in _pending_inputs
+        assert _pending_inputs[_TEST_USER]["custom_title"] == "카카오 미팅"
+        assert len(_pending_inputs[_TEST_USER]["events"]) == 1
+        assert _pending_inputs[_TEST_USER]["events"][0]["id"] == "evt1"
+        # 선택 UI 버튼에 '새 미팅 추가' 라벨 포함 (custom_title 기반)
+        blocks = slack.chat_postMessage.call_args[1].get("blocks", [])
+        button_texts = [
+            el["text"]["text"]
+            for block in blocks if block.get("type") == "actions"
+            for el in block.get("elements", [])
+        ]
+        assert any("새 미팅 추가" in t and "카카오 미팅" in t for t in button_texts)
+
+    def test_no_candidates_creates_ad_hoc_session(self):
+        """F3: 후보 이벤트가 0건이면 선택 UI 없이 즉시 ad-hoc 세션 생성"""
+        with _mock_store(), patch("agents.during.cal") as mock_cal:
+            mock_cal.get_upcoming_meetings.return_value = []
+            start_session(_slack(), _TEST_USER, "즉흥 미팅")
+
+        assert _TEST_USER in _active_sessions
+        assert _active_sessions[_TEST_USER]["title"] == "즉흥 미팅"
+        assert _active_sessions[_TEST_USER]["event_id"] is None
+        # pending에는 등록 안 됨
+        assert _TEST_USER not in _pending_inputs
+
+    def test_force_ad_hoc_skips_calendar_lookup(self):
+        """F3: force_ad_hoc=True면 이벤트가 있어도 탐색/선택 UI 건너뛰고 즉시 ad-hoc.
+        '새 미팅 추가' 버튼 클릭 재진입 시 재귀 방지용."""
+        now = datetime.now(KST)
+        start = now.isoformat()
+        end = (now + timedelta(hours=1)).isoformat()
+        events = [{"id": "evt1", "summary": "X", "start": {"dateTime": start},
+                   "attendees": [], "end": {"dateTime": end}}]
+
+        with _mock_store(), patch("agents.during.cal") as mock_cal:
+            mock_cal.get_upcoming_meetings.return_value = events
+            mock_cal.parse_event.return_value = {
+                "id": "evt1", "summary": "X", "start_time": start, "attendees": [],
+            }
+            start_session(_slack(), _TEST_USER, "강제 ad-hoc", force_ad_hoc=True)
+
+        # 캘린더 조회도 안 함 (force_ad_hoc이면 이벤트 탐색 자체 skip)
+        assert mock_cal.get_upcoming_meetings.called is False
+        assert _TEST_USER in _active_sessions
+        assert _active_sessions[_TEST_USER]["event_id"] is None
 
 
 # ── add_note ─────────────────────────────────────────────────
