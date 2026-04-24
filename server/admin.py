@@ -5,7 +5,10 @@
 """
 import logging
 import os
+import re
 import secrets
+from datetime import datetime
+from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
@@ -149,3 +152,101 @@ def api_feedback_resolution(
     if not ok:
         raise HTTPException(status_code=404, detail="피드백을 찾을 수 없습니다")
     return {"ok": True, "id": feedback_id, "status": payload.status}
+
+
+# ── 프롬프트 템플릿 관리 ─────────────────────────────────────────
+# prompts/templates/*.md 파일만 대상. 인라인 프롬프트(prompts/briefing.py 등)는 제외.
+# 저장 시 이전 내용을 {name}.bak.{timestamp}로 같은 폴더에 보관 (.md 확장자가 아니므로
+# 목록 쿼리에 잡히지 않음). 자동 삭제는 하지 않음 — 용량이 문제되면 운영자가 정리.
+
+_PROMPTS_DIR = (
+    Path(__file__).resolve().parent.parent / "prompts" / "templates"
+).resolve()
+_PROMPT_NAME_RE = re.compile(r"^[a-z0-9_\-]+\.md$")
+_PROMPT_MAX_BYTES = 50_000  # 50KB 상한 — 실수로 바이너리 붙여넣기 방지
+
+
+def _resolve_prompt_path(name: str) -> Path:
+    """파일명 화이트리스트 검증 후 절대 경로 반환.
+    경로 탈출·비-md·디렉터리 이탈은 400.
+    """
+    if not _PROMPT_NAME_RE.match(name):
+        raise HTTPException(status_code=400, detail=f"허용되지 않는 파일명: {name}")
+    target = (_PROMPTS_DIR / name).resolve()
+    # 이중 안전망: resolve 후에도 _PROMPTS_DIR 하위인지 확인 (심볼릭 링크 등 대응)
+    try:
+        target.relative_to(_PROMPTS_DIR)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="허용되지 않는 경로")
+    return target
+
+
+@router.get("/prompts")
+def api_prompts_list(_: str = Depends(_require_admin)):
+    """prompts/templates/ 하위 .md 파일 목록."""
+    if not _PROMPTS_DIR.is_dir():
+        return []
+    out = []
+    for p in sorted(_PROMPTS_DIR.glob("*.md")):
+        if not p.is_file():
+            continue
+        stat = p.stat()
+        out.append({
+            "name": p.name,
+            "size": stat.st_size,
+            "modified_at": datetime.fromtimestamp(stat.st_mtime)
+                .isoformat(timespec="seconds"),
+        })
+    return out
+
+
+@router.get("/prompts/{name}")
+def api_prompts_get(name: str, _: str = Depends(_require_admin)):
+    path = _resolve_prompt_path(name)
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="템플릿을 찾을 수 없습니다")
+    stat = path.stat()
+    return {
+        "name": path.name,
+        "content": path.read_text(encoding="utf-8"),
+        "size": stat.st_size,
+        "modified_at": datetime.fromtimestamp(stat.st_mtime)
+            .isoformat(timespec="seconds"),
+    }
+
+
+class _PromptPayload(BaseModel):
+    content: str
+
+
+@router.put("/prompts/{name}")
+def api_prompts_update(
+    name: str,
+    payload: _PromptPayload,
+    _: str = Depends(_require_admin),
+):
+    path = _resolve_prompt_path(name)
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="템플릿을 찾을 수 없습니다")
+    if len(payload.content.encode("utf-8")) > _PROMPT_MAX_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=f"내용이 {_PROMPT_MAX_BYTES // 1000}KB를 초과합니다",
+        )
+    # 이전 내용 백업 — {name}.bak.{timestamp} (확장자 .md 아님 → 목록에 안 잡힘)
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    backup_name = f"{path.name}.bak.{ts}"
+    backup_path = _PROMPTS_DIR / backup_name
+    backup_path.write_text(path.read_text(encoding="utf-8"), encoding="utf-8")
+    # 저장
+    path.write_text(payload.content, encoding="utf-8")
+    stat = path.stat()
+    log.info(f"프롬프트 템플릿 갱신: {path.name} (backup: {backup_name})")
+    return {
+        "ok": True,
+        "name": path.name,
+        "size": stat.st_size,
+        "modified_at": datetime.fromtimestamp(stat.st_mtime)
+            .isoformat(timespec="seconds"),
+        "backup": backup_name,
+    }
