@@ -165,6 +165,18 @@ _PROMPTS_DIR = (
 _PROMPT_NAME_RE = re.compile(r"^[a-z0-9_\-]+\.md$")
 _PROMPT_MAX_BYTES = 50_000  # 50KB 상한 — 실수로 바이너리 붙여넣기 방지
 
+# 파일명 → 한 줄 설명. 어드민 UI 목록에 표시. 신규 템플릿 추가 시 이 맵에도 등록.
+_PROMPT_DESCRIPTIONS: dict[str, str] = {
+    "briefing_summary.md": "미팅 브리핑 요약 생성 (업체 동향·담당자·서비스 연결점 통합)",
+    "company_news.md": "업체 최근 동향 웹 검색 쿼리",
+    "minutes_external.md": "외부 공유용 회의록 생성 (내부용 → 외부용 변환)",
+    "minutes_internal.md": "내부용 회의록 생성 (트랜스크립트·노트 → 구조화)",
+    "person_info.md": "인물 공개 정보 웹 검색 쿼리",
+    "proposal_generate.md": "제안서 본문 생성 (개요 + 맥락 자료 기반)",
+    "proposal_intake.md": "제안서 개요 JSON 추출 (회의록 → intake)",
+    "service_connection.md": "자사 서비스와 상대 업체 접점 분석",
+}
+
 
 def _resolve_prompt_path(name: str) -> Path:
     """파일명 화이트리스트 검증 후 절대 경로 반환.
@@ -193,6 +205,7 @@ def api_prompts_list(_: str = Depends(_require_admin)):
         stat = p.stat()
         out.append({
             "name": p.name,
+            "description": _PROMPT_DESCRIPTIONS.get(p.name, ""),
             "size": stat.st_size,
             "modified_at": datetime.fromtimestamp(stat.st_mtime)
                 .isoformat(timespec="seconds"),
