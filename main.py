@@ -60,6 +60,8 @@ from agents.during import (
     handle_minutes_source_select,
     handle_event_selection,
     handle_event_title_reply,
+    start_document_based_minutes,
+    _active_sessions,
     _pending_minutes,
     _pending_inputs,
     _find_draft_for_user,
@@ -1147,7 +1149,12 @@ def _handle_audio_upload(client, user_id: str, file_info: dict):
 
 
 def _handle_text_upload(client, user_id: str, file_info: dict):
-    """텍스트 문서 업로드 처리 — 텍스트 추출 후 메모로 등록 (세션 자동 시작)"""
+    """텍스트 문서 업로드 처리.
+
+    - 활성 세션이 있으면: 기존 동작 — 텍스트 추출 후 세션 노트로 추가
+    - 활성 세션이 없으면(F4): 문서를 트랜스크립트로 한 회의록 생성 경로 진입
+      캘린더 이벤트 없이도 회의록 저장 + 업체/인물 Wiki 갱신 가능
+    """
     filename = file_info.get("name", "document")
 
     client.chat_postMessage(
@@ -1174,6 +1181,16 @@ def _handle_text_upload(client, user_id: str, file_info: dict):
                                 text=f"📄 *{filename}* 텍스트가 길어 ({len(text):,}자) 앞부분 50,000자만 사용합니다.")
         text = text[:50000]
 
+    # F4: 활성 세션이 없으면 문서 기반 회의록 생성 경로로 진입
+    if user_id not in _active_sessions and user_id not in _pending_inputs:
+        threading.Thread(
+            target=start_document_based_minutes,
+            args=(client, user_id, filename, text),
+            daemon=True,
+        ).start()
+        return
+
+    # 활성 세션 있음 — 기존 동작 (노트로 추가)
     note_prefix = f"[문서: {filename}] "
     add_note(client, user_id=user_id, note_text=note_prefix + text, input_type="document")
 
