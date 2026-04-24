@@ -382,6 +382,59 @@ class TestNaturalLanguageSearch:
         assert "결과가 없" in text or "회의록이 없" in text or "검색 결과" in text
 
 
+# ── 인텐트 분류 개선: question 인텐트 ──────────────────────────────
+
+
+class TestQuestionIntent:
+    """질문 형태 메시지를 feedback이 아니라 question으로 분류하고 LLM 답변 반환.
+    이슈 재현: '구글 밋에서 회의를 할 건데, 회의록은 자동 생성하고 싶으면 어떻게 하면 됨?'
+    등이 feedback으로 잘못 분류되던 버그 대응."""
+
+    def test_question_intent_defined_in_prompt(self):
+        """_INTENT_PROMPT에 question 인텐트 + 질문 형태 feedback 제외 규칙 포함"""
+        from main import _INTENT_PROMPT
+        assert "question" in _INTENT_PROMPT
+        # feedback 설명에 질문 형태 제외 문구가 있어야 함
+        assert "질문 형태" in _INTENT_PROMPT
+
+    def test_handle_question_invokes_llm_and_posts_answer(self):
+        """_handle_question: generate_text를 호출해 답변을 Slack에 게시"""
+        from main import _handle_question
+
+        slack = MagicMock()
+        with patch("agents.before.generate_text",
+                   return_value="회의록은 `/미팅종료` 후 자동 생성됩니다.") as gen:
+            _handle_question(slack, text="회의록 자동 생성은 어떻게 해?",
+                             user_id="U1", channel=None, thread_ts=None)
+
+        # LLM 호출 확인
+        gen.assert_called_once()
+        prompt_arg = gen.call_args[0][0]
+        assert "회의록 자동 생성은 어떻게 해?" in prompt_arg  # 질문 전달
+        assert "ParaMee" in prompt_arg                      # 시스템 컨텍스트 포함
+
+        # Slack 게시 확인
+        slack.chat_postMessage.assert_called_once()
+        kwargs = slack.chat_postMessage.call_args[1]
+        assert kwargs["text"] == "회의록은 `/미팅종료` 후 자동 생성됩니다."
+        assert kwargs["channel"] == "U1"  # channel 없으면 DM
+
+    def test_handle_question_falls_back_on_llm_error(self):
+        """LLM 호출 실패 시 친절한 폴백 메시지 출력"""
+        from main import _handle_question
+
+        slack = MagicMock()
+        with patch("agents.before.generate_text", side_effect=RuntimeError("LLM down")):
+            _handle_question(slack, text="뭐라도 답해줘",
+                             user_id="U1", channel="C1", thread_ts="T1")
+
+        kwargs = slack.chat_postMessage.call_args[1]
+        assert "생성하지 못" in kwargs["text"]
+        assert "/도움말" in kwargs["text"]
+        assert kwargs["channel"] == "C1"
+        assert kwargs["thread_ts"] == "T1"
+
+
 # ── FR-D15: 복수 미팅 대기열 ────────────────────────────────────
 
 

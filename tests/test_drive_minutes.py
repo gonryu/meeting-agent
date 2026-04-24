@@ -82,6 +82,59 @@ class TestFindMeetTranscript:
 
         assert result["id"] == "new_id"
 
+    def test_recurring_meeting_uses_ended_after_filter_in_root(self):
+        """정기 회의: 서브폴더 없이 루트에 과거/현재 회차 파일이 공존할 때
+        ended_after 필터로 과거 회차를 배제하고 이번 회차만 반환"""
+        svc = _mock_svc()
+        this_week = {
+            "id": "this_week_id",
+            "name": "주간 미팅 - Transcript",
+            "mimeType": "application/vnd.google-apps.document",
+            "modifiedTime": "2026-03-25T15:00:00Z",
+        }
+        # 루트에 바로 있는 경우 → 서브폴더 탐색 실패 (정확 + 부분 매칭 둘 다)
+        svc.files().list().execute.side_effect = [
+            {"files": [{"id": "recordings_id"}]},   # 루트 Meet Recordings
+            {"files": []},                          # NFD 정확 매칭 실패
+            {"files": []},                          # NFD 부분 매칭 실패
+            {"files": []},                          # NFC 정확 매칭 실패
+            {"files": []},                          # NFC 부분 매칭 실패
+            # 루트 검색 결과 — API가 ended_after 필터를 적용하므로 이번 회차만 반환
+            {"files": [this_week]},
+        ]
+
+        with self._patch(svc):
+            ended_after = datetime(2026, 3, 25, 13, 55, tzinfo=timezone.utc)
+            result = find_meet_transcript(MagicMock(), "주간 미팅", ended_after=ended_after)
+
+        assert result["id"] == "this_week_id"
+        # 루트 검색 쿼리에 ended_after 필터가 들어갔는지 확인
+        last_call_q = svc.files().list.call_args_list[-1].kwargs["q"]
+        assert "modifiedTime >" in last_call_q
+
+    def test_recurring_meeting_subfolder_contains_fallback(self):
+        """정기 회의: Google Meet이 폴더명을 '{title} (date time)'으로 저장한 경우
+        exact 매칭은 실패해도 contains 매칭으로 찾아냄"""
+        svc = _mock_svc()
+        transcript_file = {
+            "id": "t_id",
+            "name": "주간 미팅 - Gemini가 작성한 회의록",
+            "mimeType": "application/vnd.google-apps.document",
+            "modifiedTime": "2026-03-25T15:00:00Z",
+        }
+        svc.files().list().execute.side_effect = [
+            {"files": [{"id": "recordings_id"}]},
+            {"files": []},                                      # NFD 정확 실패
+            {"files": [{"id": "meeting_folder_id",              # NFD 부분 매칭 성공
+                        "name": "주간 미팅 (2026-03-25 13:00)"}]},
+            {"files": [transcript_file]},                       # Transcript
+        ]
+
+        with self._patch(svc):
+            result = find_meet_transcript(MagicMock(), "주간 미팅")
+
+        assert result["id"] == "t_id"
+
 
 class TestSaveMinutes:
     def test_creates_new_file(self):
