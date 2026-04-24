@@ -79,11 +79,28 @@ class TestList:
         items = r.json()
         names = [it["name"] for it in items]
         assert names == ["briefing_summary.md", "minutes_internal.md"]
-        # 각 항목에 name/size/modified_at
+        # 각 항목에 name/description/size/modified_at
         for it in items:
             assert "name" in it
+            assert "description" in it  # 미매핑이어도 빈 문자열로 존재
             assert "size" in it and it["size"] > 0
             assert "modified_at" in it
+
+    def test_includes_descriptions_for_known_templates(self, client, tmp_prompts_dir):
+        """_PROMPT_DESCRIPTIONS에 매핑된 파일은 설명이 비어있지 않아야 함.
+        실제 레포의 8개 파일을 기준으로 — 이 테스트는 fixture 파일로 확인"""
+        r = client.get("/admin/api/prompts", headers={"Authorization": _AUTH_HEADER})
+        items = {it["name"]: it for it in r.json()}
+        # fixture로 만든 briefing_summary.md는 매핑 있음
+        assert items["briefing_summary.md"]["description"]
+        assert "브리핑" in items["briefing_summary.md"]["description"]
+
+    def test_unmapped_file_gets_empty_description(self, client, tmp_prompts_dir):
+        """매핑되지 않은 신규 파일은 빈 설명 반환 (UI에서 — 표시)"""
+        (tmp_prompts_dir / "experimental_new.md").write_text("# test", encoding="utf-8")
+        r = client.get("/admin/api/prompts", headers={"Authorization": _AUTH_HEADER})
+        items = {it["name"]: it for it in r.json()}
+        assert items["experimental_new.md"]["description"] == ""
 
     def test_excludes_backup_files(self, client, tmp_prompts_dir):
         """.bak.{ts} 백업 파일은 목록에서 제외 (확장자가 .md 아님)"""

@@ -311,6 +311,7 @@
     const rows = items.map((it) => `
       <tr>
         <td><a href="#/prompts?edit=${encodeURIComponent(it.name)}"><code>${escapeHtml(it.name)}</code></a></td>
+        <td>${escapeHtml(it.description || "—")}</td>
         <td class="nowrap">${fmtBytes(it.size)}</td>
         <td class="nowrap">${escapeHtml(fmtDt(it.modified_at))}</td>
       </tr>`).join("");
@@ -322,7 +323,7 @@
           서버 재시작 없이 즉시 반영됩니다.
         </p>
         <table>
-          <thead><tr><th>파일명</th><th>크기</th><th>수정 시각</th></tr></thead>
+          <thead><tr><th>파일명</th><th>설명</th><th>크기</th><th>수정 시각</th></tr></thead>
           <tbody>${rows}</tbody>
         </table>
       </div>
