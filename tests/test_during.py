@@ -22,6 +22,7 @@ with patch("anthropic.Anthropic"):
         check_transcripts,
         handle_event_selection,
         handle_event_title_reply,
+        start_document_based_minutes,
         _active_sessions,
         _completed_notes,
         _processed_events,
@@ -1165,3 +1166,78 @@ class TestEventSelection:
         # 세션이 종료되고 회의록 초안이 생성됨 (FR-D14: event_id 키)
         assert _TEST_USER not in _active_sessions
         assert _find_draft_for_user(_TEST_USER) is not None
+
+
+# ── F4: 문서 업로드 기반 회의록 생성 ──────────────────────────
+
+
+class TestDocumentBasedMinutes:
+    """F4: 세션 없이 업로드된 문서로부터 회의록 초안 생성.
+    피드백 id 24 반영 — 캘린더에 없는 미팅도 회의록화."""
+
+    def setup_method(self):
+        _active_sessions.clear()
+        _pending_minutes.clear()
+
+    def test_generates_minutes_with_filename_title(self):
+        """파일명(확장자 제외)이 제목으로 사용됨"""
+        slack = _slack()
+        with _mock_store(), \
+             patch("agents.during._generate_and_post_minutes") as mock_gen:
+            start_document_based_minutes(
+                slack, _TEST_USER,
+                filename="카카오_PoC_회의록.txt",
+                text="[김철수] 안녕하세요...",
+            )
+
+        assert mock_gen.called
+        kwargs = mock_gen.call_args[1]
+        assert kwargs["title"] == "카카오_PoC_회의록"
+        assert kwargs["transcript_text"] == "[김철수] 안녕하세요..."
+        assert kwargs["notes_text"] == ""
+        assert kwargs["event_id"] is None
+        assert kwargs["attendees"] == "정보 없음"
+        assert kwargs["attendees_raw"] == []
+
+    def test_uses_today_as_date(self):
+        """날짜는 오늘 (YYYY-MM-DD)"""
+        slack = _slack()
+        with _mock_store(), \
+             patch("agents.during._generate_and_post_minutes") as mock_gen:
+            start_document_based_minutes(slack, _TEST_USER, "doc.md", "content")
+
+        today = datetime.now(KST).strftime("%Y-%m-%d")
+        assert mock_gen.call_args[1]["date_str"] == today
+
+    def test_fallback_title_when_filename_empty(self):
+        """파일명이 비어있으면 '업로드 문서' 폴백"""
+        slack = _slack()
+        with _mock_store(), \
+             patch("agents.during._generate_and_post_minutes") as mock_gen:
+            start_document_based_minutes(slack, _TEST_USER, "", "content")
+
+        assert mock_gen.call_args[1]["title"] == "업로드 문서"
+
+    def test_sends_progress_message(self):
+        """생성 시작 안내 메시지 발송 (filename 포함)"""
+        slack = _slack()
+        with _mock_store(), \
+             patch("agents.during._generate_and_post_minutes"):
+            start_document_based_minutes(slack, _TEST_USER, "meeting.txt", "x")
+
+        # 첫 chat_postMessage 호출이 진행 안내
+        texts = [c[1].get("text", "") for c in slack.chat_postMessage.call_args_list]
+        assert any("meeting.txt" in t and "회의록을 생성" in t for t in texts)
+
+    def test_auth_error_reports_gracefully(self):
+        """인증 오류 시 오류 메시지만 발송, minutes 생성 안 함"""
+        slack = _slack()
+        mock_store = MagicMock()
+        mock_store.get_credentials.side_effect = RuntimeError("auth fail")
+        with patch("agents.during.user_store", mock_store), \
+             patch("agents.during._generate_and_post_minutes") as mock_gen:
+            start_document_based_minutes(slack, _TEST_USER, "doc.txt", "x")
+
+        assert not mock_gen.called
+        texts = [c[1].get("text", "") for c in slack.chat_postMessage.call_args_list]
+        assert any("인증 오류" in t for t in texts)

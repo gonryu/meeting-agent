@@ -316,8 +316,9 @@ cd frontend && ./serve.sh           # http://localhost:3030 → config.js의 BAC
 - **경로 B — 자동 폴링**: `check_transcripts()` → `_check_transcripts_for_user()`. 10분 주기로 최근 종료(10~90분) 미팅의 트랜스크립트 탐색. 트랜스크립트(필수) + 노트(있으면).
 - **경로 C — 노트 fallback**: `_flush_expired_notes()`. 90분 경과 후 트랜스크립트 없이 노트만으로 생성.
 - **경로 D — 트랜스크립트 늦게 도착 보강**: `_check_awaiting_transcripts()`. 경로 A에서 트랜스크립트 없이 생성 후, `_awaiting_transcript` 딕셔너리에 등록. 10분 주기 폴링으로 90분간 트랜스크립트 도착 체크. 도착 시 트랜스크립트 + 기존 노트로 보강 회의록 재생성 → 사용자 검토.
+- **경로 E — 문서 업로드 직접 생성 (F4)**: `start_document_based_minutes()`. DM에 텍스트 문서 업로드 시 활성 세션·pending 입력이 없으면 바로 회의록 초안 생성 경로로 진입. 파일명(확장자 제외)이 제목, 오늘 날짜, 문서 본문이 `transcript_text`로 전달됨. 활성 세션이 있으면 기존처럼 노트로 추가 (분기: `main.py::_handle_text_upload`).
 
-모든 경로 → `_generate_and_post_minutes()` → 내부용·외부용 회의록 생성 (Claude Sonnet) → Slack 초안 발송 (✅저장/✏️수정/❌취소) → 사용자 확인 후 Drive 저장 + After Agent 트리거.
+모든 경로 → `_generate_and_post_minutes()` → 내부용·외부용 회의록 생성 (Claude Sonnet) → Slack 초안 발송 (✅저장/✏️수정/❌취소) → 사용자 확인 후 Drive 저장 + After Agent 트리거. After Agent가 회의록 내용에서 업체·인물명을 추론해 Wiki 파일(`Companies/*.md`·`People/*.md`) 미팅 히스토리 자동 갱신.
 
 **채널/스레드 유지 (B2):** 세션이 채널에서 시작된 경우(`session_channel`/`session_thread_ts`), 종료 알림·소스 선택 블록·회의록 초안·최종 링크 메시지가 모두 같은 채널(+스레드)에 발송됨. DM에서 시작된 세션은 DM으로 유지. `_generate_and_post_minutes`·`_post_minutes_draft`·`_post_combined_minutes`·`_check_awaiting_transcripts`가 `post_channel`/`post_thread_ts`를 전파.
 

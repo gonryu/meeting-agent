@@ -879,6 +879,44 @@ def _create_ad_hoc_session(slack_client, user_id: str, title: str,
                f"미팅이 끝나면 `/미팅종료` 를 입력해주세요.")
 
 
+def start_document_based_minutes(slack_client, user_id: str,
+                                  filename: str, text: str) -> None:
+    """F4: 세션 없이 업로드된 문서(트랜스크립트·회의록)로부터 회의록 생성.
+
+    캘린더 이벤트나 기존 세션 없이 바로 회의록 초안 생성 경로로 진입한다.
+    저장 시 After Agent가 기업·인물 Wiki를 자동으로 갱신함 (기존 흐름 재사용).
+
+    - 제목: 파일명에서 확장자 제거. 사용자는 초안 스레드에서 '✏️ 수정' 버튼으로 변경 가능
+    - 날짜: 오늘
+    - 참석자: '정보 없음' (문서 내용에서 After Agent가 추론)
+    - transcript_text: 문서 본문 전체
+    """
+    import os as _os
+    try:
+        creds, minutes_folder_id = _get_creds_and_config(user_id)
+    except Exception as e:
+        _post(slack_client, user_id=user_id, text=f"⚠️ 인증 오류: {e}")
+        return
+
+    # 파일명에서 확장자 제거 + 기본 정제
+    title = _os.path.splitext(filename or "업로드 문서")[0].strip() or "업로드 문서"
+    date_str = datetime.now(KST).strftime("%Y-%m-%d")
+    time_range = ""  # 문서 기반이라 시간대 없음
+
+    _post(slack_client, user_id=user_id,
+          text=f"📄 *{filename}* 문서를 트랜스크립트로 회의록을 생성합니다...\n"
+               f"_(캘린더 미연동 — 제목·날짜 수정은 초안 스레드에서 가능)_")
+
+    _generate_and_post_minutes(
+        slack_client, user_id=user_id,
+        title=title, date_str=date_str, time_range=time_range,
+        attendees="정보 없음",
+        transcript_text=text, notes_text="",
+        minutes_folder_id=minutes_folder_id, creds=creds,
+        event_id=None, attendees_raw=[],
+    )
+
+
 def add_note(slack_client, user_id: str, note_text: str, session_title: str = "메모 세션",
              input_type: str = "note", channel: str = None, thread_ts: str = None):
     """/메모 {내용} — 진행 중 세션에 노트 추가. 세션이 없으면 캘린더 이벤트 자동 감지."""
