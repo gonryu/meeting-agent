@@ -1793,7 +1793,20 @@ def _create_calendar_event(slack_client, user_id: str, info: dict, company: str 
         if meet_link:
             msg += f"\n🎥 *Google Meet*: <{meet_link}|회의 참여>"
         msg += "\n_이 메시지에 스레드 답글로 제목, 참석자, 어젠다를 알려주시면 업데이트해드릴게요._"
-        resp = _post(slack_client, user_id=user_id, channel=channel, thread_ts=thread_ts, text=msg)
+        result_blocks = [
+            {"type": "section", "text": {"type": "mrkdwn", "text": msg}},
+            {
+                "type": "actions",
+                "elements": [{
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "👥 참석자 추가"},
+                    "action_id": "add_attendee_to_event",
+                    "value": event_id,
+                }],
+            },
+        ]
+        resp = _post(slack_client, user_id=user_id, channel=channel, thread_ts=thread_ts,
+                     text=msg, blocks=result_blocks)
         reply_ts = resp.get("ts") if resp else None
         # Slack이 반환하는 실제 thread_ts (스레드 내 답글이면 부모 ts)
         resp_thread_ts = (resp.get("message") or resp or {}).get("thread_ts")
@@ -1911,6 +1924,148 @@ def _add_attendees_to_event(slack_client, user_id: str, event_id: str, new_email
         log.exception(f"참석자 추가 실패: {e}")
         _post(slack_client, user_id=user_id,
               text=f"⚠️ 참석자 추가 실패: {e}\n스레드 답글로 직접 추가해주세요.")
+
+
+# ── 참석자 추가 모달 (생성된 미팅에 사후 참석자 추가) ──────────
+
+
+_ATTENDEE_ADD_MODAL_CALLBACK = "attendee_add_modal"
+
+
+def open_attendee_add_modal(slack_client, *, trigger_id: str, user_id: str,
+                              event_id: str, channel: str | None = None,
+                              thread_ts: str | None = None) -> None:
+    """미팅 생성 결과 메시지의 '👥 참석자 추가' 버튼 → 모달 오픈.
+
+    이미 캘린더 이벤트가 만들어진 미팅에 나중에 참석자를 추가하는 경로.
+    이메일 후보 검색 단계가 실패해 누락된 인원을 직접 입력으로 추가할 때 사용.
+    """
+    private_meta = json.dumps({
+        "user_id": user_id,
+        "event_id": event_id,
+        "channel": channel,
+        "thread_ts": thread_ts,
+    }, ensure_ascii=False)
+
+    blocks = [
+        {
+            "type": "section",
+            "text": {"type": "mrkdwn",
+                     "text": "👥 *참석자 추가*\n이 회의에 한 명을 추가합니다. 이메일은 필수, 이름은 선택입니다.\n_캘린더 초대도 함께 발송됩니다._"},
+        },
+        {
+            "type": "input",
+            "block_id": "name_block",
+            "optional": True,
+            "label": {"type": "plain_text", "text": "이름 (선택)"},
+            "element": {
+                "type": "plain_text_input",
+                "action_id": "name_input",
+                "placeholder": {"type": "plain_text", "text": "예: 김은서"},
+            },
+        },
+        {
+            "type": "input",
+            "block_id": "email_block",
+            "label": {"type": "plain_text", "text": "이메일"},
+            "element": {
+                "type": "plain_text_input",
+                "action_id": "email_input",
+                "placeholder": {"type": "plain_text", "text": "예: eunseo@allobank.com"},
+            },
+        },
+    ]
+    slack_client.views_open(
+        trigger_id=trigger_id,
+        view={
+            "type": "modal",
+            "callback_id": _ATTENDEE_ADD_MODAL_CALLBACK,
+            "title": {"type": "plain_text", "text": "참석자 추가"},
+            "submit": {"type": "plain_text", "text": "추가"},
+            "close": {"type": "plain_text", "text": "취소"},
+            "private_metadata": private_meta,
+            "blocks": blocks,
+        },
+    )
+
+
+def handle_attendee_add_modal(slack_client, user_id: str, view: dict) -> None:
+    """참석자 추가 모달 제출 — 캘린더 이벤트에 참석자 추가."""
+    values = view.get("state", {}).get("values", {})
+    name = ((values.get("name_block", {}).get("name_input", {}) or {}).get("value") or "").strip()
+    email = ((values.get("email_block", {}).get("email_input", {}) or {}).get("value") or "").strip()
+
+    try:
+        meta = json.loads(view.get("private_metadata") or "{}")
+    except Exception:
+        meta = {}
+    event_id = meta.get("event_id")
+    channel = meta.get("channel") or user_id
+    thread_ts = meta.get("thread_ts")
+
+    # 입력 검증
+    if not email or "@" not in email or "." not in email.split("@")[-1]:
+        _post(slack_client, user_id=user_id, channel=channel, thread_ts=thread_ts,
+              text="⚠️ 유효한 이메일 형식이 아닙니다.")
+        return
+    if not event_id:
+        _post(slack_client, user_id=user_id, channel=channel, thread_ts=thread_ts,
+              text="⚠️ 미팅 정보를 찾을 수 없습니다 (event_id 누락).")
+        return
+
+    try:
+        creds = user_store.get_credentials(user_id)
+    except Exception as e:
+        _post(slack_client, user_id=user_id, channel=channel, thread_ts=thread_ts,
+              text=f"⚠️ 인증 오류: {e}")
+        return
+
+    # 현재 참석자 목록 — draft 우선, 없으면 캘린더에서 직접 조회
+    draft = next(
+        (d for d in _meeting_drafts.values() if d.get("event_id") == event_id),
+        None,
+    )
+    if draft:
+        existing_emails = list(draft.get("attendee_emails") or [])
+    else:
+        try:
+            event = cal.get_event(creds, event_id)
+            existing_emails = [
+                a.get("email", "") for a in event.get("attendees", []) if a.get("email")
+            ]
+        except Exception as e:
+            _post(slack_client, user_id=user_id, channel=channel, thread_ts=thread_ts,
+                  text=f"⚠️ 캘린더 이벤트 조회 실패: {e}")
+            return
+
+    if email.lower() in [e.lower() for e in existing_emails]:
+        _post(slack_client, user_id=user_id, channel=channel, thread_ts=thread_ts,
+              text=f"ℹ️ `{email}` 은 이미 참석자에 포함되어 있습니다.")
+        return
+
+    new_emails = existing_emails + [email]
+
+    try:
+        cal.update_event(creds, event_id, attendee_emails=new_emails)
+    except Exception as e:
+        log.exception("참석자 추가 실패")
+        _post(slack_client, user_id=user_id, channel=channel, thread_ts=thread_ts,
+              text=f"⚠️ 참석자 추가 실패: {e}")
+        return
+
+    # draft 동기화
+    if draft is not None:
+        draft["attendee_emails"] = new_emails
+        if name:
+            participants = list((draft.get("info") or {}).get("participants") or [])
+            if name not in participants:
+                participants.append(name)
+                draft.setdefault("info", {})["participants"] = participants
+        _save_meeting_drafts()
+
+    label = f"*{name}* (`{email}`)" if name else f"`{email}`"
+    _post(slack_client, user_id=user_id, channel=channel, thread_ts=thread_ts,
+          text=f"✅ 참석자 추가 완료: {label}\n_캘린더 초대 메일이 발송되었습니다._")
 
 
 # ── 일정 드래프트 업데이트 ──────────────────────────────────────
@@ -2033,21 +2188,51 @@ def update_meeting_from_text(slack_client, user_id: str, user_message: str,
                 event_id=event_id, channel=reply_channel, thread_ts=reply_thread_ts,
             )
 
-    if "participants" in changed_fields:
-        new_names = updated_info.get("participants", [])
+    # 인라인 이메일 업데이트가 있으면 우선 처리 (사용자가 메시지로 직접 알려준 이메일)
+    inline_emails = updated_info.get("participant_emails", {}) or {}
+    if not isinstance(inline_emails, dict):
+        inline_emails = {}
+
+    if "participants" in changed_fields or "participant_emails" in changed_fields:
+        new_names = updated_info.get("participants", []) or list(draft["info"].get("participants", []))
+        # 인라인 이메일에 있는 이름은 participants에 누락되어 있어도 추가
+        for n in inline_emails:
+            if n and n not in new_names:
+                new_names.append(n)
+
+        existing_names = list(draft["info"].get("participants", []))
         new_emails = list(attendee_emails)  # 기존 유지 후 추가
         missing = []
+        added_inline = []
         for name in new_names:
-            if name not in [n for n in draft["info"].get("participants", [])]:
+            if name in existing_names:
+                # 기존 참석자에 인라인 이메일이 추가된 경우 → 이메일 보강
+                if name in inline_emails:
+                    em = inline_emails[name]
+                    if em and em not in new_emails:
+                        new_emails.append(em)
+                        added_inline.append(f"{name}({em})")
+                continue
+            # 새 참석자 — 인라인 이메일 우선, 없으면 후보 검색
+            if name in inline_emails and inline_emails[name]:
+                em = inline_emails[name]
+                if em not in new_emails:
+                    new_emails.append(em)
+                added_inline.append(f"{name}({em})")
+            else:
                 candidates = _find_email_candidates(user_id, name, slack_client)
                 if candidates:
                     new_emails.append(candidates[0])
                 else:
                     missing.append(name)
+
+        draft["info"]["participants"] = new_names
         draft["attendee_emails"] = new_emails
         patch_kwargs["attendee_emails"] = new_emails
         names_str = ", ".join(new_names) if new_names else "없음"
         change_summary_lines.append(f"참석자 → {names_str}")
+        if added_inline:
+            change_summary_lines.append(f"  _(이메일 직접 등록: {', '.join(added_inline)})_")
         if missing:
             change_summary_lines.append(f"  _(이메일 미확인: {', '.join(missing)})_")
 

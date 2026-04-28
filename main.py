@@ -19,6 +19,7 @@ from slack_bolt.adapter.socket_mode import SocketModeHandler
 from apscheduler.schedulers.background import BackgroundScheduler
 import uvicorn
 
+from agents import before as before_agent
 from agents.before import (
     run_briefing,
     create_meeting_from_text,
@@ -68,6 +69,7 @@ from agents.during import (
     find_draft_by_thread_ts,
     get_session_thread,
 )
+from agents import during as during_agent
 from agents import after
 from agents import card as card_agent
 from agents import dreamplus as dreamplus_agent
@@ -1387,21 +1389,28 @@ def _handle_meeting_event_select(ack, body, client):
     action_id = action.get("action_id", "")
 
     if action_id == "select_meeting_event_new":
-        # "새 미팅으로 기록"
-        pending = _pending_inputs.get(user_id)
-        # F3: 사용자가 /미팅시작 시 제목을 이미 입력했다면 (pending.custom_title)
-        # 스레드 답글 요청 없이 즉시 ad-hoc 세션 시작
-        if pending and pending.get("custom_title"):
+        # "새 미팅으로 기록" — 모달로 제목·업체·참석자 입력받기 (옵션 A)
+        pending = _pending_inputs.get(user_id) or {}
+        custom_title = pending.get("custom_title") or ""
+        trigger_id = body.get("trigger_id")
+        if not trigger_id:
+            # trigger_id 없으면 (드물지만 안전장치) 기존 흐름으로 폴백
             handle_event_selection(client, user_id, selected_event_id=None,
-                                    custom_title=pending["custom_title"])
-        elif pending:
-            client.chat_postMessage(
-                channel=user_id,
-                thread_ts=pending.get("prompt_ts"),
-                text="📝 미팅 제목을 이 스레드에 답글로 입력해주세요. (예: 'KISA 보안 미팅')",
+                                    custom_title=custom_title or None)
+            return
+        try:
+            during_agent.open_meeting_start_modal(
+                client,
+                trigger_id=trigger_id,
+                user_id=user_id,
+                custom_title=custom_title,
+                channel=pending.get("session_channel"),
+                thread_ts=pending.get("session_thread_ts"),
             )
-        else:
-            handle_event_selection(client, user_id, selected_event_id=None)
+        except Exception as e:
+            log.warning(f"meeting_start_modal 오픈 실패, 폴백: {e}")
+            handle_event_selection(client, user_id, selected_event_id=None,
+                                    custom_title=custom_title or None)
     else:
         # 특정 이벤트 선택
         selected_event_id = action.get("value", "")
@@ -1663,6 +1672,49 @@ def handle_card_edit_modal(ack, body, client):
     user_id = body["user"]["id"]
     view = body["view"]
     card_agent.handle_edit_modal_submit(client, user_id, view)
+
+
+@app.view(during_agent._MEETING_START_MODAL_CALLBACK)
+def handle_meeting_start_modal(ack, body, client):
+    """새 미팅 시작 모달 제출 — ad-hoc 세션 생성"""
+    ack()
+    user_id = body["user"]["id"]
+    view = body["view"]
+    during_agent.handle_meeting_start_modal(client, user_id, view)
+
+
+@app.action("add_attendee_to_event")
+def handle_add_attendee_button(ack, body, client):
+    """미팅 생성 결과 메시지의 '👥 참석자 추가' 버튼 → 모달 오픈"""
+    ack()
+    user_id = body["user"]["id"]
+    action = body.get("actions", [{}])[0]
+    event_id = action.get("value", "")
+    trigger_id = body.get("trigger_id")
+    if not (event_id and trigger_id):
+        client.chat_postMessage(channel=user_id,
+                                 text="⚠️ 모달을 열 수 없습니다 (event_id 또는 trigger_id 누락).")
+        return
+    try:
+        # 컨텍스트 — 버튼이 게시된 채널/스레드 그대로 사용
+        msg_channel = body.get("channel", {}).get("id")
+        msg_ts = body.get("message", {}).get("thread_ts") or body.get("message", {}).get("ts")
+        before_agent.open_attendee_add_modal(
+            client, trigger_id=trigger_id, user_id=user_id, event_id=event_id,
+            channel=msg_channel, thread_ts=msg_ts,
+        )
+    except Exception as e:
+        log.warning(f"attendee_add_modal 오픈 실패: {e}")
+        client.chat_postMessage(channel=user_id, text=f"⚠️ 모달 오픈 실패: {e}")
+
+
+@app.view(before_agent._ATTENDEE_ADD_MODAL_CALLBACK)
+def handle_attendee_add_modal(ack, body, client):
+    """참석자 추가 모달 제출 — 캘린더 이벤트 업데이트"""
+    ack()
+    user_id = body["user"]["id"]
+    view = body["view"]
+    before_agent.handle_attendee_add_modal(client, user_id, view)
 
 
 @app.action(re.compile(r"^confirm_company_|^company_checkboxes$"))

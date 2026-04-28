@@ -81,13 +81,32 @@ class TestStartSession:
         assert _active_sessions[_TEST_USER]["title"] == "카카오 미팅"
         assert _active_sessions[_TEST_USER]["notes"] == []
 
-    def test_default_title(self):
-        """제목 없으면 '미팅'으로 기본값 설정"""
+    def test_default_title_triggers_modal_button(self):
+        """제목 없으면 즉시 ad-hoc 세션 대신 모달 트리거 버튼 게시 (Fix 3, 옵션 A).
+
+        제목 미제공 + 후보 0건 → 사용자가 '📝 새 미팅 정보 입력' 버튼을 눌러
+        모달에서 제목·업체·참석자를 입력하도록 유도한다.
+        """
+        from agents.during import _pending_inputs
+        slack = _slack()
         with _mock_store(), patch("agents.during.cal") as mock_cal:
             mock_cal.get_upcoming_meetings.return_value = []
-            start_session(_slack(), _TEST_USER, "")
+            start_session(slack, _TEST_USER, "")
 
-        assert _active_sessions[_TEST_USER]["title"] == "미팅"
+        # 즉시 세션은 생성되지 않음 — 모달 입력 대기 상태
+        assert _TEST_USER not in _active_sessions
+        # 트리거 버튼 메시지가 게시되었고 pending_inputs에 컨텍스트가 보존됨
+        assert _TEST_USER in _pending_inputs
+        text_arg = slack.chat_postMessage.call_args[1].get("text", "")
+        blocks_arg = slack.chat_postMessage.call_args[1].get("blocks", [])
+        assert "정보를 입력" in text_arg
+        # 버튼의 action_id가 select_meeting_event_new — main.py에서 모달 오픈
+        assert any(
+            el.get("action_id") == "select_meeting_event_new"
+            for blk in blocks_arg if blk.get("type") == "actions"
+            for el in blk.get("elements", [])
+        )
+        _pending_inputs.pop(_TEST_USER, None)
 
     def test_duplicate_session_rejected(self):
         """이미 세션 진행 중이면 거부 메시지"""

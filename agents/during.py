@@ -10,6 +10,7 @@
 """
 import json
 import logging
+import re
 import threading
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -842,8 +843,14 @@ def start_session(slack_client, user_id: str, title: str,
         log.warning(f"캘린더 이벤트 매칭 실패: {e}")
 
     if not candidates:
-        # 후보 0건 → 즉시 ad-hoc 세션 생성 (선택 UI 띄울 게 없음)
-        _create_ad_hoc_session(slack_client, user_id, title_to_use, channel, thread_ts)
+        # 후보 0건 — 사용자가 명시적 제목을 줬으면 즉시 ad-hoc, 아니면 모달 트리거 버튼 게시
+        explicit_title = (title or "").strip() and title.strip().lower() not in ("미팅", "회의", "meeting")
+        if explicit_title:
+            _create_ad_hoc_session(slack_client, user_id, title_to_use, channel, thread_ts)
+            return
+        # 모달 트리거 버튼 게시 — 클릭 시 main.py에서 trigger_id로 모달 오픈
+        _post_meeting_start_modal_trigger(slack_client, user_id, channel, thread_ts,
+                                           custom_title=title or "")
         return
 
     # 후보 1건 이상 → 항상 선택 UI 표시 (F3)
@@ -861,8 +868,13 @@ def start_session(slack_client, user_id: str, title: str,
 
 
 def _create_ad_hoc_session(slack_client, user_id: str, title: str,
-                           channel: str | None, thread_ts: str | None):
-    """캘린더 이벤트 없이 ad-hoc 세션 생성 + 확인 메시지."""
+                           channel: str | None, thread_ts: str | None,
+                           company: str = "", attendees_manual: list | None = None):
+    """캘린더 이벤트 없이 ad-hoc 세션 생성 + 확인 메시지.
+
+    company / attendees_manual 은 모달에서 사용자가 직접 입력한 값(선택). 회의록 생성 시
+    참석자 컨텍스트로 활용된다.
+    """
     _active_sessions[user_id] = {
         "title": title,
         "started_at": datetime.now(KST).strftime("%Y-%m-%d %H:%M"),
@@ -872,12 +884,178 @@ def _create_ad_hoc_session(slack_client, user_id: str, title: str,
         "event_time_str": None,
         "session_channel": channel,
         "session_thread_ts": thread_ts,
+        "company": (company or "").strip(),
+        "attendees_manual": list(attendees_manual or []),
     }
     _save_active_session(user_id)
+    info_lines = [f"✅ *{title}* 노트 세션 시작 _(캘린더 일정 미연동)_"]
+    if company:
+        info_lines.append(f"🏢 업체: *{company}*")
+    if attendees_manual:
+        info_lines.append(f"👥 참석자: {', '.join(attendees_manual)}")
+    info_lines.append("`/메모 내용` 으로 실시간 메모를 기록하세요.")
+    info_lines.append("미팅이 끝나면 `/미팅종료` 를 입력해주세요.")
     _post(slack_client, user_id=user_id, channel=channel, thread_ts=thread_ts,
-          text=f"✅ *{title}* 노트 세션 시작\n_(캘린더 일정 미연동)_\n"
-               f"`/메모 내용` 으로 실시간 메모를 기록하세요.\n"
-               f"미팅이 끝나면 `/미팅종료` 를 입력해주세요.")
+          text="\n".join(info_lines))
+
+
+# ── 새 미팅 시작 모달 (옵션 A — Fix 3) ─────────────────────────
+
+
+_MEETING_START_MODAL_CALLBACK = "meeting_start_modal"
+
+
+def open_meeting_start_modal(slack_client, *, trigger_id: str, user_id: str,
+                              custom_title: str = "",
+                              channel: str | None = None,
+                              thread_ts: str | None = None) -> None:
+    """ad-hoc 세션 시작용 모달 — 제목·업체·참석자 입력.
+
+    호출 컨텍스트(채널/스레드/대기 입력)는 view.private_metadata에 직렬화하여
+    제출 핸들러로 전달.
+    """
+    private_meta = json.dumps({
+        "user_id": user_id,
+        "channel": channel,
+        "thread_ts": thread_ts,
+    }, ensure_ascii=False)
+
+    title_input = {
+        "type": "plain_text_input",
+        "action_id": "title_input",
+        "placeholder": {"type": "plain_text", "text": "예: Allobank 사전논의"},
+    }
+    if custom_title:
+        title_input["initial_value"] = custom_title
+
+    blocks = [
+        {
+            "type": "section",
+            "text": {"type": "mrkdwn",
+                     "text": "📝 *새 미팅 노트 세션*\n캘린더에 없는 회의를 시작합니다. 회의 정보를 입력해주세요."},
+        },
+        {
+            "type": "input",
+            "block_id": "title_block",
+            "label": {"type": "plain_text", "text": "회의 제목"},
+            "element": title_input,
+        },
+        {
+            "type": "input",
+            "block_id": "company_block",
+            "optional": True,
+            "label": {"type": "plain_text", "text": "관련 업체 (선택)"},
+            "element": {
+                "type": "plain_text_input",
+                "action_id": "company_input",
+                "placeholder": {"type": "plain_text", "text": "예: Allobank, 카카오, KISA"},
+            },
+        },
+        {
+            "type": "input",
+            "block_id": "attendees_block",
+            "optional": True,
+            "label": {"type": "plain_text", "text": "참석자 (선택, 쉼표로 구분)"},
+            "element": {
+                "type": "plain_text_input",
+                "action_id": "attendees_input",
+                "placeholder": {"type": "plain_text", "text": "예: 김민환, 김종협, 김은서"},
+            },
+        },
+    ]
+    slack_client.views_open(
+        trigger_id=trigger_id,
+        view={
+            "type": "modal",
+            "callback_id": _MEETING_START_MODAL_CALLBACK,
+            "title": {"type": "plain_text", "text": "미팅 노트 시작"},
+            "submit": {"type": "plain_text", "text": "시작"},
+            "close": {"type": "plain_text", "text": "취소"},
+            "private_metadata": private_meta,
+            "blocks": blocks,
+        },
+    )
+
+
+def _post_meeting_start_modal_trigger(slack_client, user_id: str,
+                                       channel: str | None, thread_ts: str | None,
+                                       custom_title: str = "") -> None:
+    """no-candidates 경로 — 사용자가 클릭하면 trigger_id로 모달이 열리도록 버튼 게시.
+
+    pending_inputs에 컨텍스트(채널/스레드/custom_title)를 저장해 main.py의
+    select_meeting_event_new 핸들러가 그대로 모달을 열 수 있게 한다.
+    """
+    _pending_inputs.setdefault(user_id, {})
+    _pending_inputs[user_id].update({
+        "inputs": _pending_inputs[user_id].get("inputs", []),
+        "events": [],
+        "session_channel": channel,
+        "session_thread_ts": thread_ts,
+        "custom_title": custom_title or None,
+    })
+    blocks = [
+        {
+            "type": "section",
+            "text": {"type": "mrkdwn",
+                     "text": "📅 캘린더에 매칭되는 일정이 없습니다.\n버튼을 눌러 미팅 정보(제목·업체·참석자)를 입력해주세요."},
+        },
+        {
+            "type": "actions",
+            "elements": [{
+                "type": "button",
+                "text": {"type": "plain_text", "text": "📝 새 미팅 정보 입력"},
+                "action_id": "select_meeting_event_new",
+                "style": "primary",
+            }],
+        },
+    ]
+    resp = slack_client.chat_postMessage(
+        channel=channel or user_id,
+        thread_ts=thread_ts,
+        text="새 미팅 정보를 입력해주세요.",
+        blocks=blocks,
+    )
+    if resp and resp.get("ok"):
+        _pending_inputs[user_id]["prompt_ts"] = resp["ts"]
+
+
+def handle_meeting_start_modal(slack_client, user_id: str, view: dict) -> None:
+    """미팅 시작 모달 제출 처리 — ad-hoc 세션 생성 + 대기 입력 합치기."""
+    values = view.get("state", {}).get("values", {})
+    title = ((values.get("title_block", {}).get("title_input", {}) or {}).get("value") or "").strip() or "미팅"
+    company = ((values.get("company_block", {}).get("company_input", {}) or {}).get("value") or "").strip()
+    attendees_raw = ((values.get("attendees_block", {}).get("attendees_input", {}) or {}).get("value") or "").strip()
+    attendees_list = [a.strip() for a in re.split(r"[,，、\n]", attendees_raw) if a.strip()] if attendees_raw else []
+
+    # private_metadata 복원
+    try:
+        meta = json.loads(view.get("private_metadata") or "{}")
+    except Exception:
+        meta = {}
+    pending = _pending_inputs.pop(user_id, None) or {}
+    inputs = pending.get("inputs", [])
+    channel = pending.get("session_channel") or meta.get("channel")
+    thread_ts = pending.get("session_thread_ts") or meta.get("thread_ts")
+
+    # 이미 진행 중 세션이 있으면 무시
+    if user_id in _active_sessions:
+        log.info(f"meeting_start_modal: 이미 진행 중 세션 — 무시 ({user_id})")
+        return
+
+    _create_ad_hoc_session(slack_client, user_id, title, channel, thread_ts,
+                           company=company, attendees_manual=attendees_list)
+
+    # 대기 메모 합치기 (handle_event_selection 패턴 동일)
+    if inputs and user_id in _active_sessions:
+        for item in inputs:
+            content = item.get("content", "")
+            if content:
+                ts = datetime.now(KST).strftime("%H:%M")
+                _active_sessions[user_id]["notes"].append({"time": ts, "text": content})
+        _save_active_session(user_id)
+        count = len(_active_sessions[user_id]["notes"])
+        _post(slack_client, user_id=user_id, channel=channel, thread_ts=thread_ts,
+              text=f"📝 대기 중이던 메모 {len(inputs)}개가 세션에 추가되었습니다. (총 {count}개)")
 
 
 def start_document_based_minutes(slack_client, user_id: str,

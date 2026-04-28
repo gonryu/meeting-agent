@@ -109,6 +109,11 @@ def merge_meeting_prompt(existing_info: dict, new_message: str) -> str:
 판단 규칙:
 - 일정 관련 정보(제목, 참석자, 어젠다, 날짜, 시간, 소요시간, 장소, 업체 등)를 제공하는 메시지면 is_update: true
 - 전혀 다른 주제("브리핑 해줘", "회의실 예약해줘", "회사 알아봐줘" 등)면 is_update: false
+- **새 미팅 감지 (is_update: false)** — 다음 신호가 보이면 기존 드래프트와 무관한 새 미팅으로 간주:
+  - 기존 드래프트와 **다른 업체명**이 명시되고 + **다른 날짜·시간**이 명시됨
+    예: 기존 드래프트 "Allobank 내일 11시"인데 "Danal핀테크 이번주 목요일 11시 미팅" → 새 미팅 (is_update: false)
+  - "~미팅이 있는데 …" / "~미팅 잡아줘" / "~만들어줘" / "~생성해줘" + 기존과 다른 회사·시간
+  - "회의실 예약하고 싶다" 단독은 위치(location) 업데이트로 처리 가능하지만, 다른 업체·시간이 함께 오면 새 미팅으로 처리
 
 JSON으로만 반환 (설명 없이):
 {{
@@ -133,6 +138,13 @@ JSON으로만 반환 (설명 없이):
 - "참석자 추가해줘 홍길동" → participants에 홍길동 추가 (기존 유지)
 - "참석자는 홍길동이야" → participants를 [홍길동]으로 대체
 - participants는 개인 이름만, 업체명 제외
+- **이메일 인라인 업데이트** — 메시지에 "[이름] [이메일주소]" 또는 "[이름] 이메일은 [이메일주소]" 패턴이 있으면:
+  - 해당 이름이 기존 participants에 있으면 participants는 그대로, participant_emails에만 추가
+  - 기존 participants에 없으면 participants에도 추가
+  - changed_fields에 "participant_emails"를 포함 (이름 신규 추가면 "participants"도 함께)
+  - 예: "김은서 eunseo@xx.com" → participants에 김은서 추가(없을 시), participant_emails: {{"김은서": "eunseo@xx.com"}}, changed_fields: ["participants", "participant_emails"]
+  - 예: "김은서 이메일은 eunseo@xx.com 이야" → 동일하게 처리
+  - 이메일 형식(`@` 포함, TLD 있는 도메인)이 보일 때만 적용. URL이나 다른 텍스트로 오인 금지
 - company_candidates 누적 규칙 (participants와 동일 패턴):
   - "업체 추가해줘 NewCo" → 기존 company_candidates에 NewCo 추가 (기존 유지), company_confirmed: true
   - "업체는 NewCo야" → company_candidates를 [NewCo]로 대체, company_confirmed: true
