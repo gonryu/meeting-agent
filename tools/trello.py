@@ -23,6 +23,9 @@ log = logging.getLogger(__name__)
 BOARD_ID = os.getenv("TRELLO_BOARD_ID", "69731ce5")
 CONTACT_LIST_NAME = "Contact/Meeting"
 CHECKLIST_NAME = "Action Items"
+_DEFAULT_COMPANY_ALIASES = {
+    "다날": ["다날핀테크", "다날 핀테크"],
+}
 
 # ── 내부 헬퍼 ────────────────────────────────────────────────
 
@@ -112,6 +115,13 @@ def _company_aliases(company_name: str) -> set[str]:
     TRELLO_COMPANY_ALIASES='{"파라메타":["PARAMETA"],"카카오":["Kakao"]}'
     """
     aliases = {company_name}
+    normalized_company = _normalize_company_name(company_name)
+    for key, values in _DEFAULT_COMPANY_ALIASES.items():
+        names = {key, *values}
+        normalized = {_normalize_company_name(v) for v in names if v}
+        if normalized_company in normalized:
+            aliases.update(v for v in names if v)
+
     raw = os.getenv("TRELLO_COMPANY_ALIASES", "").strip()
     if raw:
         try:
@@ -119,7 +129,7 @@ def _company_aliases(company_name: str) -> set[str]:
             for key, values in mapping.items():
                 names = {key, *values} if isinstance(values, list) else {key, values}
                 normalized = {_normalize_company_name(v) for v in names if v}
-                if _normalize_company_name(company_name) in normalized:
+                if normalized_company in normalized:
                     aliases.update(v for v in names if v)
         except Exception as e:
             log.warning(f"TRELLO_COMPANY_ALIASES 파싱 실패: {e}")

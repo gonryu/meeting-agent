@@ -213,6 +213,10 @@ class TestCardMatching:
         monkeypatch.setenv("TRELLO_COMPANY_ALIASES", '{"카카오":["Kakao"]}')
         assert _card_matches_company("Kakao - RWA 검토", "카카오")
 
+    def test_builtin_alias_matches_danal_fintech(self):
+        assert _card_matches_company("다날핀테크 - PoC/Pilot 제안", "다날")
+        assert _card_matches_company("다날 핀테크 - PoC/Pilot 제안", "다날")
+
 
 # ── create_card ─────────────────────────────────────────────
 
