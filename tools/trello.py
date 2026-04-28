@@ -20,7 +20,8 @@ from store import user_store
 
 log = logging.getLogger(__name__)
 
-BOARD_ID = os.getenv("TRELLO_BOARD_ID", "RlFAf1Q1")
+DEFAULT_PIPELINE_BOARD_ID = "RlFAf1Q1"
+BOARD_ID = os.getenv("TRELLO_BOARD_ID", DEFAULT_PIPELINE_BOARD_ID)
 CONTACT_LIST_NAME = "Contact/Meeting"
 CHECKLIST_NAME = "Action Items"
 _DEFAULT_COMPANY_ALIASES = {
@@ -31,8 +32,8 @@ _DEFAULT_COMPANY_ALIASES = {
 
 # 사용자별 클라이언트 캐시 (user_id → TrelloClient)
 _client_cache: dict[str, object] = {}
-# 사용자별 보드 캐시 (user_id → Board)
-_board_cache: dict[str, object] = {}
+# 사용자별 보드 캐시 ((user_id, board_id) → Board)
+_board_cache: dict[tuple[str, str], object] = {}
 
 
 def _is_dry_run() -> bool:
@@ -68,28 +69,32 @@ def _client_for_user(user_id: str):
     return client
 
 
-def _board_for_user(user_id: str):
+def _board_for_user(user_id: str, board_id: str | None = None):
     """사용자별 보드 객체 반환."""
-    if user_id in _board_cache:
-        return _board_cache[user_id]
+    target_board_id = board_id or BOARD_ID
+    cache_key = (user_id, target_board_id)
+    if cache_key in _board_cache:
+        return _board_cache[cache_key]
 
     client = _client_for_user(user_id)
     if client is None:
         return None
 
     try:
-        board = client.get_board(BOARD_ID)
-        _board_cache[user_id] = board
+        board = client.get_board(target_board_id)
+        _board_cache[cache_key] = board
         return board
     except Exception as e:
-        log.warning(f"Trello 보드 로드 실패: {e}")
+        log.warning(f"Trello 보드 로드 실패 ({target_board_id}): {e}")
         return None
 
 
 def clear_user_cache(user_id: str) -> None:
     """사용자 캐시 초기화 (토큰 갱신/해제 시 호출)"""
     _client_cache.pop(user_id, None)
-    _board_cache.pop(user_id, None)
+    for key in list(_board_cache):
+        if key[0] == user_id:
+            _board_cache.pop(key, None)
 
 
 def _normalize_company_name(name: str) -> str:
@@ -148,19 +153,27 @@ def _find_card(user_id: str, company_name: str):
     브리핑 오매칭을 막기 위해 카드명 전체 유사도 대신
     "업체명 - 사업내용"의 업체명 부분만 exact/alias 매칭한다.
     """
-    board = _board_for_user(user_id)
-    if board is None:
-        return None
+    board_ids = [BOARD_ID]
+    if DEFAULT_PIPELINE_BOARD_ID not in board_ids:
+        board_ids.append(DEFAULT_PIPELINE_BOARD_ID)
 
-    try:
-        cards = board.open_cards()
-        card_names = [c.name for c in cards]
-        log.info(f"Trello 카드 검색: target='{company_name}', 보드 카드={card_names}")
-        for card in cards:
-            if _card_matches_company(card.name, company_name):
-                return card
-    except Exception as e:
-        log.warning(f"Trello 카드 검색 오류: {e}")
+    for board_id in board_ids:
+        board = _board_for_user(user_id, board_id)
+        if board is None:
+            continue
+
+        try:
+            cards = board.open_cards()
+            card_names = [c.name for c in cards]
+            log.info(
+                f"Trello 카드 검색: target='{company_name}', board='{board_id}', "
+                f"보드 카드={card_names}"
+            )
+            for card in cards:
+                if _card_matches_company(card.name, company_name):
+                    return card
+        except Exception as e:
+            log.warning(f"Trello 카드 검색 오류 ({board_id}): {e}")
     return None
 
 

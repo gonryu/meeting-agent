@@ -136,10 +136,10 @@ class TestDummyObjects:
 class TestClearUserCache:
     def test_clears_cache(self):
         trello_mod._client_cache["UTEST"] = MagicMock()
-        trello_mod._board_cache["UTEST"] = MagicMock()
+        trello_mod._board_cache[("UTEST", "board")] = MagicMock()
         clear_user_cache("UTEST")
         assert "UTEST" not in trello_mod._client_cache
-        assert "UTEST" not in trello_mod._board_cache
+        assert ("UTEST", "board") not in trello_mod._board_cache
 
     def test_noop_for_unknown_user(self):
         clear_user_cache("UNKNOWN")  # 에러 없이 통과

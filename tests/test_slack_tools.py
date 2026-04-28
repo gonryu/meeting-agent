@@ -186,6 +186,18 @@ class TestBuildCompanyResearchBlock:
         assert "**" not in text
         assert "MyID (DID 플랫폼) ↔ 외국인 결제: 인증 연계" in text
 
+    def test_company_overview_not_shown_as_news(self):
+        blocks = build_company_research_block(
+            "다날핀테크",
+            ["산업 위치", "시장 포지션"],
+            [],
+            [],
+        )
+        text = _get_text(blocks)
+
+        assert "• 산업 위치" not in text
+        assert "최근 동향 정보 없음" in text
+
     def test_trello_summary_and_card_link_visible(self):
         blocks = build_company_research_block(
             "다날",

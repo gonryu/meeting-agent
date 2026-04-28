@@ -156,6 +156,15 @@ def _format_news_line_for_slack(news: str) -> str:
     news = _strip_display_markdown(news)
     if not news:
         return ""
+    overview_labels = (
+        "산업 위치",
+        "시장 포지션",
+        "주요 경쟁/유사 업체",
+        "차별점",
+        "규제/정책 메모",
+    )
+    if any(news.startswith(label) for label in overview_labels):
+        return ""
 
     md_link = re.search(r"\[([^\]]+)\]\((https?://[^)\s]+)\)", news)
     if md_link:
@@ -163,7 +172,7 @@ def _format_news_line_for_slack(news: str) -> str:
 
     url_m = re.search(r"https?://\S+", news)
     if not url_m:
-        return news
+        return ""
 
     url = url_m.group(0).rstrip(").,")
     title = news[:url_m.start()].strip()
@@ -203,12 +212,15 @@ def build_company_research_block(
         lines.append("")
 
     lines.append("📰  *업체 동향*")
-    filtered_news = [n for n in news_lines if not _is_preamble(n)]
-    if filtered_news:
-        for news in filtered_news[:3]:
-            formatted = _format_news_line_for_slack(news)
-            if formatted:
-                lines.append(f"• {formatted}")
+    formatted_news = [
+        formatted for formatted in (
+            _format_news_line_for_slack(n) for n in news_lines if not _is_preamble(n)
+        )
+        if formatted
+    ]
+    if formatted_news:
+        for news in formatted_news[:3]:
+            lines.append(f"• {news}")
     else:
         lines.append("• 최근 동향 정보 없음")
     lines.append("")

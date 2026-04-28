@@ -123,7 +123,7 @@ with patch("agents.after.user_store") as mock_store, \
 print("\n🔄 5. 사용자 캐시 관리")
 
 trello._client_cache["TEST_USER"] = MagicMock()
-trello._board_cache["TEST_USER"] = MagicMock()
+trello._board_cache[("TEST_USER", "board")] = MagicMock()
 trello.clear_user_cache("TEST_USER")
 check("캐시 초기화", "TEST_USER" not in trello._client_cache)
 
