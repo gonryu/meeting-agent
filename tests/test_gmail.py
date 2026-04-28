@@ -5,7 +5,7 @@ from unittest.mock import patch, MagicMock
 
 # _service() 호출 차단
 with patch("tools.gmail._service"):
-    from tools.gmail import _decode_body
+    from tools.gmail import _decode_body, _is_calendar_notification
 
 
 def _b64(text: str) -> str:
@@ -77,3 +77,19 @@ class TestDecodeBody:
         }
         result = _decode_body(payload)
         assert result == "첫 번째"
+
+
+class TestCalendarNotificationFilter:
+    def test_google_calendar_sender_filtered(self):
+        headers = {
+            "From": "Google Calendar <calendar-notification@google.com>",
+            "Subject": "Invitation: 카카오 미팅",
+        }
+        assert _is_calendar_notification(headers)
+
+    def test_regular_business_email_not_filtered(self):
+        headers = {
+            "From": "홍길동 <hong@example.com>",
+            "Subject": "스테이블코인 PoC 논의",
+        }
+        assert not _is_calendar_notification(headers, "다음 미팅 전 자료 공유드립니다")

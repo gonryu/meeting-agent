@@ -26,6 +26,7 @@ with patch("trello.TrelloClient"), \
         _format_checklist_item,
         _DummyCard,
         _DummyChecklist,
+        _card_matches_company,
         clear_user_cache,
     )
     import agents.after as after
@@ -199,6 +200,18 @@ class TestGetCardContext:
              patch.object(trello_mod, "_is_dry_run", return_value=False):
             result = get_card_context(_TEST_USER_ID, "카카오")
             assert result["incomplete_items"] == []
+
+
+class TestCardMatching:
+    def test_company_dash_business_title_matches(self):
+        assert _card_matches_company("카카오 - 스테이블코인 PoC", "카카오")
+
+    def test_similar_but_different_company_does_not_match(self):
+        assert not _card_matches_company("카카오페이 - 결제 PoC", "카카오")
+
+    def test_alias_matches(self, monkeypatch):
+        monkeypatch.setenv("TRELLO_COMPANY_ALIASES", '{"카카오":["Kakao"]}')
+        assert _card_matches_company("Kakao - RWA 검토", "카카오")
 
 
 # ── create_card ─────────────────────────────────────────────

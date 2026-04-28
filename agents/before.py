@@ -623,14 +623,14 @@ def _build_trello_summary(trello_context: dict) -> list[str]:
     desc = (trello_context.get("description") or "").strip()
     if desc:
         one_line = re.sub(r"\s+", " ", desc)
-        summary.append(f"카드 설명: {one_line[:140]}")
-    for comment in trello_context.get("recent_comments", [])[:3]:
+        summary.append(f"카드: {one_line[:90]}")
+    for comment in trello_context.get("recent_comments", [])[:2]:
         text = re.sub(r"\s+", " ", (comment.get("text") or "").strip())
         if not text:
             continue
         author = comment.get("author") or "작성자"
-        summary.append(f"{author}: {text[:120]}")
-    return summary
+        summary.append(f"{author}: {text[:80]}")
+    return summary[:3]
 
 
 def _build_update_check_lines(existing_content: str | None, today: str,
@@ -741,7 +741,7 @@ def research_company(user_id: str, company_name: str, force: bool = False) -> tu
             body_for_preserve = content
         _RESEARCH_HEADERS = {
             "# ", "## 최근 동향", "## 이메일 맥락", "## 파라메타 서비스 연결점",
-            "## ParaScope", "## 출처 로그",
+            "## ParaScope", "## 업데이트 체크", "## 출처 로그",
         }
         current_section = []
         is_preserved = False
@@ -971,6 +971,7 @@ def get_previous_context(user_id: str, company_name: str, person_names: list[str
     return {
         "trello": trello_items,
         "trello_summary": trello_summary,
+        "trello_card_name": trello_context.get("card_name", "") if trello_context else "",
         "trello_url": trello_context.get("url", "") if trello_context else "",
         "emails": emails[:3],
         "minutes": minutes,

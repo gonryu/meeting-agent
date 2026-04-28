@@ -149,6 +149,7 @@ def build_company_research_block(
     news_lines: list[str],
     parascope_lines: list[str],
     connection_lines: list[str],
+    update_lines: list[str] | None = None,
 ) -> list[dict]:
     """업체 뉴스 + ParaScope + 서비스 연결점 블록 (리서치 완료 후 발송)."""
     lines = [        
@@ -178,6 +179,12 @@ def build_company_research_block(
             lines.append(f"• {conn}")
     else:
         lines.append("• 분석 정보 없음")
+
+    if update_lines:
+        lines.append("")
+        lines.append("🧭  *업데이트 체크*")
+        for item in update_lines[:3]:
+            lines.append(f"• {item}")
 
     return [{"type": "section", "text": {"type": "mrkdwn", "text": "\n".join(lines)}}]
 
@@ -209,10 +216,21 @@ def build_context_block(context: dict) -> list[dict]:
     """이전 미팅 맥락 + 이메일 블록 (컨텍스트 조회 완료 후 발송)."""
     lines = []
     trello_items = context.get("trello", [])
+    trello_summary = context.get("trello_summary", [])
+    trello_url = context.get("trello_url", "")
+    trello_card_name = context.get("trello_card_name", "")
     emails = context.get("emails", [])
     minutes = context.get("minutes", [])
 
     lines.append("📌  *이전 미팅 맥락*")
+    if trello_items or trello_summary:
+        title = f"• Trello 카드: {trello_card_name}" if trello_card_name else "• Trello 카드"
+        if trello_url:
+            title += f" <{trello_url}|열기>"
+        lines.append(title)
+    if trello_summary:
+        for item in trello_summary[:3]:
+            lines.append(f"   • {item}")
     if trello_items:
         lines.append("• Trello 미완료")
         for item in trello_items[:5]:
@@ -224,7 +242,7 @@ def build_context_block(context: dict) -> list[dict]:
         link = f"https://drive.google.com/file/d/{file_id}/view" if file_id else ""
         link_str = f" <{link}|열기>" if link else ""
         lines.append(f"• 회의록: {name} ({modified}){link_str}")
-    if not trello_items and not minutes:
+    if not trello_items and not trello_summary and not minutes:
         lines.append("• 이전 미팅 기록 없음")
 
     lines.append("")

@@ -33,6 +33,40 @@ def _decode_body(payload: dict) -> str:
     return body.strip()[:500]
 
 
+_CALENDAR_NOTIFICATION_PATTERNS = (
+    "calendar-notification@google.com",
+    "calendar-notification",
+    "Google Calendar",
+    "Google 캘린더",
+    "Invitation:",
+    "Updated invitation:",
+    "Canceled event:",
+    "Accepted:",
+    "Declined:",
+    "Tentatively accepted:",
+    "초대:",
+    "일정 초대",
+    "업데이트된 초대",
+    "취소된 일정",
+)
+
+
+def _is_calendar_notification(headers: dict, snippet: str = "") -> bool:
+    """Google Calendar 자동 알림 메일 여부.
+
+    브리핑 맥락에는 사람이 주고받은 메일만 보여주는 것이 목적이라
+    Calendar 초대/변경/응답 자동 알림은 제외한다.
+    """
+    haystack = " ".join([
+        headers.get("From", ""),
+        headers.get("Sender", ""),
+        headers.get("Subject", ""),
+        snippet or "",
+    ])
+    return any(pattern.lower() in haystack.lower()
+               for pattern in _CALENDAR_NOTIFICATION_PATTERNS)
+
+
 def parse_address_header(header_value: str) -> list[dict]:
     """'이름 <email>' 또는 'email' 형식의 헤더에서 [{name, email}] 추출"""
     results = []
@@ -173,6 +207,7 @@ def search_recent_emails(creds: Credentials, person_name: str,
         query = f'"{person_name}" "{company_name}" after:{after}'
     else:
         query = f'"{company_name}" after:{after}'
+    query += " -from:calendar-notification@google.com"
 
     svc = _service(creds)
     result = svc.users().messages().list(
@@ -188,6 +223,8 @@ def search_recent_emails(creds: Credentials, person_name: str,
         ).execute()
 
         headers = {h["name"]: h["value"] for h in detail.get("payload", {}).get("headers", [])}
+        if _is_calendar_notification(headers, detail.get("snippet", "")):
+            continue
         date_str = headers.get("Date", "")
         subject = headers.get("Subject", "(제목 없음)")
         body = _decode_body(detail.get("payload", {}))
