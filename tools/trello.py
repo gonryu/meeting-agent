@@ -20,7 +20,7 @@ from store import user_store
 
 log = logging.getLogger(__name__)
 
-BOARD_ID = os.getenv("TRELLO_BOARD_ID", "69731ce5")
+BOARD_ID = os.getenv("TRELLO_BOARD_ID", "RlFAf1Q1")
 CONTACT_LIST_NAME = "Contact/Meeting"
 CHECKLIST_NAME = "Action Items"
 _DEFAULT_COMPANY_ALIASES = {

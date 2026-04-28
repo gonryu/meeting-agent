@@ -11,7 +11,7 @@ os.environ["DRY_RUN_TRELLO"] = "true"
 os.environ.setdefault("GOOGLE_API_KEY", "test-key")
 os.environ.setdefault("ENCRYPTION_KEY", "dGVzdC1rZXktMzItYnl0ZXMtZm9yLWZlcm5ldC0h")
 os.environ.setdefault("TRELLO_API_KEY", "")
-os.environ.setdefault("TRELLO_BOARD_ID", "69731ce5")
+os.environ.setdefault("TRELLO_BOARD_ID", "RlFAf1Q1")
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
