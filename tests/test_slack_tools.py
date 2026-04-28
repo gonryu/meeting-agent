@@ -201,3 +201,17 @@ class TestBuildCompanyResearchBlock:
         assert "Trello 맥락" in text
         assert "<https://trello.com/c/card|다날 - 결제>" in text
         assert "결제 PoC 논의 중" in text
+
+    def test_trello_card_link_visible_without_summary(self):
+        blocks = build_company_research_block(
+            "다날핀테크",
+            [],
+            [],
+            [],
+            trello_card_name="다날핀테크 - PoC/Pilot 제안",
+            trello_url="https://trello.com/c/CXQzHjRn",
+        )
+        text = _get_text(blocks)
+
+        assert "<https://trello.com/c/CXQzHjRn|다날핀테크 - PoC/Pilot 제안>" in text
+        assert "카드 확인됨" in text

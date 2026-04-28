@@ -222,14 +222,15 @@ def build_company_research_block(
     else:
         lines.append("• 분석 정보 없음")
 
-    if trello_summary:
+    if trello_summary or trello_url or trello_card_name:
         lines.append("")
         card_label = _strip_display_markdown(trello_card_name) if trello_card_name else "Trello 카드"
         if trello_url:
             lines.append(f"📌  *Trello 맥락*  <{trello_url}|{card_label}>")
         else:
             lines.append("📌  *Trello 맥락*")
-        for item in trello_summary[:3]:
+        visible_items = trello_summary[:3] if trello_summary else ["카드 확인됨"]
+        for item in visible_items:
             cleaned = _strip_display_markdown(item)
             if cleaned:
                 lines.append(f"• {cleaned}")

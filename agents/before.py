@@ -618,12 +618,16 @@ def _format_email_context_section(emails: list[dict], today: str) -> str:
 
 
 def _build_trello_summary(trello_context: dict) -> list[str]:
-    """Trello 카드 설명/댓글을 브리핑용 짧은 맥락으로 변환."""
+    """Trello 카드 설명/댓글/미완료 항목을 브리핑용 짧은 맥락으로 변환."""
     summary = []
     desc = (trello_context.get("description") or "").strip()
     if desc:
         one_line = re.sub(r"\s+", " ", desc)
         summary.append(f"카드: {one_line[:90]}")
+    for item in trello_context.get("incomplete_items", [])[:2]:
+        text = re.sub(r"\s+", " ", (item or "").strip())
+        if text:
+            summary.append(f"미완료: {text[:80]}")
     for comment in trello_context.get("recent_comments", [])[:2]:
         text = re.sub(r"\s+", " ", (comment.get("text") or "").strip())
         if not text:
