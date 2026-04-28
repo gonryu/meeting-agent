@@ -1,6 +1,10 @@
 """tools/slack_tools.py 단위 테스트"""
 import pytest
-from tools.slack_tools import format_time, build_briefing_message
+from tools.slack_tools import (
+    format_time,
+    build_briefing_message,
+    build_company_research_block,
+)
 
 
 # ── format_time ───────────────────────────────────────────────
@@ -165,3 +169,35 @@ class TestBuildBriefingMessage:
         ))
         assert "카카오 미팅" in text
         assert "카카오" in text
+
+
+class TestBuildCompanyResearchBlock:
+    def test_news_title_link_and_markdown_cleanup(self):
+        blocks = build_company_research_block(
+            "다날",
+            ["**[다날, 스테이블코인 결제 실증]**: 요약 (https://example.com/news)"],
+            [],
+            ["**MyID (DID 플랫폼)** ↔ **외국인 결제**: 인증 연계"],
+            ["2026-04-28 **기존 Wiki** 확인"],
+        )
+        text = _get_text(blocks)
+
+        assert "<https://example.com/news|다날, 스테이블코인 결제 실증>" in text
+        assert "**" not in text
+        assert "MyID (DID 플랫폼) ↔ 외국인 결제: 인증 연계" in text
+
+    def test_trello_summary_and_card_link_visible(self):
+        blocks = build_company_research_block(
+            "다날",
+            [],
+            [],
+            [],
+            trello_summary=["카드: 결제 PoC 논의 중", "홍길동: 계약 조건 확인"],
+            trello_card_name="다날 - 결제",
+            trello_url="https://trello.com/c/card",
+        )
+        text = _get_text(blocks)
+
+        assert "Trello 맥락" in text
+        assert "<https://trello.com/c/card|다날 - 결제>" in text
+        assert "결제 PoC 논의 중" in text

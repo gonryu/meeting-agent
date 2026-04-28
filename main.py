@@ -769,8 +769,29 @@ def _post_company_research_result(client, *, user_id: str, company: str,
     news_lines, parascope_lines, connection_lines, _emails, update_lines = (
         before_agent._extract_company_content_sections(content)
     )
+    trello_summary: list[str] = []
+    trello_card_name = ""
+    trello_url = ""
+    try:
+        trello_context = before_agent.trello.get_card_context(
+            user_id, company, limit_comments=3
+        )
+        if trello_context:
+            trello_summary = before_agent._build_trello_summary(trello_context)
+            trello_card_name = trello_context.get("card_name", "")
+            trello_url = trello_context.get("url", "")
+    except Exception as e:
+        log.warning(f"Trello 기업정보 컨텍스트 조회 실패 ({company}): {e}")
+
     blocks = before_agent.build_company_research_block(
-        company, news_lines, parascope_lines, connection_lines, update_lines
+        company,
+        news_lines,
+        parascope_lines,
+        connection_lines,
+        update_lines,
+        trello_summary,
+        trello_card_name,
+        trello_url,
     )
     client.chat_postMessage(
         channel=channel or user_id,

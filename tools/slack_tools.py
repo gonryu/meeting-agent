@@ -144,12 +144,50 @@ def build_meeting_header_block(meeting: dict, company_name: str,
     return blocks
 
 
+def _strip_display_markdown(text: str) -> str:
+    """Wiki Markdown을 Slack 표시용 한 줄 텍스트로 정리."""
+    text = re.sub(r"\*\*(.*?)\*\*", r"\1", text or "")
+    text = re.sub(r"`([^`]+)`", r"\1", text)
+    text = re.sub(r"^\s*[-•]\s*", "", text).strip()
+    return text
+
+
+def _format_news_line_for_slack(news: str) -> str:
+    news = _strip_display_markdown(news)
+    if not news:
+        return ""
+
+    md_link = re.search(r"\[([^\]]+)\]\((https?://[^)\s]+)\)", news)
+    if md_link:
+        return f"<{md_link.group(2)}|{md_link.group(1).strip()}>"
+
+    url_m = re.search(r"https?://\S+", news)
+    if not url_m:
+        return news
+
+    url = url_m.group(0).rstrip(").,")
+    title = news[:url_m.start()].strip()
+    bracket_title = re.search(r"\[([^\]]+)\]", title)
+    if bracket_title:
+        title = bracket_title.group(1).strip()
+    else:
+        title = re.split(r"[:：]", title, maxsplit=1)[0].strip()
+    title = re.sub(r"[:：\-\s(]+$", "", title).strip()
+    title = title.strip("[]")
+    if not title:
+        title = "기사 보기"
+    return f"<{url}|{title}>"
+
+
 def build_company_research_block(
     company_name: str,
     news_lines: list[str],
     parascope_lines: list[str],
     connection_lines: list[str],
     update_lines: list[str] | None = None,
+    trello_summary: list[str] | None = None,
+    trello_card_name: str = "",
+    trello_url: str = "",
 ) -> list[dict]:
     """업체 뉴스 + ParaScope + 서비스 연결점 블록 (리서치 완료 후 발송)."""
     lines = [        
@@ -161,14 +199,16 @@ def build_company_research_block(
     if parascope_lines:
         lines.append("🔭  *ParaScope 브리핑*")
         for item in parascope_lines:
-            lines.append(_slack_linkify(item))
+            lines.append(_slack_linkify(_strip_display_markdown(item)))
         lines.append("")
 
     lines.append("📰  *업체 동향*")
     filtered_news = [n for n in news_lines if not _is_preamble(n)]
     if filtered_news:
         for news in filtered_news[:3]:
-            lines.append(f"• {_slack_linkify(news)}")
+            formatted = _format_news_line_for_slack(news)
+            if formatted:
+                lines.append(f"• {formatted}")
     else:
         lines.append("• 최근 동향 정보 없음")
     lines.append("")
@@ -176,15 +216,31 @@ def build_company_research_block(
     lines.append("🔗  *파라메타 서비스 연결점*")
     if connection_lines:
         for conn in connection_lines[:3]:
-            lines.append(f"• {conn}")
+            cleaned = _strip_display_markdown(conn)
+            if cleaned:
+                lines.append(f"• {cleaned}")
     else:
         lines.append("• 분석 정보 없음")
+
+    if trello_summary:
+        lines.append("")
+        card_label = _strip_display_markdown(trello_card_name) if trello_card_name else "Trello 카드"
+        if trello_url:
+            lines.append(f"📌  *Trello 맥락*  <{trello_url}|{card_label}>")
+        else:
+            lines.append("📌  *Trello 맥락*")
+        for item in trello_summary[:3]:
+            cleaned = _strip_display_markdown(item)
+            if cleaned:
+                lines.append(f"• {cleaned}")
 
     if update_lines:
         lines.append("")
         lines.append("🧭  *업데이트 체크*")
         for item in update_lines[:3]:
-            lines.append(f"• {item}")
+            cleaned = _strip_display_markdown(item)
+            if cleaned:
+                lines.append(f"• {cleaned}")
 
     return [{"type": "section", "text": {"type": "mrkdwn", "text": "\n".join(lines)}}]
 

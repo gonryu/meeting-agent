@@ -534,3 +534,31 @@ class TestMinutesContentWithBacklinks:
         )
 
         assert "## 관련 자료" not in content
+
+
+class TestCompanyResearchSectionExtraction:
+    def test_recent_trends_subsection_excludes_company_overview(self):
+        content = """# 다날
+
+## 최근 동향
+- **산업 위치**: 모바일 결제 플랫폼
+- **시장 포지션**: 국내 결제사
+
+### 최근 동향 (`2026-04-28` 기준)
+- **[다날, 원화 스테이블코인 결제 실증 추진]**: 결제 인프라 연계 (https://example.com/stablecoin)
+- **[다날 DID 인증 적용]**: 외국인 결제 인증 관련 (https://example.com/did)
+
+## 파라메타 서비스 연결점
+- **MyID**: DID 인증 연계
+"""
+
+        news_lines, _parascope, connection_lines, _emails, _updates = (
+            before._extract_company_content_sections(content)
+        )
+
+        assert news_lines == [
+            "다날, 원화 스테이블코인 결제 실증 추진 (https://example.com/stablecoin)",
+            "다날 DID 인증 적용 (https://example.com/did)",
+        ]
+        assert not any("산업 위치" in line for line in news_lines)
+        assert connection_lines == ["**MyID**: DID 인증 연계"]

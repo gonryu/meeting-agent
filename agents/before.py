@@ -1123,14 +1123,33 @@ def _extract_company_content_sections(company_content: str) -> tuple[list[str], 
             in_news = True
             continue
         if in_news:
-            if line.strip().startswith("#"):
+            if line.strip().startswith("## ") and "최근 동향" not in line:
                 break
             if "last_searched" in line:
                 continue
             news_section_lines.append(line)
+    trend_only_lines: list[str] = []
+    found_trend_subsection = False
+    for line in news_section_lines:
+        stripped = line.strip()
+        if stripped.startswith("#") and "최근 동향" in stripped:
+            found_trend_subsection = True
+            trend_only_lines = []
+            continue
+        if found_trend_subsection and stripped.startswith("#"):
+            break
+        if found_trend_subsection:
+            trend_only_lines.append(line)
+    if found_trend_subsection:
+        news_section_lines = trend_only_lines
+
     news_section = "\n".join(news_section_lines)
 
-    raw_blocks = re.split(r'\n\s*-{3,}\s*\n', news_section)
+    bullet_blocks = [
+        line.strip() for line in news_section_lines
+        if line.strip().startswith(("- ", "• ")) and "http" in line
+    ]
+    raw_blocks = bullet_blocks or re.split(r'\n\s*-{3,}\s*\n', news_section)
     if len(raw_blocks) <= 1:
         raw_blocks = []
         cur: list[str] = []
@@ -1151,18 +1170,28 @@ def _extract_company_content_sections(company_content: str) -> tuple[list[str], 
         if not block:
             continue
         block_lines = [l.strip() for l in block.splitlines() if l.strip()]
+        block_lines = [
+            l for l in block_lines
+            if "공개 정보 없음" not in l and not l.startswith("`[출처:")
+        ]
+        if not block_lines:
+            continue
         has_bold = any("**" in l for l in block_lines)
         has_url = any("http" in l or "출처" in l for l in block_lines)
-        if not has_bold and not has_url and len(block) > 120:
+        if not has_url:
             continue
         title = ""
         for l in block_lines:
-            m = re.search(r'\*\*(.+?)\*\*', l)
+            m = re.search(r'\*\*\[?(.+?)\]?\*\*', l)
+            if not m:
+                m = re.search(r'^\s*[-•]?\s*\[([^\]]+)\]', l)
             if m:
                 title = re.sub(r'^\d+\.\s*', '', m.group(1).strip())
                 break
         if not title:
-            title = block_lines[0][:120] if block_lines else ""
+            first = re.sub(r'^\s*[-•]\s*', '', block_lines[0]) if block_lines else ""
+            first = re.split(r'\s*\(|[:：]', first, maxsplit=1)[0].strip()
+            title = first[:120]
         url = ""
         for l in block_lines:
             url_m = re.search(r'https?://\S+', l)
