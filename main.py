@@ -762,6 +762,24 @@ def _add_company_memo(client, *, user_id: str, company: str, memo: str,
     )
 
 
+def _post_company_research_result(client, *, user_id: str, company: str,
+                                  content: str, channel: str = None,
+                                  thread_ts: str = None):
+    """기업정보 리서치 결과를 raw Wiki가 아니라 브리핑용 요약 블록으로 발송."""
+    news_lines, parascope_lines, connection_lines, _emails, update_lines = (
+        before_agent._extract_company_content_sections(content)
+    )
+    blocks = before_agent.build_company_research_block(
+        company, news_lines, parascope_lines, connection_lines, update_lines
+    )
+    client.chat_postMessage(
+        channel=channel or user_id,
+        thread_ts=thread_ts,
+        text=f"✅ *{company}* 기업정보 갱신 완료.",
+        blocks=blocks,
+    )
+
+
 def _route_message(text: str, client, user_id: str, channel: str = None,
                    thread_ts: str = None, user_msg_ts: str = None):
     log.info(f"메시지 라우팅 ({user_id}): {text}")
@@ -861,12 +879,10 @@ def _route_message(text: str, client, user_id: str, channel: str = None,
                                 text=f"🔍 *{company}* 기업정보 리서치 중...")
         try:
             content, _ = research_company(user_id, company, force=True)
-            preview = "\n".join(
-                l for l in content.splitlines()
-                if l.strip() and not l.startswith("#") and "last_searched" not in l
-            )[:300]
-            client.chat_postMessage(channel=channel or user_id, thread_ts=thread_ts,
-                                    text=f"✅ *{company}* 기업정보 갱신 완료.\n\n```{preview}```")
+            _post_company_research_result(
+                client, user_id=user_id, company=company, content=content,
+                channel=channel, thread_ts=thread_ts,
+            )
         except Exception as e:
             client.chat_postMessage(channel=channel or user_id, thread_ts=thread_ts,
                                     text=f"⚠️ 기업정보 리서치 실패: {e}")
@@ -1129,13 +1145,8 @@ def _company_handler(ack, body, client):
     client.chat_postMessage(channel=user_id, text=f"🔍 *{company_name}* 기업정보 리서치 중...")
     try:
         content, _ = research_company(user_id, company_name, force=True)
-        preview = "\n".join(
-            line for line in content.splitlines()
-            if line.strip() and not line.startswith("#") and "last_searched" not in line
-        )[:300]
-        client.chat_postMessage(
-            channel=user_id,
-            text=f"✅ *{company_name}* 기업정보가 갱신되었습니다.\n\n```{preview}```",
+        _post_company_research_result(
+            client, user_id=user_id, company=company_name, content=content,
         )
     except Exception as e:
         client.chat_postMessage(channel=user_id, text=f"⚠️ 기업정보 리서치 실패: {e}")
