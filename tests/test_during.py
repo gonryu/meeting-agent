@@ -729,7 +729,7 @@ class TestGetMinutesList:
         _completed_notes.clear()
 
     def test_shows_file_list(self):
-        """회의록 목록 Slack 발송"""
+        """회의록 목록 Slack 발송 (blocks 기반 — 양식 진단 마커 포함)"""
         slack = _slack()
         files = [
             {"id": "f1", "name": "2026-03-25_카카오_내부용.md", "modifiedTime": "2026-03-25T15:00:00Z"},
@@ -738,11 +738,15 @@ class TestGetMinutesList:
 
         with _mock_store(), patch("agents.during.drive") as mock_drive:
             mock_drive.list_minutes.return_value = files
+            # 본문은 정상 양식이라고 가정 (frontmatter 포함)
+            mock_drive._read_file.return_value = "---\ntitle: x\n---\n\n# 회의\n"
             get_minutes_list(slack, _TEST_USER)
 
-        text = slack.chat_postMessage.call_args[1]["text"]
-        assert "2026-03-25_카카오_내부용" in text
-        assert "2026-03-24_네이버_외부용" in text
+        kwargs = slack.chat_postMessage.call_args.kwargs
+        # blocks 직렬화 텍스트로 파일명 확인
+        all_block_text = json.dumps(kwargs.get("blocks") or [], ensure_ascii=False)
+        assert "2026-03-25_카카오_내부용" in all_block_text
+        assert "2026-03-24_네이버_외부용" in all_block_text
 
     def test_empty_list_message(self):
         """회의록 없으면 안내 메시지"""
@@ -769,17 +773,19 @@ class TestGetMinutesList:
         assert "설정" in text or "재등록" in text
 
     def test_limited_to_10_files(self):
-        """10개 초과 시 10개만 표시 + 나머지 개수 표시"""
+        """10개 초과 시 10개만 표시 + 나머지 개수 표시 (blocks 의 context 영역)"""
         slack = _slack()
         files = [{"id": f"f{i}", "name": f"2026-03-{i:02d}_미팅.md", "modifiedTime": f"2026-03-{i:02d}T10:00:00Z"}
                  for i in range(1, 15)]
 
         with _mock_store(), patch("agents.during.drive") as mock_drive:
             mock_drive.list_minutes.return_value = files
+            mock_drive._read_file.return_value = "---\ntitle: x\n---\n\n# 회의\n"
             get_minutes_list(slack, _TEST_USER)
 
-        text = slack.chat_postMessage.call_args[1]["text"]
-        assert "4개" in text  # 14 - 10 = 4개 더 있음
+        kwargs = slack.chat_postMessage.call_args.kwargs
+        all_block_text = json.dumps(kwargs.get("blocks") or [], ensure_ascii=False)
+        assert "4개" in all_block_text  # 14 - 10 = 4개 더 있음
 
 
 # ── _generate (Claude 단일) ───────────────────────────────────

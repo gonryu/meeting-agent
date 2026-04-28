@@ -2395,7 +2395,11 @@ def _parse_meeting_meta(meeting: dict) -> tuple[str, str, str]:
 
 
 def get_minutes_list(slack_client, user_id: str, channel: str = None, thread_ts: str = None):
-    """/회의록 — 저장된 회의록 목록 조회"""
+    """/회의록 — 저장된 회의록 목록 조회.
+
+    상위 10건 한정으로 *경량* 양식 진단을 수행하여 ⚠️ 마커 + `[🔧 양식 보정]` 버튼을 표시.
+    경량 진단은 본문 전체를 읽지 않고 frontmatter 유무만 확인 (성능 보호).
+    """
     try:
         creds, minutes_folder_id = _get_creds_and_config(user_id)
     except Exception as e:
@@ -2420,16 +2424,57 @@ def get_minutes_list(slack_client, user_id: str, channel: str = None, thread_ts:
               text="📁 저장된 회의록이 없습니다.")
         return
 
-    lines = [f"*📋 저장된 회의록 ({len(files)}개)*"]
+    # 양식 깨짐 lazy 진단 — 상위 10건만 본문 읽어 경량 진단
+    try:
+        from agents import minutes_normalizer
+    except Exception:
+        minutes_normalizer = None  # 안전 폴백
+
+    blocks: list[dict] = [
+        {"type": "section",
+         "text": {"type": "mrkdwn", "text": f"*📋 저장된 회의록 ({len(files)}개)*"}},
+        {"type": "divider"},
+    ]
+
     for f in files[:10]:
         name = f.get("name", "").replace(".md", "")
         modified = f.get("modifiedTime", "")[:10]
         file_id = f.get("id", "")
         link = f"https://drive.google.com/file/d/{file_id}/view" if file_id else ""
+
+        # 경량 진단 — 본문 head 만 읽음 (실패 시 진단 생략)
+        broken = False
+        if minutes_normalizer and file_id:
+            try:
+                content_head = drive._read_file(creds, file_id)
+                # 너무 긴 문서 보호 — 처음 4KB 만 본다
+                diag = minutes_normalizer.diagnose_minutes_light(content_head[:4096])
+                broken = bool(diag.get("needs_normalization"))
+            except Exception as e:
+                log.warning(f"경량 진단 실패 ({name}): {e}")
+
+        warning_tag = " ⚠️ 양식 깨짐" if broken else ""
         link_text = f"  <{link}|열기>" if link else ""
-        lines.append(f"• {name}  _{modified}_{link_text}")
+        block: dict = {
+            "type": "section",
+            "text": {"type": "mrkdwn",
+                     "text": f"• *{name}*  _{modified}_{link_text}{warning_tag}"},
+        }
+        if broken and file_id:
+            block["accessory"] = {
+                "type": "button",
+                "text": {"type": "plain_text", "text": "🔧 양식 보정"},
+                "action_id": "summon_minutes_for_normalize",
+                "value": file_id,
+            }
+        blocks.append(block)
+
     if len(files) > 10:
-        lines.append(f"_...외 {len(files) - 10}개_")
+        blocks.append({
+            "type": "context",
+            "elements": [{"type": "mrkdwn",
+                          "text": f"_...외 {len(files) - 10}개 (상위 10건만 진단)_"}],
+        })
 
     _post(slack_client, user_id=user_id, channel=channel, thread_ts=thread_ts,
-          text="\n".join(lines))
+          text=f"📋 저장된 회의록 ({len(files)}개)", blocks=blocks)
