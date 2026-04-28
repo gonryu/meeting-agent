@@ -23,6 +23,7 @@ from tools import drive, docs, calendar as cal
 from tools.slack_tools import format_time
 from prompts.briefing import minutes_internal_prompt, minutes_external_prompt
 from agents import after
+from agents import minutes_orchestrator
 
 log = logging.getLogger(__name__)
 
@@ -1500,28 +1501,48 @@ def _generate_and_post_minutes(slack_client, *, user_id: str, title: str,
             processed_transcript = transcript_text[:40000]
 
     # ── 내부용 생성 + 품질 검증 루프 (FR-D09, 최대 2회 재생성) ──
+    # Phase 1: Minutes Orchestrator (5단계 파이프라인) 우선 시도, 실패 시 단일 호출 폴백
     _post(slack_client, user_id=user_id, text=f"✍️ *{title}* 내부용 회의록 생성 중...")
     internal_body = None
-    for attempt in range(3):  # 최초 1회 + 재생성 최대 2회
-        try:
-            internal_body = _generate_minutes(
-                minutes_internal_prompt(title, meeting_date, attendees,
-                                        processed_transcript, notes_text)
-            )
-        except Exception as e:
-            log.error(f"내부용 회의록 생성 실패 (시도 {attempt+1}): {e}")
-            internal_body = f"## 회의 요약\n(생성 실패: {e})\n\n## 원본\n{notes_text or transcript_text[:2000]}"
-            break
+    used_orchestrator = False
 
-        validation = validate_minutes(internal_body, "internal")
-        if validation["valid"]:
-            break
-        if attempt < 2 and validation["missing"]:
-            log.info(f"회의록 검증 실패 (시도 {attempt+1}), 재생성: 누락={validation['missing']}")
-            processed_transcript = processed_transcript  # 동일 입력으로 재시도
-        else:
-            log.warning(f"회의록 검증 실패 (최종): 누락={validation.get('missing')}")
-            break
+    if minutes_orchestrator.is_enabled():
+        try:
+            internal_body = minutes_orchestrator.generate_internal_minutes(
+                title=title, date=meeting_date, attendees=attendees,
+                transcript_text=processed_transcript, notes_text=notes_text,
+            )
+            used_orchestrator = True
+            validation = validate_minutes(internal_body, "internal")
+            if not validation["valid"]:
+                log.warning(f"오케스트레이터 산출 검증 실패, 단일 호출 폴백: 누락={validation.get('missing')}, 금지={validation.get('forbidden')}")
+                internal_body = None
+                used_orchestrator = False
+        except Exception as e:
+            log.warning(f"Minutes Orchestrator 실패, 단일 호출 폴백: {e}")
+            internal_body = None
+
+    if not used_orchestrator:
+        for attempt in range(3):  # 최초 1회 + 재생성 최대 2회
+            try:
+                internal_body = _generate_minutes(
+                    minutes_internal_prompt(title, meeting_date, attendees,
+                                            processed_transcript, notes_text)
+                )
+            except Exception as e:
+                log.error(f"내부용 회의록 생성 실패 (시도 {attempt+1}): {e}")
+                internal_body = f"## 회의 요약\n(생성 실패: {e})\n\n## 원본\n{notes_text or transcript_text[:2000]}"
+                break
+
+            validation = validate_minutes(internal_body, "internal")
+            if validation["valid"]:
+                break
+            if attempt < 2 and validation["missing"]:
+                log.info(f"회의록 검증 실패 (시도 {attempt+1}), 재생성: 누락={validation['missing']}")
+                processed_transcript = processed_transcript  # 동일 입력으로 재시도
+            else:
+                log.warning(f"회의록 검증 실패 (최종): 누락={validation.get('missing')}")
+                break
 
     # ── 초안 저장 + 검토 요청 (FR-D14: event_id 키 사용) ──
     draft_key = event_id or f"manual_{user_id}_{int(datetime.now(KST).timestamp())}"

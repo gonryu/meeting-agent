@@ -81,6 +81,22 @@ def init_db():
                 created_at  TEXT NOT NULL
             )
         """)
+        # Phase 3: action_items 풍부화 컬럼 추가 (idempotent 마이그레이션)
+        for col in ("priority TEXT",
+                    "severity TEXT",
+                    "owner_side TEXT",
+                    "risk_score INTEGER",
+                    "escalation_path TEXT",
+                    "success_indicator TEXT",
+                    "monitoring_cadence TEXT",
+                    "next_check_date TEXT",
+                    "dependencies TEXT",
+                    "source_excerpt TEXT",
+                    "secondary_risks TEXT"):
+            try:
+                conn.execute(f"ALTER TABLE action_items ADD COLUMN {col}")
+            except Exception:
+                pass  # 이미 존재하면 무시
 
         conn.execute("""
             CREATE TABLE IF NOT EXISTS pending_drafts (
@@ -327,18 +343,42 @@ def clear_trello_token(slack_user_id: str) -> None:
 # ── Action Items ──────────────────────────────────────────────
 
 def save_action_items(event_id: str, user_id: str, items: list[dict]) -> None:
-    """액션아이템 목록을 DB에 저장"""
+    """액션아이템 목록을 DB에 저장.
+
+    레거시 형식: {assignee, content, due_date}
+    Phase 3 풍부화 형식: 위 3개 + priority/severity/owner_side/risk_score/
+        escalation_path/success_indicator/monitoring_cadence/next_check_date/
+        dependencies/source_excerpt/secondary_risks
+    풍부화 필드는 없으면 NULL로 저장됩니다.
+    """
     now = datetime.now().isoformat()
     with _conn() as conn:
         conn.execute("DELETE FROM action_items WHERE event_id = ?", (event_id,))
         for item in items:
+            esc = item.get("escalation_path")
+            esc_str = json.dumps(esc, ensure_ascii=False) if isinstance(esc, dict) else esc
+            sec = item.get("secondary_risks")
+            sec_str = json.dumps(sec, ensure_ascii=False) if isinstance(sec, list) else sec
             conn.execute(
                 """INSERT INTO action_items
-                   (event_id, user_id, assignee, content, due_date, status, created_at)
-                   VALUES (?, ?, ?, ?, ?, 'open', ?)""",
+                   (event_id, user_id, assignee, content, due_date, status, created_at,
+                    priority, severity, owner_side, risk_score, escalation_path,
+                    success_indicator, monitoring_cadence, next_check_date,
+                    dependencies, source_excerpt, secondary_risks)
+                   VALUES (?, ?, ?, ?, ?, 'open', ?,
+                           ?, ?, ?, ?, ?,
+                           ?, ?, ?,
+                           ?, ?, ?)""",
                 (event_id, user_id,
                  item.get("assignee"), item.get("content", ""),
-                 item.get("due_date"), now),
+                 item.get("due_date"), now,
+                 item.get("priority"), item.get("severity"),
+                 item.get("owner_side"), item.get("risk_score"),
+                 esc_str,
+                 item.get("success_indicator"), item.get("monitoring_cadence"),
+                 item.get("next_check_date"),
+                 item.get("dependencies"), item.get("source_excerpt"),
+                 sec_str),
             )
 
 

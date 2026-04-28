@@ -488,10 +488,31 @@ def research_company(user_id: str, company_name: str, force: bool = False) -> tu
     except Exception as e:
         log.warning(f"Gmail 검색 실패 ({company_name}): {e}")
 
-    # 3단계: 웹 검색 (CM-09: 출처 태그 부착)
-    news_text = _to_bullet_lines(_search(company_news_prompt(company_name)))
-    # CM-09: 웹 검색 결과에 출처 태그 추가
-    if news_text.strip():
+    # 3단계: 업체 동향 리서치
+    # — 오케스트레이터 활성 시 다단계 파이프라인, 실패 시 기존 단일 호출로 폴백
+    knowledge = drive.get_company_knowledge(creds, knowledge_file_id)
+
+    news_text = ""
+    used_orchestrator = False
+    try:
+        from agents import research_orchestrator as _ro
+        if _ro.is_enabled():
+            gmail_excerpt = email_section if email_section else ""
+            news_text = _ro.run_company_research(
+                company_name=company_name,
+                knowledge_md=knowledge or "",
+                gmail_context=gmail_excerpt,
+            )
+            used_orchestrator = True
+    except Exception as e:
+        log.warning(f"업체 리서치 오케스트레이터 실패, 단일 호출로 폴백 ({company_name}): {e}")
+        news_text = ""
+
+    if not used_orchestrator:
+        news_text = _to_bullet_lines(_search(company_news_prompt(company_name)))
+
+    # CM-09: 웹 검색 결과에 출처 태그 추가 (오케스트레이터 산출물에는 이미 출처 URL이 인라인됨)
+    if not used_orchestrator and news_text.strip():
         news_lines = []
         for line in news_text.split("\n"):
             if line.strip().startswith("- ") and "[출처:" not in line:
@@ -500,7 +521,6 @@ def research_company(user_id: str, company_name: str, force: bool = False) -> tu
                 news_lines.append(line)
         news_text = "\n".join(news_lines)
 
-    knowledge = drive.get_company_knowledge(creds, knowledge_file_id)
     connections = _to_bullet_lines(_generate(service_connection_prompt(news_text, knowledge)))
 
     # CM-09: 이메일 섹션에 출처 태그 추가
@@ -600,8 +620,27 @@ def research_person(user_id: str, person_name: str, company_name: str,
             f"## 이메일 맥락 `[출처: Gmail, {today}]`",
         )
 
-    # 2단계: 웹 검색 (CM-09: 출처 태그 부착)
-    info_text = _search(person_info_prompt(person_name, company_name))
+    # 2단계: 인물 공개 정보 리서치
+    # — 오케스트레이터 활성 시 다단계 파이프라인, 실패 시 기존 단일 호출로 폴백
+    info_text = ""
+    used_orchestrator = False
+    try:
+        from agents import research_orchestrator as _ro
+        if _ro.is_enabled():
+            # gmail_context: 이메일 맥락 섹션을 단순 텍스트 라인으로 전달
+            gmail_excerpt = email_section if email_section else ""
+            info_text = _ro.run_person_research(
+                person_name=person_name,
+                company_name=company_name,
+                gmail_context=gmail_excerpt,
+            )
+            used_orchestrator = True
+    except Exception as e:
+        log.warning(f"인물 리서치 오케스트레이터 실패, 단일 호출로 폴백 ({person_name}): {e}")
+        info_text = ""
+
+    if not used_orchestrator:
+        info_text = _search(person_info_prompt(person_name, company_name))
 
     # 이메일: 명함 > Gmail 헤더 순 우선
     if card_data and card_data.get("email"):
@@ -628,8 +667,8 @@ def research_person(user_id: str, person_name: str, company_name: str,
                 card_lines.append(f"- {label}: {val}")
         card_section = "\n## 명함 정보\n" + "\n".join(card_lines) + "\n"
 
-    # CM-09: 공개 정보에 출처 태그 추가
-    if info_text.strip() and "[출처:" not in info_text:
+    # CM-09: 공개 정보에 출처 태그 추가 (오케스트레이터 산출물에는 URL 인라인됨)
+    if not used_orchestrator and info_text.strip() and "[출처:" not in info_text:
         info_text = info_text.rstrip() + f" `[출처: 웹 검색, {today}]`"
 
     new_content = (
@@ -950,8 +989,31 @@ def _run_briefing_research(
 ) -> None:
     """백그라운드 스레드: 업체·인물 리서치 후 순차적으로 Slack에 발송."""
     try:
-        # 1. 업체 리서치
         _ch = channel or user_id
+
+        # 0. 회의 분류 — 내부 회의면 리서치 건너뜀 (QA 2.1)
+        try:
+            from agents import briefing_classifier
+            if briefing_classifier.is_enabled():
+                cls_result = briefing_classifier.classify_meeting(
+                    title=meeting.get("summary", ""),
+                    attendees=meeting.get("attendees", []),
+                    company_hint=company_name or "",
+                    description=meeting.get("description", ""),
+                )
+                if cls_result and (
+                    cls_result.get("meeting_type") == "internal"
+                    or cls_result.get("research_recommended") is False
+                ):
+                    rationale = cls_result.get("rationale", "")
+                    log.info(
+                        f"브리핑 리서치 스킵 (내부 회의 판정): {company_name} — {rationale}"
+                    )
+                    return
+        except Exception as cls_err:
+            log.warning(f"브리핑 분류기 호출 실패, 기본 경로로 리서치 진행: {cls_err}")
+
+        # 1. 업체 리서치
         progress_resp = _post(slack_client, user_id=user_id, channel=channel, thread_ts=thread_ts,
               text=f"🔍 *{company_name}* 업체 리서치 중...")
         progress_ts = progress_resp.get("ts") if progress_resp else None
