@@ -350,6 +350,10 @@ _HELP_TEXT = """*🤖 ParaMee 사용 가이드*
 • `내일 3시에 한국은행 미팅 잡아줘` — 일정 생성
   └ 업체 지정: _"업체는 한국은행이야"_ 처럼 명시 (없으면 내부 회의)
   └ 생성 후 스레드 답글로 제목·참석자·시간·장소·어젠다 수정 가능
+  └ 생성 결과 메시지의 `[👥 참석자 추가]` 버튼으로 참석자만 빠르게 추가
+• `/미팅편집` or `/미팅수정` or `/미팅변경` — 향후 미팅 편집 UI
+  └ 자연어도 가능: _"카카오 미팅 편집해줘"_, _"내일 KISA 회의 시간 변경"_
+  └ 브리핑 헤더의 `[✏️ 편집]` 버튼으로 해당 미팅 바로 편집
 • `/브리핑` or `브리핑 해줘` — 오늘 미팅 브리핑
 
 *🎙️ 회의 진행*
@@ -364,6 +368,9 @@ _HELP_TEXT = """*🤖 ParaMee 사용 가이드*
 • `/회의록` or `회의록 보여줘` — 저장된 회의록 목록 조회
   └ `/회의록 카카오` — 업체 기반 검색  |  `/회의록 2026-03` — 기간 기반 검색
   └ `카카오 지난달 회의록 찾아줘` — 자연어 검색
+  └ 양식 깨진 파일 옆에 `[🔧 양식 보정]` 버튼이 자동 노출됨
+• `/회의록정리` or `/회의록보정` — 저장된 회의록 양식·구조 보정
+  └ 자연어도 가능: _"회의록 양식 깨진 거 고쳐줘"_, _"지난 회의록 정리해줘"_
 
 *🏢 드림플러스 회의실*
 • `/회의실예약 [시간]` or `내일 2시에 회의실 잡아줘` — 회의실 예약
@@ -978,11 +985,35 @@ def _route_message(text: str, client, user_id: str, channel: str = None,
         client.chat_postMessage(channel=channel or user_id, thread_ts=thread_ts, text=_HELP_TEXT)
 
     else:
-        client.chat_postMessage(
-            channel=channel or user_id,
-            thread_ts=thread_ts,
-            text=f"'{text[:30]}' 명령을 이해하지 못했어요. `도움말` 또는 `/도움말`로 사용 가능한 명령어를 확인하세요.",
-        )
+        # 모호 입력 추천 — LLM에게 가장 가까운 슬래시 명령 1~2개를 추천받아 안내
+        suggestions: list[dict] = []
+        try:
+            from agents.before import suggest_commands
+            suggestions = suggest_commands(text)
+        except Exception:
+            log.exception("suggest_commands 호출 실패")
+            suggestions = []
+
+        if suggestions:
+            lines = [
+                f"'{text[:30]}' 명령을 정확히 이해하지 못했어요.",
+                "혹시 이런 명령을 의도하셨나요?",
+            ]
+            for s in suggestions:
+                lines.append(f"• `{s['command']}` — {s['reason']}")
+            lines.append("")
+            lines.append("전체 도움말은 `/도움말`")
+            client.chat_postMessage(
+                channel=channel or user_id,
+                thread_ts=thread_ts,
+                text="\n".join(lines),
+            )
+        else:
+            client.chat_postMessage(
+                channel=channel or user_id,
+                thread_ts=thread_ts,
+                text=f"'{text[:30]}' 명령을 이해하지 못했어요. `도움말` 또는 `/도움말`로 사용 가능한 명령어를 확인하세요.",
+            )
 
 
 # ── Slash Commands ───────────────────────────────────────────
