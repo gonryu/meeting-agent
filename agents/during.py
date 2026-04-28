@@ -410,6 +410,11 @@ def _post(slack_client, *, user_id: str, channel: str = None,
     )
 
 
+def _hint(text: str) -> str:
+    """공통 디스커버리 힌트 푸터 — 메시지 하단에 한 줄 이탤릭으로 부가."""
+    return f"\n_💡 {text}_"
+
+
 def get_session_thread(user_id: str) -> tuple[str, str] | None:
     """사용자의 활성 세션이 채널 쓰레드에서 시작된 경우 (channel, thread_ts) 반환."""
     session = _active_sessions.get(user_id)
@@ -930,6 +935,7 @@ def _create_ad_hoc_session(slack_client, user_id: str, title: str,
         info_lines.append(f"👥 참석자: {', '.join(attendees_manual)}")
     info_lines.append("`/메모 내용` 으로 실시간 메모를 기록하세요.")
     info_lines.append("미팅이 끝나면 `/미팅종료` 를 입력해주세요.")
+    info_lines.append(_hint("음성 파일·텍스트 문서 업로드도 가능 / `/메모 [내용]` 으로 즉시 추가").lstrip("\n"))
     _post(slack_client, user_id=user_id, channel=channel, thread_ts=thread_ts,
           text="\n".join(info_lines))
 
@@ -1277,7 +1283,8 @@ def end_session(slack_client, user_id: str, channel: str = None, thread_ts: str 
     if user_id not in _active_sessions:
         _post(slack_client, user_id=user_id, channel=channel, thread_ts=thread_ts,
               text="⚠️ 진행 중인 미팅 세션이 없습니다.\n"
-                   "먼저 `/미팅시작` 또는 `/메모`로 메모를 기록해주세요.")
+                   "먼저 `/미팅시작` 또는 `/메모`로 메모를 기록해주세요."
+                   + _hint("새 미팅이라면 `/미팅시작 [제목]` 부터 시작하세요"))
         return
 
     session = _active_sessions.pop(user_id)
@@ -1926,6 +1933,7 @@ def _post_combined_minutes(slack_client, *, user_id: str, title: str,
             f"{internal_line}\n"
             f"{external_line}"
             f"{folder_line}"
+            + _hint("양식이 깨지면 `/회의록정리` / 같은 미팅 일정 수정은 `/미팅편집`")
         ),
     )
 

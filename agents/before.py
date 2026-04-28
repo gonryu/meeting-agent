@@ -51,6 +51,14 @@ load_dotenv(override=True)
 _claude = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
 _CLAUDE_MODEL = "claude-haiku-4-5"
 
+_PARAMETA_RELEVANCE_KEYWORDS = (
+    "스테이블코인", "stablecoin", "블록체인", "blockchain", "rwa",
+    "디지털자산", "digital asset", "토큰증권", "sto", "did", "신원인증",
+    "전자지갑", "wallet", "web3", "cbdc", "핀테크", "fintech", "결제",
+    "payment", "금융", "규제", "라이선스", "보안", "인증", "가상자산",
+    "토큰화", "tokenization",
+)
+
 # ParaScope 봇 채널 조회
 _PARASCOPE_BOT_ID = os.getenv("PARASCOPE_BOT_ID", "")
 _PARASCOPE_BOT_APP_ID = os.getenv("PARASCOPE_BOT_APP_ID", "")
@@ -204,6 +212,11 @@ def _infer_company_from_attendees(
     return ""
 
 
+def _hint(text: str) -> str:
+    """공통 디스커버리 힌트 푸터 — 상위 메시지 하단에 한 줄 이탤릭으로 부가."""
+    return f"\n_💡 {text}_"
+
+
 def _post(slack_client, *, user_id: str, channel=None, thread_ts=None,
           text=None, blocks=None, unfurl_links=False) -> dict:
     """channel 기본값을 user_id(DM)로 적용한 chat_postMessage 헬퍼"""
@@ -244,6 +257,109 @@ def _generate(prompt: str) -> str:
         messages=[{"role": "user", "content": prompt}],
     )
     return resp.content[0].text.strip()
+
+
+# ── 모호 입력 추천 (intent fallback) ──────────────────────────
+
+# 슬래시 명령 카탈로그 (사용자에게 노출 가능한 핵심 명령만)
+_COMMAND_CATALOG: list[dict] = [
+    {"cmd": "/브리핑", "desc": "오늘/지정 기간 미팅 브리핑"},
+    {"cmd": "/미팅시작", "desc": "회의 시작 (메모 세션 시작)"},
+    {"cmd": "/메모", "desc": "진행 중 회의 메모 추가"},
+    {"cmd": "/미팅종료", "desc": "회의 종료 + 회의록 생성"},
+    {"cmd": "/회의록작성", "desc": "현재 세션 회의록 즉시 생성"},
+    {"cmd": "/회의록", "desc": "저장된 회의록 목록·검색"},
+    {"cmd": "/회의록정리", "desc": "저장된 회의록 양식·구조 보정"},
+    {"cmd": "/미팅편집", "desc": "기존 캘린더 미팅 편집·수정·시간 변경"},
+    {"cmd": "/회의실예약", "desc": "드림플러스 회의실 예약"},
+    {"cmd": "/회의실조회", "desc": "회의실 예약 현황"},
+    {"cmd": "/회의실취소", "desc": "회의실 예약 취소"},
+    {"cmd": "/크레딧조회", "desc": "드림플러스 잔여 크레딧"},
+    {"cmd": "/트렐로조회", "desc": "Trello 카드 조회·검색"},
+    {"cmd": "/트렐로주간보고", "desc": "Trello 워크스페이스 주간 보고서"},
+    {"cmd": "/도움말", "desc": "전체 사용 가이드"},
+]
+
+
+def _load_command_suggester_template() -> str:
+    """프롬프트 템플릿 로드 — 매 호출 시 디스크에서 읽어 핫리로드 지원."""
+    path = os.path.join(
+        os.path.dirname(__file__), "..", "prompts", "templates",
+        "intent", "command_suggester.md",
+    )
+    with open(path, encoding="utf-8") as f:
+        return f.read()
+
+
+def suggest_commands(user_text: str) -> list[dict]:
+    """모호한 사용자 입력에 대해 1~2개 슬래시 명령 후보를 추천.
+
+    반환: [{"command": "/회의록정리", "reason": "회의록 양식 정리 의도로 보입니다"}, ...]
+    명백히 명령 의도가 아닌 입력(인사·잡담·짧은 텍스트)은 빈 리스트.
+    LLM 호출 실패 시에도 빈 리스트를 반환 (graceful fallback).
+    """
+    enabled = os.getenv("COMMAND_SUGGESTER_ENABLED", "true").lower() != "false"
+    if not enabled:
+        return []
+    text = (user_text or "").strip()
+    # 4자 미만은 명령 후보 추천을 시도하지 않음 (잡음 차단)
+    if len(text) < 4:
+        return []
+
+    try:
+        template = _load_command_suggester_template()
+    except Exception as e:
+        log.warning(f"command_suggester 템플릿 로드 실패: {e}")
+        return []
+
+    commands_list = "\n".join(
+        f"- `{item['cmd']}` — {item['desc']}" for item in _COMMAND_CATALOG
+    )
+    prompt = (template
+              .replace("{{user_text}}", text.replace('"', "'"))
+              .replace("{{commands_list}}", commands_list))
+
+    try:
+        raw = _generate(prompt)
+    except Exception as e:
+        log.warning(f"command_suggester LLM 호출 실패: {e}")
+        return []
+
+    # 코드 펜스 제거 후 JSON 파싱
+    cleaned = raw.strip()
+    if cleaned.startswith("```"):
+        cleaned = cleaned.lstrip("`")
+        if cleaned.lower().startswith("json"):
+            cleaned = cleaned[4:]
+        cleaned = cleaned.strip().rstrip("`").strip()
+    try:
+        data = json.loads(cleaned)
+    except Exception as e:
+        log.warning(f"command_suggester JSON 파싱 실패: {e} / 원문: {raw[:200]}")
+        return []
+
+    candidates = data.get("candidates") or []
+    if not isinstance(candidates, list):
+        return []
+
+    # 화이트리스트 필터 + 최대 2개 + 중복 제거
+    valid_cmds = {item["cmd"] for item in _COMMAND_CATALOG}
+    seen: set[str] = set()
+    result: list[dict] = []
+    for c in candidates:
+        if not isinstance(c, dict):
+            continue
+        cmd = (c.get("command") or "").strip()
+        reason = (c.get("reason") or "").strip()
+        if not cmd or cmd in seen:
+            continue
+        if cmd not in valid_cmds:
+            continue
+        seen.add(cmd)
+        result.append({"command": cmd, "reason": reason or "관련 명령으로 보입니다"})
+        if len(result) >= 2:
+            break
+    return result
 
 
 # ── 이메일→이름 변환 ─────────────────────────────────────────
@@ -467,6 +583,72 @@ def _to_bullet_lines(text: str) -> str:
     return "\n".join(result)
 
 
+def _filter_parameta_relevant_news(news_text: str) -> str:
+    """웹 검색 결과에서 파라메타 사업 맥락과 무관한 단순 최신 기사 제거."""
+    kept = []
+    for line in news_text.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        lowered = stripped.lower()
+        if "공개 정보 없음" in stripped or "정보 없음" in stripped:
+            kept.append(stripped)
+            continue
+        if any(keyword.lower() in lowered for keyword in _PARAMETA_RELEVANCE_KEYWORDS):
+            kept.append(stripped)
+    if kept:
+        return "\n".join(kept)
+    return "- 파라메타 사업 맥락의 최근 공개 정보 없음"
+
+
+def _format_email_context_section(emails: list[dict], today: str) -> str:
+    """Gmail 검색 결과를 업체 Wiki의 이메일 맥락 섹션으로 정리."""
+    if not emails:
+        return ""
+    lines = []
+    for e in emails[:5]:
+        subject = (e.get("subject") or "(제목 없음)").strip()
+        snippet = (e.get("snippet") or "").replace("\n", " ").replace("\r", " ").strip()
+        sender = (e.get("from") or "").strip()
+        date = (e.get("date") or "").strip()
+        context = snippet[:180] if snippet else "본문 요약 없음"
+        sender_part = f" | {sender}" if sender else ""
+        lines.append(f"- {date}{sender_part} | {subject} | {context}")
+    return f"## 이메일 맥락\n- last_searched: {today}\n" + "\n".join(lines) + "\n"
+
+
+def _build_trello_summary(trello_context: dict) -> list[str]:
+    """Trello 카드 설명/댓글을 브리핑용 짧은 맥락으로 변환."""
+    summary = []
+    desc = (trello_context.get("description") or "").strip()
+    if desc:
+        one_line = re.sub(r"\s+", " ", desc)
+        summary.append(f"카드: {one_line[:90]}")
+    for comment in trello_context.get("recent_comments", [])[:2]:
+        text = re.sub(r"\s+", " ", (comment.get("text") or "").strip())
+        if not text:
+            continue
+        author = comment.get("author") or "작성자"
+        summary.append(f"{author}: {text[:80]}")
+    return summary[:3]
+
+
+def _build_update_check_lines(existing_content: str | None, today: str,
+                              used_orchestrator: bool) -> list[str]:
+    if not existing_content:
+        return [f"{today} 신규 리서치로 업체 Wiki 생성"]
+    last = ""
+    for line in existing_content.splitlines():
+        if "last_searched" in line:
+            last = line.split(":", 1)[-1].strip()
+            break
+    if last == today:
+        return [f"{today} 기존 Wiki를 확인했고 최신 상태로 유지"]
+    engine = "오케스트레이터" if used_orchestrator else "웹 검색"
+    prev = f"기존 최근 확인일 {last}" if last else "기존 확인일 없음"
+    return [f"{prev} → {today} {engine}으로 업데이트 여부 재확인"]
+
+
 def research_company(user_id: str, company_name: str, force: bool = False) -> tuple[str, str | None]:
     """업체 정보 수집. Returns: (content, file_id)
     force=True 이면 신선도 체크 없이 강제 재검색.
@@ -486,13 +668,7 @@ def research_company(user_id: str, company_name: str, force: bool = False) -> tu
     email_section = ""
     try:
         emails = gmail.search_recent_emails(creds, company_name, company_name)
-        if emails:
-            lines = [
-                f"- {e['date']} | {e['subject']} | "
-                f"{e.get('snippet', '').replace(chr(10), ' ').replace(chr(13), ' ')[:100]}"
-                for e in emails[:5]
-            ]
-            email_section = f"## 이메일 맥락\n- last_searched: {today}\n" + "\n".join(lines) + "\n"
+        email_section = _format_email_context_section(emails, today)
     except Exception as e:
         log.warning(f"Gmail 검색 실패 ({company_name}): {e}")
 
@@ -517,7 +693,9 @@ def research_company(user_id: str, company_name: str, force: bool = False) -> tu
         news_text = ""
 
     if not used_orchestrator:
-        news_text = _to_bullet_lines(_search(company_news_prompt(company_name)))
+        news_text = _filter_parameta_relevant_news(
+            _to_bullet_lines(_search(company_news_prompt(company_name)))
+        )
 
     # CM-09: 웹 검색 결과에 출처 태그 추가 (오케스트레이터 산출물에는 이미 출처 URL이 인라인됨)
     if not used_orchestrator and news_text.strip():
@@ -530,6 +708,7 @@ def research_company(user_id: str, company_name: str, force: bool = False) -> tu
         news_text = "\n".join(news_lines)
 
     connections = _to_bullet_lines(_generate(service_connection_prompt(news_text, knowledge)))
+    update_check_lines = _build_update_check_lines(content, today, used_orchestrator)
 
     # CM-09: 이메일 섹션에 출처 태그 추가
     if email_section and "[출처:" not in email_section:
@@ -562,7 +741,7 @@ def research_company(user_id: str, company_name: str, force: bool = False) -> tu
             body_for_preserve = content
         _RESEARCH_HEADERS = {
             "# ", "## 최근 동향", "## 이메일 맥락", "## 파라메타 서비스 연결점",
-            "## ParaScope", "## 출처 로그",
+            "## ParaScope", "## 업데이트 체크", "## 출처 로그",
         }
         current_section = []
         is_preserved = False
@@ -597,6 +776,7 @@ def research_company(user_id: str, company_name: str, force: bool = False) -> tu
         + f"## 최근 동향\n- last_searched: {today}\n{news_text}\n\n"
         + f"{email_section}\n"
         + f"## 파라메타 서비스 연결점\n{connections}\n\n"
+        + f"## 업데이트 체크\n" + "\n".join(f"- {line}" for line in update_check_lines) + "\n\n"
         + f"{parascope_section}"
         + f"{preserved_sections}"
         + f"## 출처 로그\n{_DRIVE_AUTO_START}\n{sources_log_line}\n{_DRIVE_AUTO_END}\n"
@@ -780,13 +960,22 @@ def get_previous_context(user_id: str, company_name: str, person_names: list[str
     # Trello 카드 컨텍스트 조회 (미완료 체크리스트 항목 + 최근 코멘트)
     trello_items = []
     trello_context = {}
+    trello_summary = []
     try:
         trello_context = trello.get_card_context(user_id, company_name, limit_comments=3)
         trello_items = trello_context.get("incomplete_items", [])
+        trello_summary = _build_trello_summary(trello_context)
     except Exception as e:
         log.warning(f"Trello 조회 실패: {e}")
 
-    return {"trello": trello_items, "emails": emails[:3], "minutes": minutes}
+    return {
+        "trello": trello_items,
+        "trello_summary": trello_summary,
+        "trello_card_name": trello_context.get("card_name", "") if trello_context else "",
+        "trello_url": trello_context.get("url", "") if trello_context else "",
+        "emails": emails[:3],
+        "minutes": minutes,
+    }
 
 
 # ── 브리핑 생성 ──────────────────────────────────────────────
@@ -921,7 +1110,7 @@ def run_briefing(slack_client, user_id: str, event: dict = None,
     return sent_threads
 
 
-def _extract_company_content_sections(company_content: str) -> tuple[list[str], list[str], list[str], list[dict]]:
+def _extract_company_content_sections(company_content: str) -> tuple[list[str], list[str], list[str], list[dict], list[str]]:
     """업체 Drive 파일에서 뉴스·ParaScope·연결점·이메일 섹션을 추출.
     Returns: (news_lines, parascope_lines, connection_lines, drive_emails)
     """
@@ -1012,6 +1201,22 @@ def _extract_company_content_sections(company_content: str) -> tuple[list[str], 
                 connection_lines.append(line.strip("- ").strip())
     connection_lines = connection_lines[:3]
 
+    # 업데이트 체크 섹션 추출
+    update_lines: list[str] = []
+    in_update = False
+    for line in company_content.splitlines():
+        if "## 업데이트 체크" in line:
+            in_update = True
+            continue
+        if in_update:
+            if line.startswith("##"):
+                break
+            stripped = line.strip()
+            if stripped.startswith("-"):
+                update_lines.append(stripped.lstrip("- ").strip())
+                if len(update_lines) >= 3:
+                    break
+
     # 이메일 맥락 섹션 추출 (Drive 파일 보완용)
     drive_emails: list[dict] = []
     in_email = False
@@ -1036,7 +1241,7 @@ def _extract_company_content_sections(company_content: str) -> tuple[list[str], 
                 if len(drive_emails) >= 3:
                     break
 
-    return news_lines, parascope_lines, connection_lines, drive_emails
+    return news_lines, parascope_lines, connection_lines, drive_emails, update_lines
 
 
 def _run_briefing_research(
@@ -1089,12 +1294,12 @@ def _run_briefing_research(
             except Exception:
                 pass
 
-        news_lines, parascope_lines, connection_lines, drive_emails = \
+        news_lines, parascope_lines, connection_lines, drive_emails, update_lines = \
             _extract_company_content_sections(company_content)
         log.info(f"news_lines ({company_name}): {news_lines}")
 
         company_blocks = build_company_research_block(
-            company_name, news_lines, parascope_lines, connection_lines
+            company_name, news_lines, parascope_lines, connection_lines, update_lines
         )
         _post(slack_client, user_id=user_id, channel=channel, thread_ts=thread_ts,
               blocks=company_blocks, text=f"🏢 {company_name} 업체 정보")
@@ -1849,6 +2054,7 @@ def _create_calendar_event(slack_client, user_id: str, info: dict, company: str 
         if meet_link:
             msg += f"\n🎥 *Google Meet*: <{meet_link}|회의 참여>"
         msg += "\n_이 메시지에 스레드 답글로 제목, 참석자, 어젠다를 알려주시면 업데이트해드릴게요._"
+        msg += _hint("답글로 자연어 수정 가능 / [👥 참석자 추가] 버튼 / 시간이 지난 뒤엔 `/미팅편집`")
         result_blocks = [
             {"type": "section", "text": {"type": "mrkdwn", "text": msg}},
             {

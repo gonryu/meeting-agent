@@ -2,7 +2,8 @@
 
 보드: parametapipeline (Board ID: TRELLO_BOARD_ID 환경변수)
 규칙:
-  - 업체 1개 = 카드 1개 (카드명 = 업체명)
+  - 업체 1개 = 카드 1개
+  - 카드명은 "업체명 - 사업내용" 형식을 권장
   - 액션아이템은 카드 내 "Action Items" 체크리스트 항목으로 추가
   - 카드 이동/삭제/체크리스트 완료 처리 금지
   - 신규 카드 기본 생성 위치: Contact/Meeting 리스트
@@ -12,6 +13,8 @@
 """
 import logging
 import os
+import json
+import re
 
 from store import user_store
 
@@ -86,19 +89,65 @@ def clear_user_cache(user_id: str) -> None:
     _board_cache.pop(user_id, None)
 
 
+def _normalize_company_name(name: str) -> str:
+    """업체명 비교용 정규화. 영문/국문 별칭은 별도 alias로 처리."""
+    value = (name or "").strip().lower()
+    value = re.sub(r"\s+", " ", value)
+    value = re.sub(r"[\(\)\[\]{}]", " ", value)
+    value = re.sub(r"\b(inc|corp|corporation|co|ltd|limited|주식회사|㈜)\b\.?", "", value)
+    value = re.sub(r"\s+", " ", value).strip()
+    return value
+
+
+def _card_company_part(card_name: str) -> str:
+    """'업체명 - 사업내용' 카드명에서 업체명 부분만 추출."""
+    head = re.split(r"\s+[-–—]\s+", card_name or "", maxsplit=1)[0]
+    return head.strip()
+
+
+def _company_aliases(company_name: str) -> set[str]:
+    """업체명 별칭 후보.
+
+    확장 방법:
+    TRELLO_COMPANY_ALIASES='{"파라메타":["PARAMETA"],"카카오":["Kakao"]}'
+    """
+    aliases = {company_name}
+    raw = os.getenv("TRELLO_COMPANY_ALIASES", "").strip()
+    if raw:
+        try:
+            mapping = json.loads(raw)
+            for key, values in mapping.items():
+                names = {key, *values} if isinstance(values, list) else {key, values}
+                normalized = {_normalize_company_name(v) for v in names if v}
+                if _normalize_company_name(company_name) in normalized:
+                    aliases.update(v for v in names if v)
+        except Exception as e:
+            log.warning(f"TRELLO_COMPANY_ALIASES 파싱 실패: {e}")
+    return {_normalize_company_name(a) for a in aliases if a}
+
+
+def _card_matches_company(card_name: str, company_name: str) -> bool:
+    """브리핑용 정확 매칭: 카드 업체명 부분이 업체명/별칭과 같을 때만 True."""
+    company_part = _normalize_company_name(_card_company_part(card_name))
+    return company_part in _company_aliases(company_name)
+
+
 def _find_card(user_id: str, company_name: str):
-    """보드에서 업체명으로 카드 검색 (대소문자 무시). py-trello Card 객체 반환."""
+    """보드에서 업체명으로 카드 검색. py-trello Card 객체 반환.
+
+    브리핑 오매칭을 막기 위해 카드명 전체 유사도 대신
+    "업체명 - 사업내용"의 업체명 부분만 exact/alias 매칭한다.
+    """
     board = _board_for_user(user_id)
     if board is None:
         return None
 
-    target = company_name.strip().lower()
     try:
         cards = board.open_cards()
         card_names = [c.name for c in cards]
-        log.info(f"Trello 카드 검색: target='{target}', 보드 카드={card_names}")
+        log.info(f"Trello 카드 검색: target='{company_name}', 보드 카드={card_names}")
         for card in cards:
-            if card.name.strip().lower() == target:
+            if _card_matches_company(card.name, company_name):
                 return card
     except Exception as e:
         log.warning(f"Trello 카드 검색 오류: {e}")
@@ -321,8 +370,13 @@ def get_card_context(user_id: str, company_name: str, limit_comments: int = 3) -
         log.warning(f"코멘트 조회 실패: {e}")
 
     log.info(f"Trello 컨텍스트: card='{card.name}', incomplete={incomplete}, comments={len(comments)}개")
+    description = getattr(card, "description", "") or getattr(card, "desc", "")
+    if not isinstance(description, str):
+        description = ""
+
     return {
         "card_name": card.name,
+        "description": description,
         "incomplete_items": incomplete,
         "recent_comments": comments,
         "url": card.url,

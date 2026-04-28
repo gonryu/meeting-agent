@@ -100,7 +100,7 @@ class TestConcurrencyLocks:
         """during.py에 _sessions_lock이 존재"""
         assert hasattr(during, "_sessions_lock"), \
             "during.py에 _sessions_lock이 없습니다 (INF-07)"
-        assert isinstance(during._sessions_lock, (threading.Lock, type(threading.Lock())))
+        assert isinstance(during._sessions_lock, type(threading.Lock()))
 
     def test_during_module_has_minutes_lock(self):
         """during.py에 _minutes_lock이 존재"""
