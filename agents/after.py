@@ -162,10 +162,18 @@ def trigger_after_meeting(
         except Exception as e:
             log.warning(f"Trello 등록 제안 실패 (무시): {e}")
 
-        # E. Contacts 자동 갱신
+        # E. Contacts 자동 갱신 (Obsidian 호환 — frontmatter, 최근 히스토리, 출처 로그)
         try:
             if contacts_folder_id and recipients:
-                _update_contacts(creds, contacts_folder_id, recipients, title, date_str)
+                # company_names 의 첫 항목이 미팅 제목인 fallback 인지 확인 — fallback 일 때는 제외
+                _company_names = locals().get("company_names") or []
+                effective_companies = [c for c in (_company_names or []) if c and c != title]
+                minutes_basename = f"{date_str}_{title}_내부용"
+                _update_contacts(
+                    creds, contacts_folder_id, recipients, title, date_str,
+                    company_names=effective_companies,
+                    minutes_basename=minutes_basename,
+                )
         except Exception as e:
             log.warning(f"Contacts 갱신 실패 (무시): {e}")
 
@@ -1088,30 +1096,68 @@ def _update_contacts(
     recipients: list[dict],
     title: str,
     date_str: str,
+    *,
+    company_names: list[str] | None = None,
+    minutes_basename: str | None = None,
 ) -> None:
-    """외부 참석자 People/{이름}.md에 last_met 업데이트.
-    미팅 히스토리 테이블 갱신은 during.py finalize_minutes에서 CM-08로 처리."""
+    """외부 참석자 People/{이름}.md 와 관련 Companies/{name}.md 를 Obsidian 호환 양식으로 갱신.
+
+    - frontmatter source_refs / related_notes / related_entities (dedupe append)
+    - `## 최근 히스토리` 마커 영역에 한 줄 추가
+    - `## 출처 로그` 마커 영역에 한 줄 추가
+    - 사용자 작성 섹션은 보존
+    - 미팅 히스토리 테이블 갱신은 during.py finalize_minutes 의 CM-08 으로 별도 처리.
+    """
+    minutes_basename = minutes_basename or f"{date_str}_{title}_내부용"
+    company_names = company_names or []
+
     for person in recipients:
         name = person.get("name", "").strip()
         if not name:
             continue
         try:
-            content, file_id = drive.get_person_info(creds, contacts_folder_id, name)
-            if not content:
-                continue
+            history_line = f"- {date_str}: {title} 미팅에 참여함. 출처 `[[{minutes_basename}]]`"
+            related = []
+            for cn in company_names:
+                if cn and cn not in related:
+                    related.append(cn)
+            drive.update_obsidian_wiki(
+                creds, contacts_folder_id,
+                kind="person", name=name,
+                date_str=date_str, history_line=history_line,
+                minutes_basename=minutes_basename,
+                related_entities=related,
+            )
 
-            # last_met 업데이트
-            if "last_met:" in content:
-                content = re.sub(
-                    r"last_met:\s*.+", f"last_met: {date_str}", content
-                )
-            else:
-                content += f"\nlast_met: {date_str}"
-
-            drive.save_person_info(creds, contacts_folder_id, name, content, file_id)
-            log.info(f"Contacts 갱신: {name}")
+            # 레거시 last_met 호환성 — 본문에 last_met 라인이 있으면 갱신, 없으면 무시
+            try:
+                content, file_id = drive.get_person_info(creds, contacts_folder_id, name)
+                if content and "last_met:" in content:
+                    content = re.sub(r"last_met:\s*.+", f"last_met: {date_str}", content)
+                    drive.save_person_info(creds, contacts_folder_id, name, content, file_id)
+            except Exception as e:
+                log.debug(f"last_met 갱신 (호환성) 실패 ({name}): {e}")
+            log.info(f"Contacts 갱신 (Obsidian): {name}")
         except Exception as e:
             log.warning(f"Contacts 갱신 실패 ({name}): {e}")
+
+    # 업체 wiki 도 frontmatter / 최근 히스토리 갱신
+    person_names = [p.get("name", "").strip() for p in recipients if p.get("name")]
+    for cn in company_names:
+        if not cn:
+            continue
+        try:
+            history_line = f"- {date_str}: {title} 미팅 진행. 출처 `[[{minutes_basename}]]`"
+            related = [n for n in person_names if n]
+            drive.update_obsidian_wiki(
+                creds, contacts_folder_id,
+                kind="company", name=cn,
+                date_str=date_str, history_line=history_line,
+                minutes_basename=minutes_basename,
+                related_entities=related,
+            )
+        except Exception as e:
+            log.warning(f"업체 wiki 갱신 실패 ({cn}): {e}")
 
 
 # ── F. 후속 일정 제안 ────────────────────────────────────────

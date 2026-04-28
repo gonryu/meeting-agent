@@ -18,6 +18,14 @@ log = logging.getLogger(__name__)
 
 from tools import calendar as cal
 from tools import drive, gmail, trello
+# Obsidian 헬퍼 — 테스트에서 `before.drive` 가 mock 되어도 동작하도록 별도 alias
+from tools.drive import (
+    parse_frontmatter as _drive_parse_frontmatter,
+    render_frontmatter as _drive_render_frontmatter,
+    merge_frontmatter as _drive_merge_frontmatter,
+    AUTO_START as _DRIVE_AUTO_START,
+    AUTO_END as _DRIVE_AUTO_END,
+)
 from tools.slack_tools import (
     build_briefing_message,
     build_meeting_header_block,
@@ -541,18 +549,27 @@ def research_company(user_id: str, company_name: str, force: bool = False) -> tu
         except Exception as e:
             log.warning(f"Sources/Research 저장 실패 ({company_name}): {e}")
 
-    # 기존 파일에서 리서치 대상이 아닌 섹션(내부 메모 등) 보존
+    # 기존 파일에서 리서치 대상이 아닌 섹션(내부 메모 등) 보존 + 기존 frontmatter 보존
     preserved_sections = ""
+    existing_fm: dict = {}
+    body_for_preserve = content
     if content:
-        _RESEARCH_HEADERS = {"# ", "## 최근 동향", "## 이메일 맥락", "## 파라메타 서비스 연결점", "## ParaScope"}
+        # frontmatter 분리 (있으면 보존하고 본문에서 제외)
+        try:
+            existing_fm, body_for_preserve = _drive_parse_frontmatter(content)
+        except Exception:
+            existing_fm = {}
+            body_for_preserve = content
+        _RESEARCH_HEADERS = {
+            "# ", "## 최근 동향", "## 이메일 맥락", "## 파라메타 서비스 연결점",
+            "## ParaScope", "## 출처 로그",
+        }
         current_section = []
         is_preserved = False
-        for line in content.splitlines():
+        for line in body_for_preserve.splitlines():
             if line.startswith("## ") or line.startswith("# "):
-                # 이전 보존 섹션 저장
                 if is_preserved and current_section:
                     preserved_sections += "\n".join(current_section) + "\n\n"
-                # 새 섹션 판별: 리서치 대상 헤더가 아니면 보존
                 is_preserved = not any(line.startswith(h) for h in _RESEARCH_HEADERS)
                 current_section = [line] if is_preserved else []
             elif is_preserved:
@@ -560,14 +577,29 @@ def research_company(user_id: str, company_name: str, force: bool = False) -> tu
         if is_preserved and current_section:
             preserved_sections += "\n".join(current_section) + "\n\n"
 
-    # 섹션 순서: 최근 동향 → 이메일 맥락 → 파라메타 서비스 연결점 → ParaScope → 보존 섹션
+    # Obsidian 호환 frontmatter 구성
+    fm_updates = {
+        "title": company_name,
+        "type": "wiki",
+        "stage": "wiki",
+        "status": existing_fm.get("status") or "active",
+    }
+    if not existing_fm.get("tags"):
+        fm_updates["tags"] = ["wiki", "active"]
+    new_fm = _drive_merge_frontmatter(existing_fm, fm_updates)
+    fm_block = _drive_render_frontmatter(new_fm)
+
+    # 섹션 순서: 최근 동향 → 이메일 맥락 → 파라메타 서비스 연결점 → ParaScope → 보존 섹션 → 출처 로그
+    sources_log_line = f"- {today}, 웹 검색 + Gmail 자동 리서치 결과"
     new_content = (
-        f"# {company_name}\n\n"
-        f"## 최근 동향\n- last_searched: {today}\n{news_text}\n\n"
-        f"{email_section}\n"
-        f"## 파라메타 서비스 연결점\n{connections}\n\n"
-        f"{parascope_section}"
-        f"{preserved_sections}"
+        fm_block
+        + f"# {company_name}\n\n"
+        + f"## 최근 동향\n- last_searched: {today}\n{news_text}\n\n"
+        + f"{email_section}\n"
+        + f"## 파라메타 서비스 연결점\n{connections}\n\n"
+        + f"{parascope_section}"
+        + f"{preserved_sections}"
+        + f"## 출처 로그\n{_DRIVE_AUTO_START}\n{sources_log_line}\n{_DRIVE_AUTO_END}\n"
     ).rstrip() + "\n"
     file_id = drive.save_company_info(creds, contacts_folder_id, company_name, new_content, file_id)
     return new_content, file_id
@@ -671,15 +703,39 @@ def research_person(user_id: str, person_name: str, company_name: str,
     if not used_orchestrator and info_text.strip() and "[출처:" not in info_text:
         info_text = info_text.rstrip() + f" `[출처: 웹 검색, {today}]`"
 
+    # Obsidian 호환 frontmatter 구성
+    existing_fm: dict = {}
+    if content:
+        try:
+            existing_fm, _ = _drive_parse_frontmatter(content)
+        except Exception:
+            existing_fm = {}
+    fm_updates = {
+        "title": person_name,
+        "type": "wiki",
+        "stage": "wiki",
+        "status": existing_fm.get("status") or "active",
+    }
+    if company_name:
+        fm_updates["related_entities"] = [company_name]
+    if not existing_fm.get("tags"):
+        fm_updates["tags"] = ["wiki", "active"]
+    new_fm = _drive_merge_frontmatter(existing_fm, fm_updates)
+    fm_block = _drive_render_frontmatter(new_fm)
+
+    sources_log_line = f"- {today}, 웹 검색 + Gmail 헤더 기반 자동 리서치"
     new_content = (
-        f"# {person_name}\n\n"
-        f"## 기본 정보\n"
-        f"- 소속: [[{company_name}]]\n"  # CM-07: Wiki 링크
-        f"- last_searched: {today}\n"
-        f"{email_line}"
-        f"{card_section}"
-        f"{email_section}\n"
-        f"## 공개 정보\n{info_text}\n"
+        fm_block
+        + f"# {person_name}\n\n"
+        + f"## 기본 정보\n"
+        + f"- 소속: [[{company_name}]]\n"
+        + f"- last_searched: {today}\n"
+        + f"{email_line}"
+        + f"{card_section}"
+        + f"{email_section}\n"
+        + f"## 공개 정보\n{info_text}\n\n"
+        + f"## 최근 히스토리\n{_DRIVE_AUTO_START}\n{_DRIVE_AUTO_END}\n\n"
+        + f"## 출처 로그\n{_DRIVE_AUTO_START}\n{sources_log_line}\n{_DRIVE_AUTO_END}\n"
     )
     file_id = drive.save_person_info(creds, contacts_folder_id, person_name, new_content, file_id)
 
