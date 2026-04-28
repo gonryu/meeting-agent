@@ -16,6 +16,7 @@ import anthropic
 from store import user_store
 from tools import drive
 from prompts.briefing import proposal_intake_prompt, proposal_generate_prompt
+from agents import proposal_orchestrator
 
 log = logging.getLogger(__name__)
 
@@ -56,6 +57,64 @@ def _generate_proposal(prompt: str) -> str:
         messages=[{"role": "user", "content": prompt}],
     )
     return resp.content[0].text.strip()
+
+
+def _client_analysis_to_intake(analysis: dict, *, fallback_title: str,
+                               company_names: list[str]) -> dict:
+    """orchestrator의 client_analysis 산출을 기존 intake 스키마로 매핑.
+
+    Slack 개요 UI(_post_proposal_outline)가 요구하는 6개 필드:
+      title / purpose / target / scope / key_points / background
+    """
+    needs = analysis.get("needs") or []
+    direction = (analysis.get("strategic_direction") or "").strip()
+    success_criteria = analysis.get("success_criteria") or []
+
+    # title — 회의 제목 + 회사명 조합으로 추정
+    company_label = "_".join(company_names) if company_names else (
+        analysis.get("client_company") or fallback_title
+    )
+    if "제안" in fallback_title:
+        title = fallback_title
+    elif company_label and company_label != fallback_title:
+        title = f"{company_label} 제안"
+    else:
+        title = fallback_title or "제안서"
+
+    # target — 고객사 + 부서
+    target_parts = []
+    if analysis.get("client_company"):
+        target_parts.append(analysis["client_company"])
+    if analysis.get("client_unit"):
+        target_parts.append(analysis["client_unit"])
+    target = " / ".join(target_parts) if target_parts else (
+        ", ".join(company_names) if company_names else ""
+    )
+
+    # purpose — strategic_direction 우선, 없으면 needs 첫 문장
+    purpose = direction or (needs[0] if needs else "")
+
+    # scope — success_criteria + 솔루션 방향 단서
+    scope = ""
+    if success_criteria:
+        scope = "성공 기준: " + " / ".join(success_criteria[:2])
+
+    # key_points — needs 상위 항목
+    key_points = list(needs[:5])
+    if not key_points:
+        key_points = list(analysis.get("decision_criteria") or [])[:5]
+
+    # background — outline_summary 사용 (사용자 검토용 요약)
+    background = (analysis.get("outline_summary") or "").strip() or direction
+
+    return {
+        "title": title,
+        "purpose": purpose,
+        "target": target,
+        "scope": scope,
+        "key_points": key_points,
+        "background": background,
+    }
 
 
 # ── FR-A11: 트리거 감지 + 제안 ────────────────────────────────
@@ -189,23 +248,48 @@ def handle_proposal_start(slack_client, body: dict) -> None:
         except Exception:
             pass
 
-    # LLM으로 intake 추출
-    try:
-        prompt = proposal_intake_prompt(
-            minutes_body=state["internal_body"],
-            company_info=company_info,
-            knowledge=knowledge,
-        )
-        result = _generate(prompt)
-        cleaned = result.strip().lstrip("```json").lstrip("```").rstrip("```").strip()
-        intake = json.loads(cleaned)
-    except Exception as e:
-        log.error(f"제안서 intake 추출 실패: {e}")
-        slack_client.chat_postMessage(
-            channel=user_id,
-            text="⚠️ 제안서 개요 추출에 실패했습니다. 다시 시도해주세요.",
-        )
-        return
+    # LLM으로 intake 추출 — 오케스트레이터 사용 가능 시 1단계(client_analysis) 결과를 활용
+    intake: dict | None = None
+    client_analysis: dict | None = None
+    if proposal_orchestrator.is_enabled():
+        try:
+            client_analysis = proposal_orchestrator.generate_outline(
+                title=state["title"],
+                date_str=state["date_str"],
+                minutes_body=state["internal_body"],
+                company_info=company_info,
+                previous_context="",
+                client_hint=", ".join(state.get("company_names") or []),
+            )
+            intake = _client_analysis_to_intake(
+                client_analysis,
+                fallback_title=state["title"],
+                company_names=state.get("company_names") or [],
+            )
+            log.info("제안서 개요: orchestrator client_analysis 사용")
+        except Exception as e:
+            log.exception(f"Proposal Orchestrator 개요 단계 실패 — 폴백: {e}")
+            intake = None
+            client_analysis = None
+
+    if intake is None:
+        # 기존 단일 호출 폴백 — 호환성 유지
+        try:
+            prompt = proposal_intake_prompt(
+                minutes_body=state["internal_body"],
+                company_info=company_info,
+                knowledge=knowledge,
+            )
+            result = _generate(prompt)
+            cleaned = result.strip().lstrip("```json").lstrip("```").rstrip("```").strip()
+            intake = json.loads(cleaned)
+        except Exception as e:
+            log.error(f"제안서 intake 추출 실패: {e}")
+            slack_client.chat_postMessage(
+                channel=user_id,
+                text="⚠️ 제안서 개요 추출에 실패했습니다. 다시 시도해주세요.",
+            )
+            return
 
     # 상태 업데이트
     with _proposals_lock:
@@ -213,6 +297,7 @@ def handle_proposal_start(slack_client, body: dict) -> None:
             _pending_proposals[user_id]["intake"] = intake
             _pending_proposals[user_id]["company_info"] = company_info
             _pending_proposals[user_id]["knowledge"] = knowledge
+            _pending_proposals[user_id]["client_analysis"] = client_analysis
 
     # 개요 제시
     _post_proposal_outline(slack_client, user_id=user_id, intake=intake)
@@ -305,25 +390,63 @@ def handle_proposal_confirm_outline(slack_client, body: dict) -> None:
 
     intake = state["intake"]
     key_points_text = "\n".join(f"- {p}" for p in intake.get("key_points", []))
+    proposal_body: str | None = None
 
-    try:
-        prompt = proposal_generate_prompt(
-            title=intake.get("title", "제안서"),
-            purpose=intake.get("purpose", ""),
-            target=intake.get("target", ""),
-            scope=intake.get("scope", ""),
-            key_points=key_points_text,
-            background=intake.get("background", ""),
-            minutes_body=state["internal_body"],
-            company_info=state.get("company_info", ""),
-            knowledge=state.get("knowledge", ""),
-        )
-        proposal_body = _generate_proposal(prompt)
-    except Exception as e:
-        log.error(f"제안서 생성 실패: {e}")
-        slack_client.chat_postMessage(
-            channel=user_id, text=f"⚠️ 제안서 생성 실패: {e}")
-        return
+    # 1차: 오케스트레이터 (5단계 파이프라인)
+    if proposal_orchestrator.is_enabled():
+        try:
+            prior_outline_lines = [
+                f"제목: {intake.get('title', '')}",
+                f"목적: {intake.get('purpose', '')}",
+                f"대상: {intake.get('target', '')}",
+                f"범위: {intake.get('scope', '')}",
+                f"주요 내용: {key_points_text}",
+                f"배경: {intake.get('background', '')}",
+            ]
+            prior_outline = "\n".join(prior_outline_lines)
+            result = proposal_orchestrator.generate_full_proposal(
+                title=intake.get("title", state["title"]),
+                date_str=state["date_str"],
+                minutes_body=state["internal_body"],
+                company_info=state.get("company_info", ""),
+                knowledge=state.get("knowledge", ""),
+                previous_context="",
+                client_hint=", ".join(state.get("company_names") or []),
+                prior_outline=prior_outline,
+                prior_analysis=state.get("client_analysis"),
+            )
+            proposal_body = result["proposal_md"]
+            # 산출물 메타 보관 (디버깅·후속 단계 활용)
+            with _proposals_lock:
+                if user_id in _pending_proposals:
+                    _pending_proposals[user_id]["orchestrator_result"] = {
+                        k: v for k, v in result.items() if k != "proposal_md"
+                    }
+            log.info("제안서 본문: orchestrator 5단계 파이프라인 사용")
+        except Exception as e:
+            log.exception(f"Proposal Orchestrator 본문 생성 실패 — 폴백: {e}")
+            proposal_body = None
+
+    # 폴백: 기존 단일 호출
+    if proposal_body is None:
+        try:
+            prompt = proposal_generate_prompt(
+                title=intake.get("title", "제안서"),
+                purpose=intake.get("purpose", ""),
+                target=intake.get("target", ""),
+                scope=intake.get("scope", ""),
+                key_points=key_points_text,
+                background=intake.get("background", ""),
+                minutes_body=state["internal_body"],
+                company_info=state.get("company_info", ""),
+                knowledge=state.get("knowledge", ""),
+            )
+            proposal_body = _generate_proposal(prompt)
+        except Exception as e:
+            log.error(f"제안서 생성 실패: {e}")
+            slack_client.chat_postMessage(
+                channel=user_id, text=f"⚠️ 제안서 생성 실패: {e}")
+            return
 
     # 역링크 추가
     company_names = state.get("company_names", [])
@@ -551,22 +674,34 @@ def handle_proposal_edit_reply(slack_client, user_id: str, edit_text: str) -> No
     slack_client.chat_postMessage(
         channel=user_id, text="🔄 제안서를 수정하고 있습니다...")
 
-    edit_prompt = (
-        f"다음 제안서를 아래 수정 요청에 따라 수정해줘. 반드시 한국어로.\n\n"
-        f"[기존 제안서]\n{state['proposal_body']}\n\n"
-        f"[수정 요청]\n{edit_text}\n\n"
-        f"수정 규칙:\n"
-        f"1. 요청된 부분만 정확히 수정하고, 나머지 내용과 구조는 그대로 유지\n"
-        f"2. 섹션 헤더(##)와 마크다운 형식을 동일하게 유지\n"
-        f"3. 수정된 전체 제안서를 반환"
-    )
-    try:
-        new_body = _generate_proposal(edit_prompt)
-    except Exception as e:
-        log.error(f"제안서 수정 실패: {e}")
-        slack_client.chat_postMessage(
-            channel=user_id, text=f"⚠️ 제안서 수정 실패: {e}")
-        return
+    new_body: str | None = None
+    if proposal_orchestrator.is_enabled():
+        try:
+            new_body = proposal_orchestrator.revise_proposal(
+                current_proposal_md=state["proposal_body"],
+                user_request=edit_text,
+            )
+        except Exception as e:
+            log.exception(f"Proposal Orchestrator 수정 실패 — 폴백: {e}")
+            new_body = None
+
+    if new_body is None:
+        edit_prompt = (
+            f"다음 제안서를 아래 수정 요청에 따라 수정해줘. 반드시 한국어로.\n\n"
+            f"[기존 제안서]\n{state['proposal_body']}\n\n"
+            f"[수정 요청]\n{edit_text}\n\n"
+            f"수정 규칙:\n"
+            f"1. 요청된 부분만 정확히 수정하고, 나머지 내용과 구조는 그대로 유지\n"
+            f"2. 섹션 헤더(##)와 마크다운 형식을 동일하게 유지\n"
+            f"3. 수정된 전체 제안서를 반환"
+        )
+        try:
+            new_body = _generate_proposal(edit_prompt)
+        except Exception as e:
+            log.error(f"제안서 수정 실패: {e}")
+            slack_client.chat_postMessage(
+                channel=user_id, text=f"⚠️ 제안서 수정 실패: {e}")
+            return
 
     with _proposals_lock:
         if user_id in _pending_proposals:

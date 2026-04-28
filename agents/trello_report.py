@@ -22,6 +22,7 @@ from datetime import datetime, timedelta, timezone
 import requests
 import urllib3
 
+from agents import weekly_report_orchestrator
 from store import user_store
 from tools import drive
 
@@ -672,6 +673,59 @@ def _build_slack_summary(
     return "\n".join(lines)
 
 
+# ── 오케스트레이터 결과를 Slack용 텍스트로 변환 ────────────────
+
+
+def _build_enriched_slack_text(
+    *, workspace_name: str,
+    since: datetime, until: datetime,
+    executive_summary_md: str,
+    risks: dict,
+    doc_url: str | None,
+) -> str:
+    """오케스트레이터의 5줄 요약 + 핵심 리스크 카드를 Slack mrkdwn으로."""
+    since_kst = since.astimezone(KST)
+    until_kst = until.astimezone(KST)
+
+    lines: list[str] = []
+    lines.append(f"*📊 주간 Trello 업데이트 — {workspace_name}*")
+    lines.append(
+        f"_{since_kst.strftime('%Y-%m-%d')} ~ {until_kst.strftime('%Y-%m-%d')} (KST)_"
+    )
+    if doc_url:
+        lines.append(f"📄 <{doc_url}|상세 보고서 Google Docs>")
+    lines.append("")
+    summary = (executive_summary_md or "").strip()
+    if summary:
+        lines.append(summary)
+        lines.append("")
+
+    # 리스크 강조 — delayed/at_risk가 있으면 카드 링크와 함께 노출
+    delayed = risks.get("delayed") or []
+    at_risk = risks.get("at_risk") or []
+    if delayed or at_risk:
+        lines.append("*🚨 리스크 카드*")
+        for r in delayed[:5]:
+            name = r.get("card_name") or "(이름 없음)"
+            url = r.get("card_url") or ""
+            link = f"<{url}|{name}>" if url else name
+            due = r.get("due") or ""
+            reason = (r.get("reason") or "").strip()
+            suffix = f" — 기한 `{due}`" if due else ""
+            if reason:
+                suffix += f" · {reason}"
+            lines.append(f"• 🚨 {link}{suffix}")
+        for r in at_risk[:5]:
+            name = r.get("card_name") or "(이름 없음)"
+            url = r.get("card_url") or ""
+            link = f"<{url}|{name}>" if url else name
+            reason = (r.get("reason") or r.get("signal") or "").strip()
+            suffix = f" — {reason}" if reason else ""
+            lines.append(f"• ⚠️ {link}{suffix}")
+
+    return "\n".join(lines).rstrip()
+
+
 # ── 수집 + 집계 ─────────────────────────────────────────────
 
 def _collect(api_key: str, token: str, workspace: str, days: int):
@@ -808,19 +862,43 @@ def send_weekly_report(slack_client, user_id: str | None = None,
     title_date = data["until"].astimezone(KST).strftime("%Y-%m-%d")
     title = f"{title_date} 주간 Trello 보고서 — {data['workspace_name']}"
 
+    # 오케스트레이터로 본문·Slack 요약 강화 (실패 시 기존 경로로 폴백)
+    enriched: dict | None = None
+    if weekly_report_orchestrator.is_enabled():
+        try:
+            enriched = weekly_report_orchestrator.enrich_report(
+                data, base_report_md=built["full_md"],
+            )
+            log.info("[Trello 주간] orchestrator 사용 — 본문·요약 강화")
+        except Exception as e:
+            log.exception(f"[Trello 주간] Weekly Report Orchestrator 실패 — 폴백: {e}")
+            enriched = None
+
+    docs_md = enriched["detailed_md"] if enriched else built["full_md"]
+
     doc_url = None
     try:
-        _, doc_url = _save_to_drive(user_id, title, built["full_md"])
+        _, doc_url = _save_to_drive(user_id, title, docs_md)
         log.info(f"[Trello 주간] Google Docs 저장 완료: {doc_url}")
     except Exception as e:
         log.exception(f"[Trello 주간] Google Docs 저장 실패: {e}")
 
-    slack_text = _build_slack_summary(
-        data["workspace_name"], data["boards"],
-        data["actions"], data["upcoming_cards"], data["upcoming_items"],
-        data["since"], data["until"], data["next_start"], data["next_end"],
-        doc_url=doc_url,
-    )
+    if enriched:
+        # Slack 발송 텍스트 = 5줄 요약 + Docs 링크 + (있으면) 리스크 강조
+        slack_text = _build_enriched_slack_text(
+            workspace_name=data["workspace_name"],
+            since=data["since"], until=data["until"],
+            executive_summary_md=enriched["executive_summary_md"],
+            risks=enriched.get("risks", {}),
+            doc_url=doc_url,
+        )
+    else:
+        slack_text = _build_slack_summary(
+            data["workspace_name"], data["boards"],
+            data["actions"], data["upcoming_cards"], data["upcoming_items"],
+            data["since"], data["until"], data["next_start"], data["next_end"],
+            doc_url=doc_url,
+        )
 
     target = channel or _REPORT_CHANNEL
     posted = False

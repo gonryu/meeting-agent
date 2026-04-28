@@ -20,6 +20,7 @@ import anthropic
 from store import user_store
 from tools import calendar as cal, drive, gmail, trello
 from prompts.briefing import extract_action_items_prompt
+from agents import action_items_orchestrator
 
 log = logging.getLogger(__name__)
 KST = ZoneInfo("Asia/Seoul")
@@ -90,8 +91,11 @@ def trigger_after_meeting(
         )
         log.info(f"외부 참석자: {[r['email'] for r in recipients]}")
 
-        # B. 액션아이템 추출
-        _extract_and_save_action_items(event_id or title, user_id, internal_body)
+        # B. 액션아이템 추출 (오케스트레이터: extractor → assessor → response_planner)
+        _extract_and_save_action_items(
+            event_id or title, user_id, internal_body,
+            title=title, date_str=date_str,
+        )
 
         # C. 외부용 Draft Slack 발송
         _send_draft_to_slack(
@@ -290,21 +294,87 @@ def _resolve_attendee_emails(
 
 # ── B. 액션아이템 추출 ──────────────────────────────────────
 
-def _extract_and_save_action_items(event_id: str, user_id: str, internal_body: str) -> None:
-    """LLM으로 액션아이템 추출 후 DB 저장"""
+def _legacy_extract_action_items(internal_body: str) -> list[dict]:
+    """레거시 단일 LLM 호출 액션아이템 추출 (폴백 경로).
+
+    {assignee, content, due_date} 형식의 dict 리스트를 반환.
+    """
     try:
         raw = _generate(extract_action_items_prompt(internal_body))
-        # JSON 블록 추출
         match = re.search(r"\[.*\]", raw, re.DOTALL)
         if not match:
-            log.warning("액션아이템 JSON 파싱 실패 (빈 배열 처리)")
-            return
+            log.warning("레거시 액션아이템 JSON 파싱 실패 (빈 배열 처리)")
+            return []
         items = json.loads(match.group())
         if not isinstance(items, list):
-            return
+            return []
+        return items
+    except Exception as e:
+        log.warning(f"레거시 액션아이템 추출 실패: {e}")
+        return []
+
+
+def _normalize_orchestrator_items(items: list[dict]) -> list[dict]:
+    """오케스트레이터 산출(task/owner/...) → user_store 저장 dict 변환.
+
+    레거시 컬럼(assignee/content/due_date)과 풍부화 컬럼을 모두 채움.
+    """
+    out: list[dict] = []
+    for it in items:
+        assignee = it.get("owner") or None
+        if assignee in ("미정", "unknown", ""):
+            assignee = None
+        out.append({
+            "assignee": assignee,
+            "content": it.get("task", ""),
+            "due_date": it.get("due"),
+            "priority": it.get("priority"),
+            "severity": it.get("severity"),
+            "owner_side": it.get("owner_side"),
+            "risk_score": it.get("risk_score"),
+            "escalation_path": it.get("escalation_path"),
+            "success_indicator": it.get("success_indicator"),
+            "monitoring_cadence": it.get("monitoring_cadence"),
+            "next_check_date": it.get("next_check_date"),
+            "dependencies": it.get("dependencies"),
+            "source_excerpt": it.get("source_excerpt"),
+            "secondary_risks": it.get("secondary_risks"),
+        })
+    return out
+
+
+def _extract_and_save_action_items(event_id: str, user_id: str, internal_body: str,
+                                    title: str = "", date_str: str = "") -> None:
+    """액션아이템 추출 + DB 저장.
+
+    오케스트레이터 활성 시: extractor → assessor → response_planner 파이프라인.
+    실패 또는 비활성 시: 레거시 단일 LLM 호출로 폴백.
+    """
+    try:
+        if action_items_orchestrator.is_enabled():
+            enriched = action_items_orchestrator.extract_and_enrich(
+                internal_body,
+                meeting_title=title or event_id,
+                meeting_date=date_str or "",
+                fallback=lambda: _legacy_extract_action_items(internal_body),
+            )
+            if enriched:
+                # 오케스트레이터 결과인지(풍부화 키 보유) 레거시 폴백 결과인지 판별
+                is_orchestrator_result = any("severity" in i or "task" in i for i in enriched)
+                if is_orchestrator_result:
+                    items_to_save = _normalize_orchestrator_items(enriched)
+                else:
+                    items_to_save = enriched  # 레거시 형식 그대로
+                user_store.save_action_items(event_id, user_id, items_to_save)
+                log.info(f"액션아이템 {len(items_to_save)}개 저장 "
+                         f"(orchestrator={is_orchestrator_result}): {event_id}")
+                return
+
+        # 오케스트레이터 비활성 — 레거시 경로
+        items = _legacy_extract_action_items(internal_body)
         if items:
             user_store.save_action_items(event_id, user_id, items)
-            log.info(f"액션아이템 {len(items)}개 저장: {event_id}")
+            log.info(f"액션아이템 {len(items)}개 저장 (legacy): {event_id}")
     except Exception as e:
         log.warning(f"액션아이템 추출 실패 (무시): {e}")
 
@@ -440,12 +510,52 @@ def handle_cancel_draft(slack_client, body: dict) -> None:
 
 # ── D. 담당자 DM 알림 ────────────────────────────────────────
 
+def _enriched_item_for_dm(row: dict) -> dict:
+    """DB row → orchestrator/dm_writer가 기대하는 형태로 변환.
+
+    escalation_path / secondary_risks는 JSON 문자열로 저장돼 있을 수 있음.
+    """
+    item = {
+        "task": row.get("content", ""),
+        "owner": row.get("assignee") or "미정",
+        "owner_side": row.get("owner_side"),
+        "due": row.get("due_date"),
+        "priority": row.get("priority"),
+        "severity": row.get("severity"),
+        "risk_score": row.get("risk_score"),
+        "dependencies": row.get("dependencies") or "",
+        "success_indicator": row.get("success_indicator") or "",
+        "monitoring_cadence": row.get("monitoring_cadence") or "",
+        "next_check_date": row.get("next_check_date"),
+    }
+    esc = row.get("escalation_path")
+    if isinstance(esc, str) and esc:
+        try:
+            item["escalation_path"] = json.loads(esc)
+        except json.JSONDecodeError:
+            item["escalation_path"] = {}
+    else:
+        item["escalation_path"] = esc or {}
+    sec = row.get("secondary_risks")
+    if isinstance(sec, str) and sec:
+        try:
+            item["secondary_risks"] = json.loads(sec)
+        except json.JSONDecodeError:
+            item["secondary_risks"] = []
+    else:
+        item["secondary_risks"] = sec or []
+    return item
+
+
 def _notify_action_items(
     slack_client, *, event_id: str, user_id: str, title: str,
     creds=None, contacts_folder_id: str | None = None,
 ) -> None:
     """액션아이템 담당자별 Slack DM 발송.
     담당자 Slack UID 조회: Slack → Google 주소록 → Gmail → Contacts 폴더 순서
+
+    풍부화된 액션아이템(severity 보유)은 dm_writer로 개인화 메시지 생성,
+    레거시 항목은 기존 단순 포맷 유지.
     """
     items = user_store.get_action_items(event_id)
     if not items:
@@ -457,13 +567,33 @@ def _notify_action_items(
         key = item.get("assignee")
         by_assignee.setdefault(key, []).append(item)
 
-    for assignee, assignee_items in by_assignee.items():
-        lines = [f"📋 *{title}* 미팅 후 액션아이템"]
-        for it in assignee_items:
-            due = f" (기한: {it['due_date']})" if it.get("due_date") else ""
-            lines.append(f"• {it['content']}{due}")
+    use_orchestrator_dm = (
+        action_items_orchestrator.is_enabled()
+        and any(it.get("severity") for it in items)
+    )
 
-        text = "\n".join(lines)
+    for assignee, assignee_items in by_assignee.items():
+        if use_orchestrator_dm:
+            # 풍부화 항목 — 항목별 개인화 DM
+            blocks_text = []
+            for row in assignee_items:
+                if row.get("severity"):
+                    enriched = _enriched_item_for_dm(row)
+                    msg = action_items_orchestrator.format_owner_dm(
+                        enriched, meeting_title=title, meeting_url="",
+                    )
+                else:
+                    # 풍부화 안된 항목은 기본 포맷
+                    due = f" (기한: {row['due_date']})" if row.get("due_date") else ""
+                    msg = f"• {row['content']}{due}"
+                blocks_text.append(msg)
+            text = "\n\n".join(blocks_text)
+        else:
+            lines = [f"📋 *{title}* 미팅 후 액션아이템"]
+            for it in assignee_items:
+                due = f" (기한: {it['due_date']})" if it.get("due_date") else ""
+                lines.append(f"• {it['content']}{due}")
+            text = "\n".join(lines)
 
         target_uid = user_id  # 기본: 주최자
         extra_note = ""
@@ -510,16 +640,33 @@ def handle_complete_action_item(slack_client, body: dict) -> None:
     )
 
 
+_SEVERITY_RANK = {"Critical": 0, "High": 1, "Medium": 2, "Low": 3}
+_SEVERITY_EMOJI = {"Critical": "🔴", "High": "🟠", "Medium": "🟡", "Low": "🟢"}
+
+
 def action_item_reminder(slack_client) -> None:
-    """매일 08:00 KST 실행 — D-day/D-1 미완료 액션아이템 담당자 DM"""
-    today = date.today().isoformat()
-    tomorrow = (date.today() + timedelta(days=1)).isoformat()
+    """매일 08:00 KST 실행 — D-day/D-1 미완료 액션아이템 담당자 DM.
 
-    for due_date in (today, tomorrow):
+    Phase 3 우선순위 인지:
+      - Critical/High 항목을 상단으로 정렬
+      - Low 항목은 D-day(오늘)에만 알리고 D-1은 생략 (노이즈 감소)
+    """
+    today_str = date.today().isoformat()
+    tomorrow_str = (date.today() + timedelta(days=1)).isoformat()
+
+    for due_date in (today_str, tomorrow_str):
         items = user_store.get_open_action_items_by_due(due_date)
-        label = "오늘" if due_date == today else "내일"
+        label = "오늘" if due_date == today_str else "내일"
 
-        # 사용자(주최자)별 그룹핑
+        # D-1(내일)에는 Low를 제외해 노이즈 감소
+        if due_date == tomorrow_str:
+            items = [it for it in items if (it.get("severity") or "") != "Low"]
+
+        # severity로 정렬: Critical → High → Medium → Low → 미평가(맨 아래)
+        items.sort(key=lambda it: _SEVERITY_RANK.get(
+            it.get("severity") or "", 99))
+
+        # 사용자(주최자)별 그룹핑 (정렬 유지)
         by_user: dict[str, list[dict]] = {}
         for item in items:
             by_user.setdefault(item["user_id"], []).append(item)
@@ -527,8 +674,10 @@ def action_item_reminder(slack_client) -> None:
         for uid, uid_items in by_user.items():
             lines = [f"⏰ *액션아이템 리마인더* — {label} 기한"]
             for it in uid_items:
+                sev = it.get("severity") or ""
+                emoji = _SEVERITY_EMOJI.get(sev, "•")
                 assignee = f"[{it['assignee']}] " if it.get("assignee") else ""
-                lines.append(f"• {assignee}{it['content']}")
+                lines.append(f"{emoji} {assignee}{it['content']}")
             try:
                 slack_client.chat_postMessage(channel=uid, text="\n".join(lines))
             except Exception as e:
