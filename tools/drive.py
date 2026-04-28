@@ -5,6 +5,7 @@ from googleapiclient.http import MediaInMemoryUpload
 from datetime import datetime, timezone
 import logging
 import os
+import re
 
 log = logging.getLogger(__name__)
 
@@ -566,3 +567,291 @@ def add_minutes_backlinks(
 
     backlink_section = "\n\n## 관련 자료\n" + "\n".join(links) + "\n"
     return content.rstrip() + backlink_section
+
+
+# ── Obsidian 호환 Wiki 헬퍼 (Phase 2.4) ─────────────────────────
+#
+# 자동 갱신 영역과 사용자 수정 영역을 구분하기 위한 마커.
+# 자동 영역은 마커 사이에서만 갱신하고, 사용자가 마커 밖에 적은 내용은
+# 절대 손대지 않는다 (append-only 원칙).
+
+AUTO_START = "<!-- auto:start -->"
+AUTO_END = "<!-- auto:end -->"
+
+
+def parse_frontmatter(content: str) -> tuple[dict, str]:
+    """파일 최상단 YAML frontmatter 파싱.
+
+    Returns: (frontmatter_dict, body_without_frontmatter)
+    frontmatter가 없거나 파싱 실패 시 ({}, content) 반환.
+    리스트/문자열 값을 단순 처리(YAML 라이브러리 의존 회피).
+    """
+    if not content:
+        return {}, content
+    if not content.startswith("---\n"):
+        return {}, content
+    end = content.find("\n---\n", 4)
+    if end == -1:
+        # 마지막 줄에 --- 만 있는 경우
+        if content.rstrip().endswith("\n---") or content.rstrip().endswith("---"):
+            end = content.rfind("\n---")
+        else:
+            return {}, content
+    fm_block = content[4:end]
+    body = content[end + 5:] if end + 5 <= len(content) else ""
+
+    fm: dict = {}
+    current_key: str | None = None
+    for raw_line in fm_block.split("\n"):
+        line = raw_line.rstrip()
+        if not line.strip():
+            continue
+        if line.startswith("  - ") or line.startswith("- "):
+            # 리스트 항목
+            val = line.lstrip("- ").strip()
+            if (val.startswith('"') and val.endswith('"')) or (val.startswith("'") and val.endswith("'")):
+                val = val[1:-1]
+            if current_key is not None:
+                # 첫 리스트 아이템이면 기존 빈 스칼라를 빈 리스트로 승격
+                if not isinstance(fm.get(current_key), list):
+                    fm[current_key] = []
+                if val not in fm[current_key]:
+                    fm[current_key].append(val)
+            continue
+        # key: value
+        if ":" in line:
+            key, _, val = line.partition(":")
+            key = key.strip()
+            val = val.strip()
+            current_key = key
+            if val == "":
+                # 다음 줄에 리스트가 이어질 가능성. 빈 문자열로 두고, 리스트 항목이 오면 승격
+                fm[key] = ""
+            elif val == "[]":
+                fm[key] = []
+            else:
+                if (val.startswith('"') and val.endswith('"')) or (val.startswith("'") and val.endswith("'")):
+                    val = val[1:-1]
+                fm[key] = val
+    # 마지막 정리: 빈 문자열이지만 사용자가 리스트 의도였을 가능성이 있는 키는 유지
+    return fm, body
+
+
+def render_frontmatter(fm: dict) -> str:
+    """간단한 YAML 직렬화. 리스트는 블록 스타일, 문자열은 그대로 출력."""
+    lines = ["---"]
+    for k, v in fm.items():
+        if isinstance(v, list):
+            if not v:
+                lines.append(f"{k}: []")
+            else:
+                lines.append(f"{k}:")
+                for item in v:
+                    s = str(item)
+                    # 위키링크/콜론 등이 포함되면 안전하게 따옴표
+                    if ":" in s or s.startswith("[[") or "#" in s:
+                        s = '"' + s.replace('"', '\\"') + '"'
+                    lines.append(f"  - {s}")
+        else:
+            if v is None or v == "":
+                lines.append(f"{k}:")
+            else:
+                s = str(v)
+                if ":" in s or s.startswith("[["):
+                    s = '"' + s.replace('"', '\\"') + '"'
+                lines.append(f"{k}: {s}")
+    lines.append("---")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def merge_frontmatter(existing: dict, updates: dict) -> dict:
+    """기존 frontmatter에 업데이트를 머지.
+
+    - 리스트 키는 dedupe append (순서 유지)
+    - 스칼라 키는 updates가 우선
+    - 기존에만 있는 키는 보존
+    """
+    out: dict = {}
+    # 기존 키 먼저 복사
+    for k, v in existing.items():
+        out[k] = list(v) if isinstance(v, list) else v
+    for k, v in updates.items():
+        if isinstance(v, list):
+            base = out.get(k, [])
+            if not isinstance(base, list):
+                base = [base] if base else []
+            # dedupe append
+            seen = {str(x) for x in base}
+            for item in v:
+                if str(item) not in seen:
+                    base.append(item)
+                    seen.add(str(item))
+            out[k] = base
+        else:
+            if v is not None and v != "":
+                out[k] = v
+            elif k not in out:
+                out[k] = v
+    return out
+
+
+def append_to_section(
+    body: str, section_header: str, line: str,
+    *, dedupe: bool = True, create_if_missing: bool = True,
+) -> str:
+    """본문의 `## section_header` 섹션에 한 줄 추가.
+
+    - 섹션이 없으면 create_if_missing=True 시 본문 끝에 추가.
+    - dedupe=True 시 동일 라인이 이미 있으면 무시.
+    - 마커(<!-- auto:start --> / <!-- auto:end -->) 가 섹션 내에 있으면
+      마커 사이에 삽입하여 자동 영역으로 표시한다.
+    """
+    if not line:
+        return body
+    if dedupe and line in (body or ""):
+        return body
+
+    header_pat = re.compile(rf"^##\s+{re.escape(section_header)}\s*$", re.MULTILINE)
+    m = header_pat.search(body or "")
+    if not m:
+        if not create_if_missing:
+            return body
+        suffix = f"\n\n## {section_header}\n{AUTO_START}\n{line}\n{AUTO_END}\n"
+        return (body or "").rstrip() + suffix
+
+    # 섹션 시작 위치 이후의 다음 ## 헤더(또는 EOF)까지가 섹션 본문
+    section_start = m.end()
+    next_header = re.search(r"^##\s+", body[section_start:], re.MULTILINE)
+    section_end = section_start + next_header.start() if next_header else len(body)
+    section_block = body[section_start:section_end]
+
+    # 마커가 있으면 마커 사이에 삽입, 없으면 섹션 본문 끝에 마커와 함께 삽입
+    if AUTO_START in section_block and AUTO_END in section_block:
+        # 마커 사이에 한 줄 추가
+        new_block = re.sub(
+            re.escape(AUTO_END),
+            f"{line}\n{AUTO_END}",
+            section_block,
+            count=1,
+        )
+    else:
+        # 섹션 본문 그대로 두고 끝에 마커 영역 추가 (사용자 라인 보존)
+        body_part = section_block.rstrip("\n")
+        new_block = body_part + f"\n\n{AUTO_START}\n{line}\n{AUTO_END}\n"
+
+    return body[:section_start] + new_block + body[section_end:]
+
+
+def update_obsidian_wiki(
+    creds: Credentials, contacts_folder_id: str, *,
+    kind: str,                    # "company" 또는 "person"
+    name: str,                    # 업체명 또는 인물명
+    date_str: str,
+    history_line: str,            # "## 최근 히스토리" 에 추가할 한 줄 (source ref 포함)
+    minutes_basename: str,        # frontmatter source_refs / related_notes 에 추가할 파일명 (확장자 제외)
+    related_entities: list[str] | None = None,
+    aliases: list[str] | None = None,
+) -> None:
+    """Obsidian 호환 Wiki 파일 갱신 (append-only, 사용자 수정 영역 보존).
+
+    - 기존 frontmatter가 없으면 새로 생성
+    - source_refs / related_notes / related_entities 를 dedupe append
+    - `## 최근 히스토리` 섹션의 마커 영역에 history_line 한 줄 추가
+    - `## 출처 로그` 섹션에 출처 라인 한 줄 추가
+    - 그 외 사용자 작성 섹션(개요, 현재 맥락, 메모 등) 은 손대지 않음
+    """
+    if kind == "company":
+        existing, file_id, _ = get_company_info(creds, contacts_folder_id, name)
+        save = lambda c: save_company_info(creds, contacts_folder_id, name, c, file_id)
+    else:
+        existing, file_id = get_person_info(creds, contacts_folder_id, name)
+        save = lambda c: save_person_info(creds, contacts_folder_id, name, c, file_id)
+
+    if not existing:
+        # 신규 파일은 호출부의 research_company / research_person 에서 생성하므로
+        # 여기서는 갱신 대상이 없으면 silently 스킵 (안전)
+        log.info(f"Obsidian wiki 미존재, 갱신 스킵 ({kind}={name})")
+        return
+
+    fm, body = parse_frontmatter(existing)
+
+    # frontmatter 업데이트
+    updates = {
+        "title": name,
+        "type": "wiki",
+        "stage": "wiki",
+        "status": fm.get("status") or "active",
+        "source_refs": [f"[[{minutes_basename}]]"],
+        "related_notes": [f"[[{minutes_basename}]]"],
+    }
+    if related_entities:
+        updates["related_entities"] = list(related_entities)
+    if aliases:
+        updates["aliases"] = list(aliases)
+    # tags 기본값
+    if not fm.get("tags"):
+        updates["tags"] = ["wiki", "active"]
+
+    new_fm = merge_frontmatter(fm, updates)
+
+    # 본문 갱신
+    if not body.lstrip().startswith(f"# {name}"):
+        # 본문이 비어 있거나 H1 누락이면 헤더 추가
+        if body.strip():
+            body = f"# {name}\n\n" + body.lstrip("\n")
+        else:
+            body = f"# {name}\n"
+
+    # 최근 히스토리 마커 영역에 한 줄 추가 (dedupe)
+    body = append_to_section(body, "최근 히스토리", history_line, dedupe=True)
+    # 출처 로그
+    src_line = f"- {date_str}, `[[{minutes_basename}]]`, 회의록 자동 등록"
+    body = append_to_section(body, "출처 로그", src_line, dedupe=True)
+
+    new_content = render_frontmatter(new_fm) + body.lstrip("\n")
+    try:
+        save(new_content)
+        log.info(f"Obsidian wiki 갱신 ({kind}): {name}")
+    except Exception as e:
+        log.warning(f"Obsidian wiki 갱신 실패 ({kind}={name}): {e}")
+
+
+def replace_auto_section(
+    body: str, section_header: str, new_auto_content: str,
+    *, create_if_missing: bool = True,
+) -> str:
+    """`## section_header` 섹션 내부의 마커 영역을 새 내용으로 교체.
+
+    마커 밖의 사용자 작성 내용은 보존된다.
+    섹션 자체가 없으면 create_if_missing=True 시 본문 끝에 추가.
+    """
+    header_pat = re.compile(rf"^##\s+{re.escape(section_header)}\s*$", re.MULTILINE)
+    m = header_pat.search(body or "")
+    if not m:
+        if not create_if_missing:
+            return body
+        suffix = f"\n\n## {section_header}\n{AUTO_START}\n{new_auto_content.rstrip()}\n{AUTO_END}\n"
+        return (body or "").rstrip() + suffix
+
+    section_start = m.end()
+    next_header = re.search(r"^##\s+", body[section_start:], re.MULTILINE)
+    section_end = section_start + next_header.start() if next_header else len(body)
+    section_block = body[section_start:section_end]
+
+    auto_pat = re.compile(
+        rf"{re.escape(AUTO_START)}.*?{re.escape(AUTO_END)}",
+        re.DOTALL,
+    )
+    if auto_pat.search(section_block):
+        new_block = auto_pat.sub(
+            f"{AUTO_START}\n{new_auto_content.rstrip()}\n{AUTO_END}",
+            section_block,
+            count=1,
+        )
+    else:
+        # 마커 영역 신설 — 기존 사용자 콘텐츠 뒤에 추가
+        body_part = section_block.rstrip("\n")
+        new_block = body_part + f"\n\n{AUTO_START}\n{new_auto_content.rstrip()}\n{AUTO_END}\n"
+
+    return body[:section_start] + new_block + body[section_end:]

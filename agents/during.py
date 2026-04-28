@@ -237,16 +237,45 @@ def _generate(prompt: str) -> str:
 
 # ── 회의록 품질 검증 (FR-D09, FR-D10) ────────────────────────
 
-# 내부용 필수 섹션
-_INTERNAL_REQUIRED_SECTIONS = ["회의 요약", "주요 논의 내용", "주요 결정 사항", "액션 아이템"]
-# 외부용 필수 섹션
-_EXTERNAL_REQUIRED_SECTIONS = ["회의 개요", "주요 합의 사항", "공동 액션 아이템"]
+# 내부용 필수 섹션 (구버전 단일 호출 폴백 + Obsidian 신규 양식 모두 허용)
+# 신규 7섹션: 회의 개요 / 결론 / 액션아이템 / 주요 논의 내용 / 제3자 관련 언급 / 오픈 이슈 / 신뢰도 및 검토 메모
+# 검증은 핵심 4섹션(회의 개요, 결론, 액션아이템, 주요 논의 내용)을 기본으로 한다.
+# 레거시 섹션명("회의 요약", "주요 결정 사항", "액션 아이템") 도 폴백으로 인정.
+_INTERNAL_REQUIRED_SECTIONS = ["회의 개요", "결론", "액션아이템", "주요 논의 내용"]
+_INTERNAL_LEGACY_ALIASES = {
+    "회의 개요": ["회의 개요", "회의 요약"],
+    "결론": ["결론", "주요 결정 사항"],
+    "액션아이템": ["액션아이템", "액션 아이템"],
+    "주요 논의 내용": ["주요 논의 내용"],
+}
+
+# 외부용 필수 섹션 (Obsidian 10섹션 양식 + 레거시 양식 모두 허용)
+# 신규: ## 1. 회의 개요 / ## 2. 결론 / ## 5. Action Items / ## 10. 신뢰도 및 검토 메모
+# 레거시: ## 회의 개요 / ## 주요 합의 사항 / ## 공동 액션 아이템
+# "신뢰도" 는 권장 섹션 — 누락 시 hard fail 대신 warnings 로 처리하여 기존 회의록과 호환.
+_EXTERNAL_REQUIRED_SECTIONS = ["회의 개요", "결론", "Action Items"]
+_EXTERNAL_RECOMMENDED_SECTIONS = ["신뢰도"]
+_EXTERNAL_LEGACY_ALIASES = {
+    "회의 개요": ["1. 회의 개요", "회의 개요"],
+    "결론": ["2. 결론", "결론", "주요 합의 사항"],
+    "Action Items": ["5. Action Items", "Action Items", "액션 아이템", "공동 액션 아이템"],
+    "신뢰도": ["10. 신뢰도", "신뢰도"],
+}
 # 외부용 금지 키워드
 _EXTERNAL_FORBIDDEN_KEYWORDS = ["내부 메모", "협상", "전략"]
 
 
+def _section_present(body_lower: str, candidates: list[str]) -> bool:
+    """후보 섹션 헤더 중 하나라도 본문에 존재하면 True. (## 헤더 기준)"""
+    for c in candidates:
+        c = c.lower()
+        if f"## {c}" in body_lower or f"##{c}" in body_lower:
+            return True
+    return False
+
+
 def validate_minutes(body: str, minute_type: str) -> dict:
-    """회의록 필수항목 검증.
+    """회의록 필수항목 검증 (Obsidian 신규/레거시 양쪽 양식 지원).
 
     Args:
         body: 회의록 본문 (마크다운)
@@ -257,17 +286,23 @@ def validate_minutes(body: str, minute_type: str) -> dict:
     """
     result = {"valid": True, "missing": [], "forbidden": [], "warnings": []}
 
-    if minute_type == "internal":
-        required = _INTERNAL_REQUIRED_SECTIONS
-    else:
-        required = _EXTERNAL_REQUIRED_SECTIONS
-
-    # 필수 섹션 존재 확인 (## 헤더 기준)
     body_lower = body.lower() if body else ""
-    for section in required:
-        # "## 섹션명" 또는 "##섹션명" 형태 모두 매칭
-        if f"## {section.lower()}" not in body_lower and f"##{section.lower()}" not in body_lower:
-            result["missing"].append(section)
+
+    if minute_type == "internal":
+        for canonical in _INTERNAL_REQUIRED_SECTIONS:
+            cands = _INTERNAL_LEGACY_ALIASES.get(canonical, [canonical])
+            if not _section_present(body_lower, cands):
+                result["missing"].append(canonical)
+    else:
+        for canonical in _EXTERNAL_REQUIRED_SECTIONS:
+            cands = _EXTERNAL_LEGACY_ALIASES.get(canonical, [canonical])
+            if not _section_present(body_lower, cands):
+                result["missing"].append(canonical)
+        # 권장 섹션은 누락 시 warnings 로만 기록 (hard fail 아님)
+        for canonical in _EXTERNAL_RECOMMENDED_SECTIONS:
+            cands = _EXTERNAL_LEGACY_ALIASES.get(canonical, [canonical])
+            if not _section_present(body_lower, cands):
+                result["warnings"].append(f"권장 섹션 누락: {canonical}")
 
     # 외부용 금지 키워드 검출
     if minute_type == "external":
@@ -1636,6 +1671,37 @@ def _check_awaiting_transcripts(slack_client):
 # ── 회의록 생성 공통 ──────────────────────────────────────────
 
 
+def _classify_meeting_type(attendees_raw: list[dict]) -> str:
+    """이메일 도메인 기반으로 internal / vendor / mixed 분류.
+
+    INTERNAL_DOMAINS 환경변수 (기본 parametacorp.com,iconloop.com).
+    - 외부 도메인 0명: internal
+    - 내부 도메인 0명, 외부만: vendor
+    - 둘 다 있음: mixed
+    - 참석자 정보 없음 또는 모두 도메인 미상: internal (보수적)
+    """
+    raw = os.getenv("INTERNAL_DOMAINS", "parametacorp.com,iconloop.com")
+    internal_domains = {d.strip().lower() for d in raw.split(",") if d.strip()}
+
+    has_internal = False
+    has_external = False
+    for a in attendees_raw or []:
+        email = (a.get("email") or "").strip()
+        if "@" not in email:
+            continue
+        domain = email.split("@")[-1].lower()
+        if domain in internal_domains:
+            has_internal = True
+        else:
+            has_external = True
+
+    if has_external and has_internal:
+        return "mixed"
+    if has_external and not has_internal:
+        return "vendor"
+    return "internal"
+
+
 def _generate_and_post_minutes(slack_client, *, user_id: str, title: str,
                                 date_str: str, time_range: str, attendees: str,
                                 transcript_text: str, notes_text: str,
@@ -1678,9 +1744,29 @@ def _generate_and_post_minutes(slack_client, *, user_id: str, title: str,
             log.warning(f"트랜스크립트 전처리 실패, 원본 사용: {e}")
             processed_transcript = transcript_text[:40000]
 
+    # ── 회의 유형 분류 (자사/상대 분리용) ──
+    # 도메인 휴리스틱 우선 적용. 외부 도메인이 한 명이라도 있으면 vendor/mixed.
+    meeting_type = _classify_meeting_type(attendees_raw or [])
+
+    # ── 알려진 엔티티(Companies/People) 로딩 — 위키링크 자동 적용용 ──
+    known_entities: list[str] = []
+    try:
+        from store import user_store as _us
+        user_info = _us.get_user(user_id) if user_id else None
+        contacts_folder_id = user_info.get("contacts_folder_id") if user_info else None
+        if creds and contacts_folder_id:
+            from tools.wiki_linker import load_known_entities
+            known_entities = load_known_entities(creds, contacts_folder_id)
+    except Exception as e:
+        log.warning(f"알려진 엔티티 로드 실패 (위키링크 적용 안 됨): {e}")
+
+    # 트랜스크립트 원본 frontmatter source_refs 기본 이름
+    source_basename = f"{date_str}_{title}_원문" if transcript_text else None
+
     # ── 내부용 생성 + 품질 검증 루프 (FR-D09, 최대 2회 재생성) ──
-    # Phase 1: Minutes Orchestrator (5단계 파이프라인) 우선 시도, 실패 시 단일 호출 폴백
-    _post(slack_client, user_id=user_id, text=f"✍️ *{title}* 내부용 회의록 생성 중...")
+    # Phase 1: Minutes Orchestrator (6단계 파이프라인) 우선 시도, 실패 시 단일 호출 폴백
+    _post(slack_client, user_id=user_id,
+          text=f"✍️ *{title}* 회의록 생성 중... (유형: {meeting_type})")
     internal_body = None
     used_orchestrator = False
 
@@ -1689,6 +1775,10 @@ def _generate_and_post_minutes(slack_client, *, user_id: str, title: str,
             internal_body = minutes_orchestrator.generate_internal_minutes(
                 title=title, date=meeting_date, attendees=attendees,
                 transcript_text=processed_transcript, notes_text=notes_text,
+                attendees_raw=attendees_raw or [],
+                meeting_type=meeting_type,
+                known_entities=known_entities,
+                source_basename=source_basename,
             )
             used_orchestrator = True
             validation = validate_minutes(internal_body, "internal")
@@ -1738,6 +1828,9 @@ def _generate_and_post_minutes(slack_client, *, user_id: str, title: str,
         "creds": creds,
         "event_id": event_id,
         "attendees_raw": attendees_raw or [],
+        "meeting_type": meeting_type,
+        "known_entities": known_entities,
+        "source_basename": source_basename,
         "draft_ts": None,
         # B2: 세션이 채널에서 시작된 경우 초안도 해당 채널(+스레드)로 응답
         "channel": post_channel or user_id,
@@ -1754,19 +1847,29 @@ def _build_minutes_content(title: str, date_str: str, time_range: str,
                             company_names: list[str] = None,
                             attendee_names: list[str] = None,
                             transcript_source_name: str = None) -> str:
-    """Drive 저장용 마크다운 파일 내용 구성 (CM-07: 역링크 포함)"""
-    lines = [
-        f"# {title} ({kind})",
-        "",
-        "## 기본 정보",
-        f"- 날짜: {date_str}",
-        f"- 시간: {time_range}",
-        f"- 참석자: {attendees}",
-        f"- 입력 소스: {source}",
-        f"- 구분: {kind}",
-        "",
-        body,
-    ]
+    """Drive 저장용 마크다운 파일 내용 구성 (CM-07: 역링크 포함).
+
+    Obsidian 호환: body가 이미 YAML frontmatter + H1 으로 시작하면 그대로 사용하고,
+    옛 양식(frontmatter 없음)이면 기존처럼 # 제목 + ## 기본 정보 헤더를 prepend.
+    """
+    has_frontmatter = bool(body) and body.lstrip().startswith("---")
+
+    if has_frontmatter:
+        # 신규 Obsidian 양식 — body 안에 frontmatter, H1, 섹션이 모두 들어 있음
+        lines = [body.rstrip()]
+    else:
+        lines = [
+            f"# {title} ({kind})",
+            "",
+            "## 기본 정보",
+            f"- 날짜: {date_str}",
+            f"- 시간: {time_range}",
+            f"- 참석자: {attendees}",
+            f"- 입력 소스: {source}",
+            f"- 구분: {kind}",
+            "",
+            body or "",
+        ]
     if kind == "내부용":
         if transcript_text:
             preview = transcript_text[:3000]
