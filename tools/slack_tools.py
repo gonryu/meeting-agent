@@ -97,7 +97,11 @@ def format_time(iso_str: str) -> str:
 
 def build_meeting_header_block(meeting: dict, company_name: str,
                                attendee_names: list[str] | None = None) -> list[dict]:
-    """미팅 기본 정보 블록 (즉시 발송용). 리서치 없이 Calendar 정보만으로 구성."""
+    """미팅 기본 정보 블록 (즉시 발송용). 리서치 없이 Calendar 정보만으로 구성.
+
+    이벤트 id 가 있으면 미팅별 '✏️ 편집' 버튼 actions 블록을 함께 반환해
+    브리핑 헤더에서 바로 편집 흐름으로 진입할 수 있게 한다.
+    """
     time_str = format_time(meeting.get("start_time", ""))
     meet_link = meeting.get("meet_link", "")
     link_text = f"<{meet_link}|Google Meet>" if meet_link else "미팅"
@@ -122,7 +126,22 @@ def build_meeting_header_block(meeting: dict, company_name: str,
     else:
         lines.append("📝  _(어젠다 등록 및 내용을 수정하려면 이 스레드에 답장하세요)_")
 
-    return [{"type": "section", "text": {"type": "mrkdwn", "text": "\n".join(lines)}}]
+    blocks: list[dict] = [
+        {"type": "section", "text": {"type": "mrkdwn", "text": "\n".join(lines)}}
+    ]
+    # 미팅별 편집 진입 버튼 (event_id 가 있을 때만)
+    event_id = meeting.get("id")
+    if event_id:
+        blocks.append({
+            "type": "actions",
+            "elements": [{
+                "type": "button",
+                "text": {"type": "plain_text", "text": "✏️ 편집"},
+                "action_id": "summon_meeting_for_edit",
+                "value": event_id,
+            }],
+        })
+    return blocks
 
 
 def build_company_research_block(

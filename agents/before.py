@@ -2892,3 +2892,556 @@ def handle_room_offer_skip(slack_client, user_id: str, offer_id: str,
                             body: dict = None):
     _pending_room_offer.pop(offer_id, None)
     _replace_block(slack_client, body, "⏭ 회의실 예약을 건너뛰었습니다.")
+
+
+# ═══════════════════════════════════════════════════════════════════
+# 미팅 소환·편집 (이미 생성된 캘린더 미팅을 다시 드래프트화)
+# ═══════════════════════════════════════════════════════════════════
+
+_MEETING_EDIT_MODAL_CALLBACK = "meeting_edit_modal"
+
+
+def _build_info_from_event(event: dict, company: str | None = None) -> dict:
+    """캘린더 이벤트 원본에서 _meeting_drafts info 스키마로 변환.
+
+    cal.get_event() 가 반환하는 raw 이벤트 (attendees self 포함)를 받아
+    create 흐름과 동일한 info dict 를 만든다.
+    """
+    summary = event.get("summary", "(제목 없음)")
+    start = event.get("start", {}) or {}
+    end = event.get("end", {}) or {}
+    start_str = start.get("dateTime") or start.get("date") or ""
+    end_str = end.get("dateTime") or end.get("date") or ""
+
+    date_str, time_str = "", ""
+    duration = 60
+    try:
+        if "T" in start_str:
+            sdt = datetime.fromisoformat(start_str)
+            date_str = sdt.strftime("%Y-%m-%d")
+            time_str = sdt.strftime("%H:%M")
+    except Exception:
+        pass
+    try:
+        if start_str and end_str and "T" in start_str and "T" in end_str:
+            duration = int(
+                (datetime.fromisoformat(end_str) - datetime.fromisoformat(start_str)).total_seconds() / 60
+            )
+            if duration <= 0:
+                duration = 60
+    except Exception:
+        duration = 60
+
+    # self(주최자) 제외
+    raw_attendees = [a for a in (event.get("attendees") or []) if not a.get("self")]
+    participants = [a.get("displayName", "") for a in raw_attendees if a.get("displayName")]
+    participant_emails = {
+        a["displayName"]: a["email"]
+        for a in raw_attendees
+        if a.get("displayName") and a.get("email")
+    }
+
+    return {
+        "title": summary,
+        "date": date_str,
+        "time": time_str,
+        "duration_minutes": duration,
+        "participants": participants,
+        "participant_emails": participant_emails,
+        "company_candidates": [company] if company else [],
+        "company_confirmed": bool(company),
+        "agenda": event.get("description", "") or "",
+        "location": event.get("location", "") or "",
+    }
+
+
+def _build_summoned_message(info: dict, company: str | None,
+                             event_id: str, meet_link: str) -> tuple[str, list[dict]]:
+    """소환된 드래프트 메시지의 텍스트 + Block Kit 구성.
+
+    create 흐름의 결과 메시지와 동일한 모양을 유지하되, 헤더 문구만 '편집' 으로 바꾼다.
+    """
+    title = info.get("title") or "미팅"
+    date_str = info.get("date") or ""
+    time_str = info.get("time") or ""
+    when_line = f"{date_str} {time_str}".strip() or "(시간 미정)"
+    attendee_emails = list(info.get("participant_emails", {}).values())
+    # participant_emails 에 누락된 이메일이 있을 수 있으니 별도 인자 필요 — 호출자가 보강
+    attendee_display = ", ".join(attendee_emails) if attendee_emails else "(없음)"
+
+    msg_lines = [
+        f"📌 미팅 편집 — *{title}*",
+        f"⏰ {when_line}",
+        f"👥 참석자: {attendee_display}",
+    ]
+    if company:
+        msg_lines.append(f"🏢 업체: {company}")
+    if info.get("location"):
+        msg_lines.append(f"📍 장소: {info['location']}")
+    if info.get("agenda"):
+        msg_lines.append(f"📝 어젠다: {info['agenda']}")
+    if meet_link:
+        msg_lines.append(f"🎥 *Google Meet*: <{meet_link}|회의 참여>")
+    msg_lines.append("_이 메시지에 답글로 변경 사항을 알려주세요. 또는 아래 버튼을 사용하세요._")
+    msg = "\n".join(msg_lines)
+
+    blocks = [
+        {"type": "section", "text": {"type": "mrkdwn", "text": msg}},
+        {
+            "type": "actions",
+            "elements": [
+                {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "👥 참석자 추가"},
+                    "action_id": "add_attendee_to_event",
+                    "value": event_id,
+                },
+                {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "📅 일정 편집"},
+                    "action_id": "edit_meeting_schedule",
+                    "value": event_id,
+                    "style": "primary",
+                },
+                {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "❌ 미팅 취소"},
+                    "action_id": "cancel_meeting_button",
+                    "value": event_id,
+                    "style": "danger",
+                },
+            ],
+        },
+    ]
+    return msg, blocks
+
+
+def summon_meeting_draft(slack_client, user_id: str, event_id: str,
+                          channel: str | None = None,
+                          thread_ts: str | None = None) -> str | None:
+    """이미 생성된 캘린더 이벤트를 다시 드래프트로 소환.
+
+    캘린더에서 이벤트를 가져와 create 흐름과 동일한 모양의 메시지를 발송하고,
+    해당 메시지 ts 를 _meeting_drafts 에 등록하여 스레드 답글·버튼이 모두
+    기존 인프라를 재사용하도록 한다.
+
+    Returns: 등록된 reply_ts (실패 시 None)
+    """
+    try:
+        creds = user_store.get_credentials(user_id)
+    except Exception as e:
+        _post(slack_client, user_id=user_id, channel=channel, thread_ts=thread_ts,
+              text=f"⚠️ 인증 오류: {e}")
+        return None
+
+    try:
+        event = cal.get_event(creds, event_id)
+    except Exception as e:
+        log.exception(f"미팅 소환 실패 — get_event: {e}")
+        _post(slack_client, user_id=user_id, channel=channel, thread_ts=thread_ts,
+              text=f"⚠️ 미팅 정보를 불러오지 못했습니다: {e}")
+        return None
+
+    # 업체명 — extendedProperties.private.company
+    company = None
+    ext = (event.get("extendedProperties") or {}).get("private") or {}
+    if ext.get("company"):
+        company = ext["company"]
+
+    info = _build_info_from_event(event, company)
+
+    # self 제외 참석자 이메일
+    raw_attendees = [a for a in (event.get("attendees") or []) if not a.get("self")]
+    attendee_emails = [a.get("email", "") for a in raw_attendees if a.get("email")]
+
+    # Google Meet 링크
+    meet_link = event.get("hangoutLink") or ""
+    if not meet_link:
+        for ep in (event.get("conferenceData") or {}).get("entryPoints", []) or []:
+            if ep.get("entryPointType") == "video":
+                meet_link = ep.get("uri", "")
+                break
+
+    msg, blocks = _build_summoned_message(info, company, event_id, meet_link)
+    resp = _post(slack_client, user_id=user_id, channel=channel, thread_ts=thread_ts,
+                 text=msg, blocks=blocks)
+    reply_ts = resp.get("ts") if resp else None
+    if not reply_ts:
+        log.warning("summon_meeting_draft: 메시지 발송 실패 — ts 없음")
+        return None
+
+    # Slack 응답에 thread_ts 가 들어 있으면 그것도 키로 등록 (스레드 답글 대응)
+    resp_thread_ts = (resp.get("message") or resp or {}).get("thread_ts")
+
+    draft_data = {
+        "user_id": user_id,
+        "info": dict(info),
+        "company": company,
+        "event_id": event_id,
+        "attendee_emails": list(attendee_emails),
+        "channel": channel,
+        "reply_ts": reply_ts,
+        "source": "summon",
+        "created_at": datetime.now().isoformat(),
+    }
+    all_ts_keys = {reply_ts, thread_ts, resp_thread_ts} - {None}
+    with _drafts_lock:
+        for ts_key in all_ts_keys:
+            _meeting_drafts[ts_key] = draft_data if ts_key == reply_ts else dict(draft_data)
+        _save_meeting_drafts()
+
+    log.info(f"미팅 소환 완료: event_id={event_id} reply_ts={reply_ts} keys={list(all_ts_keys)}")
+    return reply_ts
+
+
+def list_upcoming_meetings_for_edit(slack_client, user_id: str,
+                                     days: int = 7,
+                                     keyword: str | None = None,
+                                     channel: str | None = None,
+                                     thread_ts: str | None = None) -> None:
+    """편집할 미팅 목록 UI 발송.
+
+    days 일 이내의 향후 미팅을 조회해서 각 미팅을 '✏️ 편집' 버튼과 함께 나열한다.
+    keyword 가 주어지면 제목에 포함된 미팅만 필터.
+    """
+    try:
+        creds = user_store.get_credentials(user_id)
+    except Exception as e:
+        _post(slack_client, user_id=user_id, channel=channel, thread_ts=thread_ts,
+              text=f"⚠️ 인증 오류: {e}")
+        return
+
+    try:
+        events = cal.get_upcoming_meetings(creds, days=days, from_now=True)
+    except Exception as e:
+        log.exception("미팅 목록 조회 실패")
+        _post(slack_client, user_id=user_id, channel=channel, thread_ts=thread_ts,
+              text=f"❌ 캘린더 조회 실패: {e}")
+        return
+
+    # 종일 + 집/사무실 등은 cal 단계에서 이미 제외되지만 한 번 더 안전 처리
+    _LOCATION_TITLES = {"집", "사무실"}
+    filtered: list[dict] = []
+    kw = (keyword or "").strip().lower()
+    for ev in events:
+        summary = (ev.get("summary") or "").strip()
+        if not summary:
+            continue
+        if (ev.get("start", {}).get("dateTime") is None
+                and summary in _LOCATION_TITLES):
+            continue
+        if kw and kw not in summary.lower():
+            continue
+        filtered.append(ev)
+
+    if not filtered:
+        hint = f" (키워드: {keyword})" if keyword else f" (향후 {days}일)"
+        _post(slack_client, user_id=user_id, channel=channel, thread_ts=thread_ts,
+              text=f"📭 편집할 수 있는 미팅을 찾지 못했어요.{hint}")
+        return
+
+    capped = filtered[:25]
+    capped_note = ""
+    if len(filtered) > 25:
+        capped_note = f"\n_({len(filtered)}건 중 최대 25건만 표시)_"
+
+    blocks: list[dict] = [
+        {
+            "type": "section",
+            "text": {"type": "mrkdwn",
+                     "text": f"✏️ *편집할 미팅을 선택해주세요* ({len(capped)}건){capped_note}"},
+        },
+    ]
+    for ev in capped:
+        summary = ev.get("summary", "(제목 없음)")
+        start_str = ev.get("start", {}).get("dateTime") or ev.get("start", {}).get("date", "")
+        try:
+            time_str = format_time(start_str)
+        except Exception:
+            time_str = start_str
+        ext = (ev.get("extendedProperties") or {}).get("private") or {}
+        company = ext.get("company") or ""
+        company_tag = f" · 🏢 {company}" if company else ""
+        blocks.append({
+            "type": "section",
+            "text": {"type": "mrkdwn",
+                     "text": f"*{summary}*\n⏰ {time_str}{company_tag}"},
+            "accessory": {
+                "type": "button",
+                "text": {"type": "plain_text", "text": "✏️ 편집"},
+                "action_id": "summon_meeting_for_edit",
+                "value": ev["id"],
+            },
+        })
+
+    _post(slack_client, user_id=user_id, channel=channel, thread_ts=thread_ts,
+          text="편집할 미팅 목록", blocks=blocks)
+
+
+# ── 일정 편집 모달 (날짜·시간·장소·어젠다·제목·소요시간) ──────────
+
+
+def open_meeting_edit_modal(slack_client, *, trigger_id: str, user_id: str,
+                              event_id: str, channel: str | None = None,
+                              thread_ts: str | None = None) -> None:
+    """소환된 미팅 메시지의 '📅 일정 편집' 버튼 → 모달 오픈.
+
+    Pre-fill 우선순위: 기존 _meeting_drafts info → 캘린더 원본 이벤트.
+    """
+    # 기존 드래프트 우선 조회 (event_id 매칭)
+    draft = next(
+        (d for d in _meeting_drafts.values() if d.get("event_id") == event_id),
+        None,
+    )
+    info: dict
+    if draft and draft.get("info"):
+        info = dict(draft["info"])
+    else:
+        try:
+            creds = user_store.get_credentials(user_id)
+            event = cal.get_event(creds, event_id)
+            ext = (event.get("extendedProperties") or {}).get("private") or {}
+            info = _build_info_from_event(event, ext.get("company"))
+        except Exception as e:
+            log.warning(f"open_meeting_edit_modal: info 로드 실패: {e}")
+            info = {"title": "", "date": "", "time": "",
+                    "duration_minutes": 60, "location": "", "agenda": ""}
+
+    private_meta = json.dumps({
+        "user_id": user_id,
+        "event_id": event_id,
+        "channel": channel,
+        "thread_ts": thread_ts,
+    }, ensure_ascii=False)
+
+    def _input(block_id: str, label: str, action_id: str, *,
+               initial: str = "", optional: bool = False,
+               multiline: bool = False, placeholder: str = "") -> dict:
+        elem = {
+            "type": "plain_text_input",
+            "action_id": action_id,
+        }
+        if initial:
+            elem["initial_value"] = initial
+        if multiline:
+            elem["multiline"] = True
+        if placeholder:
+            elem["placeholder"] = {"type": "plain_text", "text": placeholder}
+        block = {
+            "type": "input",
+            "block_id": block_id,
+            "label": {"type": "plain_text", "text": label},
+            "element": elem,
+        }
+        if optional:
+            block["optional"] = True
+        return block
+
+    duration_initial = str(int(info.get("duration_minutes") or 60))
+
+    blocks = [
+        {
+            "type": "section",
+            "text": {"type": "mrkdwn",
+                     "text": "📅 *미팅 일정 편집*\n변경할 항목만 수정 후 저장하세요. 캘린더 초대도 함께 갱신됩니다."},
+        },
+        _input("title_block", "제목", "title_input",
+               initial=info.get("title") or "",
+               placeholder="예: 카카오 사전논의"),
+        _input("date_block", "날짜 (YYYY-MM-DD)", "date_input",
+               initial=info.get("date") or "",
+               placeholder="예: 2026-05-01"),
+        _input("time_block", "시간 (HH:MM, 24시간)", "time_input",
+               initial=info.get("time") or "",
+               placeholder="예: 15:00"),
+        _input("duration_block", "소요시간 (분)", "duration_input",
+               initial=duration_initial,
+               placeholder="예: 60"),
+        _input("location_block", "장소", "location_input",
+               initial=info.get("location") or "",
+               optional=True, placeholder="예: 드림플러스 8층 6인실"),
+        _input("agenda_block", "어젠다", "agenda_input",
+               initial=info.get("agenda") or "",
+               optional=True, multiline=True,
+               placeholder="회의 어젠다·논의 주제를 입력해주세요."),
+    ]
+
+    slack_client.views_open(
+        trigger_id=trigger_id,
+        view={
+            "type": "modal",
+            "callback_id": _MEETING_EDIT_MODAL_CALLBACK,
+            "title": {"type": "plain_text", "text": "미팅 일정 편집"},
+            "submit": {"type": "plain_text", "text": "저장"},
+            "close": {"type": "plain_text", "text": "취소"},
+            "private_metadata": private_meta,
+            "blocks": blocks,
+        },
+    )
+
+
+def handle_meeting_edit_modal(slack_client, user_id: str, view: dict) -> None:
+    """미팅 일정 편집 모달 제출 — 변경된 필드만 patch."""
+    values = view.get("state", {}).get("values", {}) or {}
+
+    def _val(block_id: str, action_id: str) -> str:
+        return ((values.get(block_id, {}).get(action_id, {}) or {}).get("value") or "").strip()
+
+    title = _val("title_block", "title_input")
+    date = _val("date_block", "date_input")
+    time = _val("time_block", "time_input")
+    duration_raw = _val("duration_block", "duration_input")
+    location = _val("location_block", "location_input")
+    agenda = _val("agenda_block", "agenda_input")
+
+    try:
+        meta = json.loads(view.get("private_metadata") or "{}")
+    except Exception:
+        meta = {}
+    event_id = meta.get("event_id")
+    channel = meta.get("channel") or user_id
+    thread_ts = meta.get("thread_ts")
+
+    if not event_id:
+        _post(slack_client, user_id=user_id, channel=channel, thread_ts=thread_ts,
+              text="⚠️ 미팅 정보를 찾을 수 없습니다 (event_id 누락).")
+        return
+
+    # 입력 검증
+    if date and not re.match(r"^\d{4}-\d{2}-\d{2}$", date):
+        _post(slack_client, user_id=user_id, channel=channel, thread_ts=thread_ts,
+              text=f"⚠️ 날짜 형식이 잘못되었습니다: `{date}` (예: 2026-05-01)")
+        return
+    if time and not re.match(r"^\d{2}:\d{2}$", time):
+        _post(slack_client, user_id=user_id, channel=channel, thread_ts=thread_ts,
+              text=f"⚠️ 시간 형식이 잘못되었습니다: `{time}` (예: 15:00)")
+        return
+    try:
+        duration_minutes = int(duration_raw) if duration_raw else 60
+        if duration_minutes <= 0:
+            raise ValueError("duration must be positive")
+    except (ValueError, TypeError):
+        _post(slack_client, user_id=user_id, channel=channel, thread_ts=thread_ts,
+              text=f"⚠️ 소요시간 형식이 잘못되었습니다: `{duration_raw}` (분 단위 숫자)")
+        return
+
+    # 기존 draft / 이벤트 정보 로드 (변경 비교용)
+    draft = next(
+        (d for d in _meeting_drafts.values() if d.get("event_id") == event_id),
+        None,
+    )
+    try:
+        creds = user_store.get_credentials(user_id)
+    except Exception as e:
+        _post(slack_client, user_id=user_id, channel=channel, thread_ts=thread_ts,
+              text=f"⚠️ 인증 오류: {e}")
+        return
+
+    if draft and draft.get("info"):
+        old_info = dict(draft["info"])
+    else:
+        try:
+            event = cal.get_event(creds, event_id)
+            ext = (event.get("extendedProperties") or {}).get("private") or {}
+            old_info = _build_info_from_event(event, ext.get("company"))
+        except Exception as e:
+            log.exception("handle_meeting_edit_modal: 기존 이벤트 조회 실패")
+            _post(slack_client, user_id=user_id, channel=channel, thread_ts=thread_ts,
+                  text=f"⚠️ 기존 미팅 정보 조회 실패: {e}")
+            return
+
+    # 변경 비교 — 빈 입력은 변경하지 않은 것으로 간주 (date/time/duration 은 모두 필수 입력으로 간주)
+    patch_kwargs: dict = {}
+    new_info = dict(old_info)
+    change_lines: list[str] = []
+
+    if title and title != (old_info.get("title") or ""):
+        patch_kwargs["summary"] = title
+        new_info["title"] = title
+        change_lines.append(f"제목 → *{title}*")
+
+    # 날짜·시간·소요시간 중 하나라도 바뀌면 start/end 모두 patch
+    new_date = date or old_info.get("date") or ""
+    new_time = time or old_info.get("time") or ""
+    new_duration = duration_minutes
+    old_duration = int(old_info.get("duration_minutes") or 60)
+    if (new_date != (old_info.get("date") or "")
+            or new_time != (old_info.get("time") or "")
+            or new_duration != old_duration):
+        if not new_date or not new_time:
+            _post(slack_client, user_id=user_id, channel=channel, thread_ts=thread_ts,
+                  text="⚠️ 날짜와 시간을 모두 입력해주세요.")
+            return
+        try:
+            start_dt = datetime.fromisoformat(f"{new_date}T{new_time}:00+09:00")
+            end_dt = start_dt + timedelta(minutes=new_duration)
+        except Exception as e:
+            _post(slack_client, user_id=user_id, channel=channel, thread_ts=thread_ts,
+                  text=f"⚠️ 날짜/시간 파싱 실패: {e}")
+            return
+        patch_kwargs["start_dt"] = start_dt
+        patch_kwargs["end_dt"] = end_dt
+        new_info["date"] = new_date
+        new_info["time"] = new_time
+        new_info["duration_minutes"] = new_duration
+        change_lines.append(
+            f"일시 → *{new_date} {new_time}* ({new_duration}분)"
+        )
+
+    # 장소·어젠다는 빈 입력도 의도된 비우기로 간주 (modal 에 그대로 노출되었으므로)
+    if location != (old_info.get("location") or ""):
+        patch_kwargs["location"] = location
+        new_info["location"] = location
+        change_lines.append(f"장소 → *{location or '(없음)'}*")
+    if agenda != (old_info.get("agenda") or ""):
+        patch_kwargs["description"] = agenda
+        new_info["agenda"] = agenda
+        change_lines.append(f"어젠다 → _{agenda or '(없음)'}_")
+
+    if not patch_kwargs:
+        _post(slack_client, user_id=user_id, channel=channel, thread_ts=thread_ts,
+              text="ℹ️ 변경된 항목이 없습니다.")
+        return
+
+    try:
+        cal.update_event(creds, event_id, **patch_kwargs)
+    except Exception as e:
+        log.exception("미팅 일정 편집 실패 (cal.update_event)")
+        _post(slack_client, user_id=user_id, channel=channel, thread_ts=thread_ts,
+              text=f"⚠️ 일정 업데이트 실패: {e}")
+        return
+
+    # draft 동기화
+    with _drafts_lock:
+        for d in _meeting_drafts.values():
+            if d.get("event_id") == event_id:
+                d["info"] = dict(new_info)
+        _save_meeting_drafts()
+
+    summary_text = "\n".join(f"• {line}" for line in change_lines)
+    _post(slack_client, user_id=user_id, channel=channel, thread_ts=thread_ts,
+          text=f"✅ 일정이 업데이트되었습니다.\n{summary_text}")
+
+
+def trigger_cancel_for_event(slack_client, user_id: str, event_id: str,
+                              channel: str | None = None,
+                              thread_ts: str | None = None) -> None:
+    """소환된 미팅의 '❌ 미팅 취소' 버튼 → 기존 취소 확인 UI 재사용.
+
+    cal.get_event 으로 이벤트를 조회한 뒤, 기존 _post_cancel_confirm 을 호출해
+    동일한 '취소 확정/유지' 흐름을 진행한다.
+    """
+    try:
+        creds = user_store.get_credentials(user_id)
+    except Exception as e:
+        _post(slack_client, user_id=user_id, channel=channel, thread_ts=thread_ts,
+              text=f"⚠️ 인증 오류: {e}")
+        return
+    try:
+        event = cal.get_event(creds, event_id)
+    except Exception as e:
+        log.exception("미팅 취소용 이벤트 조회 실패")
+        _post(slack_client, user_id=user_id, channel=channel, thread_ts=thread_ts,
+              text=f"⚠️ 미팅 정보를 불러오지 못했습니다: {e}")
+        return
+    _post_cancel_confirm(slack_client, user_id, event, channel, thread_ts)
