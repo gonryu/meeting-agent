@@ -1954,7 +1954,63 @@ def _generate_and_post_minutes(slack_client, *, user_id: str, title: str,
                                 attendees_raw: list | None = None,
                                 post_channel: str | None = None,
                                 post_thread_ts: str | None = None):
-    """내부용·외부용 회의록 생성 → Drive 저장 → Slack 발송 → After Agent 트리거"""
+    """내부용·외부용 회의록 생성 → Drive 저장 → Slack 발송 → After Agent 트리거.
+
+    daemon thread에서 호출되는 경우가 많아, 외곽 try/except로 사용자-facing
+    오류를 보장한다. silent crash 차단.
+    """
+    try:
+        return _generate_and_post_minutes_impl(
+            slack_client, user_id=user_id, title=title,
+            date_str=date_str, time_range=time_range, attendees=attendees,
+            transcript_text=transcript_text, notes_text=notes_text,
+            minutes_folder_id=minutes_folder_id, creds=creds,
+            event_id=event_id, attendees_raw=attendees_raw,
+            post_channel=post_channel, post_thread_ts=post_thread_ts,
+        )
+    except Exception as e:
+        log.exception(f"회의록 생성 흐름 전체 실패: user={user_id} title={title!r}")
+        try:
+            from store.user_store import is_token_expired_error
+            is_token = is_token_expired_error(e)
+        except Exception:
+            is_token = False
+        try:
+            if is_token:
+                _post(slack_client, user_id=user_id,
+                      channel=post_channel, thread_ts=post_thread_ts,
+                      text="🔐 Google 인증이 만료되었어요. `/재등록` 명령으로 다시 인증해주세요.")
+            else:
+                _post(slack_client, user_id=user_id,
+                      channel=post_channel, thread_ts=post_thread_ts,
+                      text=f"⚠️ *{title}* 회의록 생성에 실패했어요.\n_에러: {e}_\n\n"
+                           f"잠시 후 `/대기회의록` 으로 상태를 확인해보시거나, "
+                           f"문제가 계속되면 `/재등록` 시도 또는 관리자에게 알려주세요.")
+        except Exception:
+            log.exception("회의록 생성 실패 안내 메시지 발송 실패")
+        return None
+
+
+def _generate_and_post_minutes_impl(slack_client, *, user_id: str, title: str,
+                                     date_str: str, time_range: str, attendees: str,
+                                     transcript_text: str, notes_text: str,
+                                     minutes_folder_id, creds,
+                                     event_id: str | None = None,
+                                     attendees_raw: list | None = None,
+                                     post_channel: str | None = None,
+                                     post_thread_ts: str | None = None):
+    """실제 회의록 생성 본체 — _generate_and_post_minutes의 try/except 래퍼 안쪽."""
+
+    # 입력 비어있는 경우 사전 차단 (recovery flow에서 transcript/notes 모두 빈 경우)
+    if not (transcript_text or "").strip() and not (notes_text or "").strip():
+        log.warning(f"회의록 생성 입력 모두 비어있음: user={user_id} title={title!r}")
+        _post(slack_client, user_id=user_id,
+              channel=post_channel, thread_ts=post_thread_ts,
+              text=f"⚠️ *{title}* — 트랜스크립트도 노트도 없어 회의록을 만들 자료가 없어요.\n"
+                   f"_(트랜스크립트는 Google Meet 종료 후 5~10분 내 도착합니다. "
+                   f"수동 노트는 `/메모 [내용]` 으로 추가 가능)_\n"
+                   f"이 미팅에 트랜스크립트가 도착하면 자동 생성 시도합니다.")
+        return None
 
     # FR-D15: 복수 미팅 대기열 — 기존 미처리 초안이 있으면 사용자에게 알림
     # 기존 초안 목록 + [📋 자세히] [🗑️ 모두 정리] 버튼 발송
