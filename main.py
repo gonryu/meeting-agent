@@ -440,6 +440,47 @@ def _handle_question(client, text: str, user_id: str,
     client.chat_postMessage(channel=channel or user_id, thread_ts=thread_ts, text=answer)
 
 
+def _send_trello_setup_link(client, user_id: str, *,
+                            channel: str = None, thread_ts: str = None) -> None:
+    """Slash command 미등록 환경에서도 자연어로 Trello 연결 링크를 발송."""
+    if not _check_registered(client, user_id):
+        return
+    try:
+        auth_url = oauth_server.build_trello_auth_url(user_id)
+        client.chat_postMessage(
+            channel=channel or user_id,
+            thread_ts=thread_ts,
+            text="Trello 계정 연결",
+            blocks=[{
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": f"🔗 <{auth_url}|Trello 계정 연결하기>를 클릭하여 접근을 허용하세요.",
+                },
+            }],
+        )
+    except Exception as e:
+        client.chat_postMessage(
+            channel=channel or user_id,
+            thread_ts=thread_ts,
+            text=f"❌ Trello 인증 URL 생성 실패: {e}",
+        )
+
+
+def _is_trello_setup_text(text: str) -> bool:
+    normalized = re.sub(r"\s+", "", (text or "").lower())
+    return normalized in {
+        "trello",
+        "트렐로",
+        "트렐로연동",
+        "트렐로연결",
+        "trello연동",
+        "trello연결",
+        "trello연결하기",
+        "트렐로연결하기",
+    }
+
+
 _INTENT_PROMPT = """사용자의 Slack 메시지를 분석해서 의도(intent)를 분류해줘.
 
 메시지: "{text}"
@@ -809,6 +850,12 @@ def _post_company_research_result(client, *, user_id: str, company: str,
 def _route_message(text: str, client, user_id: str, channel: str = None,
                    thread_ts: str = None, user_msg_ts: str = None):
     log.info(f"메시지 라우팅 ({user_id}): {text}")
+
+    if _is_trello_setup_text(text):
+        _send_trello_setup_link(
+            client, user_id, channel=channel, thread_ts=thread_ts
+        )
+        return
 
     intent_data = _classify_intent(text)
     intent = intent_data.get("intent", "unknown")
@@ -2049,20 +2096,7 @@ def handle_dp_settings_modal(ack, body, client):
 def _trello_setup_handler(ack, body, client):
     ack()
     user_id = body["user_id"]
-    if not _check_registered(client, user_id):
-        return
-    try:
-        auth_url = oauth_server.build_trello_auth_url(user_id)
-        client.chat_postMessage(
-            channel=user_id,
-            text="Trello 계정 연결",
-            blocks=[{"type": "section", "text": {"type": "mrkdwn", "text": f"🔗 <{auth_url}|Trello 계정 연결하기>를 클릭하여 접근을 허용하세요."}}],
-        )
-    except Exception as e:
-        client.chat_postMessage(
-            channel=user_id,
-            text=f"❌ Trello 인증 URL 생성 실패: {e}",
-        )
+    _send_trello_setup_link(client, user_id)
 
 app.command("/trello")(_trello_setup_handler)
 
