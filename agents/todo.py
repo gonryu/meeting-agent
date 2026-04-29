@@ -175,15 +175,60 @@ def _safe_drive_history(user_id: str, line: str) -> None:
 
 # ── 추가 (FR-T1) ────────────────────────────────────────────
 
+def _split_multi_todos(raw_text: str) -> list[str]:
+    """멀티라인/멀티 항목 입력을 개별 todo 라인으로 분할.
+
+    - 빈 줄로 구분된 블록을 라인 단위로 평탄화
+    - 각 라인의 불릿 마커("- ", "• ", "* ", "▸ ", "▪ ", "1. ", "1) " 등) 제거
+    - 빈 라인은 스킵
+    - 단일 라인이면 [raw_text] 한 개 반환
+    """
+    if not raw_text or "\n" not in raw_text:
+        return [raw_text.strip()] if raw_text.strip() else []
+
+    lines: list[str] = []
+    for line in raw_text.split("\n"):
+        line = line.strip()
+        if not line:
+            continue
+        # 불릿/번호 마커 제거
+        for marker in ("- ", "• ", "* ", "+ ", "▸ ", "▪ ", "● ", "▶ ", "→ "):
+            if line.startswith(marker):
+                line = line[len(marker):].strip()
+                break
+        # 번호 마커 ("1. ", "1) ", "(1) ")
+        import re as _re
+        m = _re.match(r"^[\(]?\d+[\.\)\]]\s+", line)
+        if m:
+            line = line[m.end():].strip()
+        if line:
+            lines.append(line)
+
+    if len(lines) <= 1:
+        return [raw_text.strip()] if raw_text.strip() else []
+    return lines
+
+
 def handle_add(slack_client, user_id: str, raw_text: str,
                channel: str | None = None, thread_ts: str | None = None,
                source: str | None = None) -> int | None:
-    """Todo 추가. LLM 파싱 → DB 저장 → 히스토리 → Drive → Slack ack."""
-    parsed = _parse_todo_text(raw_text)
+    """Todo 추가. 멀티라인이면 여러 개 추가. LLM 파싱 → DB 저장 → 히스토리 → Drive → Slack ack."""
+    items = _split_multi_todos(raw_text)
+    if not items:
+        _post(slack_client, user_id=user_id, channel=channel, thread_ts=thread_ts,
+              text="⚠️ 할 일 본문이 비어있어요. 예: `할일 추가 내일까지 AIA 제안서 이슈 작성`")
+        return None
+
+    if len(items) > 1:
+        log.info(f"멀티 Todo 추가: user={user_id} count={len(items)}")
+        return _handle_add_multi(slack_client, user_id, items,
+                                  channel=channel, thread_ts=thread_ts, source=source)
+
+    parsed = _parse_todo_text(items[0])
     task = parsed["task"]
     if not task.strip():
         _post(slack_client, user_id=user_id, channel=channel, thread_ts=thread_ts,
-              text="⚠️ 할 일 본문이 비어있어요. 예: `@paramee 할 일 추가 내일까지 AIA 제안서 이슈 작성`")
+              text="⚠️ 할 일 본문이 비어있어요. 예: `할일 추가 내일까지 AIA 제안서 이슈 작성`")
         return None
 
     category = parsed["category"]
@@ -236,6 +281,75 @@ def handle_add(slack_client, user_id: str, raw_text: str,
 
     log.info(f"Todo 추가: id={todo_id} user={user_id} task={task!r} category={category} due={due_date}")
     return todo_id
+
+
+def _handle_add_multi(slack_client, user_id: str, items: list[str],
+                      channel: str | None = None, thread_ts: str | None = None,
+                      source: str | None = None) -> int | None:
+    """여러 항목을 한 번에 추가 — 한 메시지로 N건 응답."""
+    src_str = source
+    if not src_str and channel and thread_ts:
+        src_str = f"slack:{channel}:{thread_ts}"
+    elif not src_str and channel:
+        src_str = f"slack:{channel}"
+
+    added: list[dict] = []
+    failed: list[str] = []
+
+    for raw in items:
+        try:
+            parsed = _parse_todo_text(raw)
+            task = parsed["task"].strip()
+            if not task:
+                failed.append(raw)
+                continue
+            todo_id = user_store.add_todo(
+                user_id=user_id, task=task, category=parsed["category"],
+                due_date=parsed["due_date"], source=src_str,
+            )
+            user_store.log_todo_history(
+                todo_id, user_id, "created",
+                payload={"task": task, "category": parsed["category"],
+                         "due_date": parsed["due_date"]},
+            )
+            now_hm = datetime.now(KST).strftime("%H:%M")
+            due_part = f", due {parsed['due_date']}" if parsed["due_date"] else ""
+            _safe_drive_history(user_id,
+                                f"- {now_hm} created: {task} ({parsed['category']}{due_part})")
+            added.append({
+                "id": todo_id, "task": task,
+                "category": parsed["category"], "due_date": parsed["due_date"],
+            })
+        except Exception as e:
+            log.exception(f"Todo 추가 실패: {raw!r} — {e}")
+            failed.append(raw)
+
+    # Drive 오픈루프 1회만 갱신 (배치 후)
+    _safe_drive_upsert(user_id, force=True)
+
+    # 응답 메시지
+    if not added:
+        _post(slack_client, user_id=user_id, channel=channel, thread_ts=thread_ts,
+              text=f"⚠️ {len(items)}건 모두 추가 실패. 본문이 너무 짧거나 빈 항목이 포함되어 있을 수 있어요.")
+        return None
+
+    lines = [f"📝 *{len(added)}건* 할 일 추가됨"]
+    if failed:
+        lines.append(f"_(추가 실패 {len(failed)}건은 무시됨)_")
+    lines.append("")
+    for item in added:
+        emoji, label = _format_due(item["due_date"])
+        cat_label = _CATEGORY_LABELS.get(item["category"], item["category"])
+        due_str = f" — {label}" if label else ""
+        lines.append(f"{emoji} *#{item['id']}* {item['task']}  _({cat_label}{due_str})_")
+    text = "\n".join(lines)
+
+    blocks = [{"type": "section", "text": {"type": "mrkdwn", "text": text}}]
+    _post(slack_client, user_id=user_id, channel=channel, thread_ts=thread_ts,
+          text=text, blocks=blocks)
+
+    log.info(f"멀티 Todo 추가 완료: user={user_id} added={len(added)} failed={len(failed)}")
+    return added[0]["id"] if added else None
 
 
 # ── 조회 (FR-T2) ────────────────────────────────────────────
