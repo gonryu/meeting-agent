@@ -20,6 +20,7 @@ with patch("trello.TrelloClient"), \
     from tools.trello import (
         find_card_by_name,
         get_card_context,
+        get_lookup_diagnostic,
         create_card,
         add_checklist_items,
         add_comment,
@@ -200,6 +201,28 @@ class TestGetCardContext:
              patch.object(trello_mod, "_is_dry_run", return_value=False):
             result = get_card_context(_TEST_USER_ID, "카카오")
             assert result["incomplete_items"] == []
+
+
+class TestLookupDiagnostic:
+    def test_missing_token_diagnostic(self):
+        with patch.object(trello_mod, "_is_dry_run", return_value=False), \
+             patch.object(trello_mod.user_store, "get_trello_token", return_value=None):
+            result = get_lookup_diagnostic(_TEST_USER_ID, "다날핀테크")
+
+        assert result["status"] == "missing_token"
+        assert "미연동" in result["message"]
+
+    def test_not_found_diagnostic_includes_alias_and_board(self):
+        mock_board = MagicMock()
+        mock_board.open_cards.return_value = [_mock_card("다른회사 - PoC")]
+        with patch.object(trello_mod, "_board_for_user", return_value=mock_board), \
+             patch.object(trello_mod.user_store, "get_trello_token", return_value="token"), \
+             patch.object(trello_mod, "_is_dry_run", return_value=False):
+            result = get_lookup_diagnostic(_TEST_USER_ID, "다날핀테크")
+
+        assert result["status"] == "not_found"
+        assert "다날핀테크" in result["message"]
+        assert "카드 미발견" in result["message"]
 
 
 class TestCardMatching:

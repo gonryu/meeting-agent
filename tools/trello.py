@@ -177,6 +177,46 @@ def _find_card(user_id: str, company_name: str):
     return None
 
 
+def get_lookup_diagnostic(user_id: str, company_name: str) -> dict:
+    """Trello 카드 조회 실패 시 Slack에 보여줄 최소 진단 정보."""
+    if _is_dry_run():
+        return {"status": "dry_run", "message": "Trello DRY_RUN 모드"}
+    if not os.getenv("TRELLO_API_KEY", ""):
+        return {"status": "missing_api_key", "message": "Trello API Key 미설정"}
+    if not user_store.get_trello_token(user_id):
+        return {"status": "missing_token", "message": "Trello 계정 미연동"}
+
+    board_ids = [BOARD_ID]
+    if DEFAULT_PIPELINE_BOARD_ID not in board_ids:
+        board_ids.append(DEFAULT_PIPELINE_BOARD_ID)
+
+    searched = []
+    for board_id in board_ids:
+        board = _board_for_user(user_id, board_id)
+        if board is None:
+            searched.append(f"{board_id}: 접근 실패")
+            continue
+        try:
+            cards = board.open_cards()
+            card_names = [getattr(c, "name", "") for c in cards]
+            searched.append(f"{board_id}: {len(card_names)}개 카드 조회")
+            matches = [
+                name for name in card_names
+                if _card_matches_company(name, company_name)
+            ]
+            if matches:
+                return {"status": "found", "message": f"카드 발견: {matches[0]}"}
+        except Exception as e:
+            searched.append(f"{board_id}: 조회 실패 ({str(e)[:80]})")
+
+    aliases = ", ".join(sorted(_company_aliases(company_name)))
+    detail = "; ".join(searched) if searched else "조회 보드 없음"
+    return {
+        "status": "not_found",
+        "message": f"카드 미발견 (검색명: {company_name}, alias: {aliases}; {detail})",
+    }
+
+
 def _card_similarity(target: str, card_name: str) -> float:
     """두 문자열 간 유사도 점수 (0.0~1.0). 부분 포함·접두사·공통 토큰 기반."""
     t = target.strip().lower()

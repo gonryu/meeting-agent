@@ -780,8 +780,13 @@ def _post_company_research_result(client, *, user_id: str, company: str,
             trello_summary = before_agent._build_trello_summary(trello_context)
             trello_card_name = trello_context.get("card_name", "")
             trello_url = trello_context.get("url", "")
+        else:
+            diagnostic = before_agent.trello.get_lookup_diagnostic(user_id, company)
+            message = diagnostic.get("message", "Trello 카드 미발견")
+            trello_summary = [f"조회 안 됨: {message}"]
     except Exception as e:
         log.warning(f"Trello 기업정보 컨텍스트 조회 실패 ({company}): {e}")
+        trello_summary = [f"조회 실패: {str(e)[:120]}"]
 
     blocks = before_agent.build_company_research_block(
         company,
