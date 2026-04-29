@@ -601,6 +601,53 @@ def _filter_parameta_relevant_news(news_text: str) -> str:
     return "- 파라메타 사업 맥락의 최근 공개 정보 없음"
 
 
+_LOW_VALUE_CONNECTION_PATTERNS = (
+    "명확한 접점 없음",
+    "서비스 영역 차이",
+    "접점 제한",
+    "직접적 협력 니즈는 높지",
+    "직접적인 협업 필요성이 드러나지",
+)
+
+
+def _is_low_value_connection(line: str) -> bool:
+    text = re.sub(r"^\s*[-•]?\s*\d+[\.\)]\s*", "", (line or "").strip())
+    if not text or text in {"-", "•"}:
+        return True
+    return any(pattern in text for pattern in _LOW_VALUE_CONNECTION_PATTERNS)
+
+
+def _fallback_service_connections(company_context: str) -> str:
+    """LLM 연결점이 일반론으로 무너질 때 쓰는 결정적 fallback."""
+    context = (company_context or "").lower()
+    lines = []
+    if any(k in context for k in ("스테이블코인", "stablecoin", "x402", "정산", "결제")):
+        lines.append(
+            "- loopchain ↔ 스테이블코인 결제·정산 인프라: 발행·유통·정산 흐름의 거래 기록과 검증을 위한 블록체인 코어 기술 접점"
+        )
+    if any(k in context for k in ("kyc", "aml", "did", "신원", "인증", "금융기관", "은행")):
+        lines.append(
+            "- MyID ↔ 사용자 신원확인·KYC/AML: 금융기관 PoC와 결제 네트워크 운영에서 필요한 본인확인·규제준수 접점"
+        )
+    if any(k in context for k in ("poc", "pilot", "파일럿", "mou", "얼라이언스", "제안")):
+        lines.append(
+            "- PoC/Pilot 제안 ↔ 파라메타 기술 검증: Trello에 기록된 파일럿 제안 흐름을 기반으로 기술 검증 범위 구체화 가능"
+        )
+    return "\n".join(lines[:3])
+
+
+def _build_service_connections(company_context: str, knowledge: str) -> str:
+    generated = _to_bullet_lines(_generate(service_connection_prompt(company_context, knowledge)))
+    kept = [
+        line for line in generated.splitlines()
+        if not _is_low_value_connection(line)
+    ]
+    if kept:
+        return "\n".join(kept[:3])
+    fallback = _fallback_service_connections(company_context)
+    return fallback or generated
+
+
 def _format_email_context_section(emails: list[dict], today: str) -> str:
     """Gmail 검색 결과를 업체 Wiki의 이메일 맥락 섹션으로 정리."""
     if not emails:
@@ -749,15 +796,18 @@ def research_company(user_id: str, company_name: str, force: bool = False) -> tu
                 news_lines.append(line)
         news_text = "\n".join(news_lines)
 
-    connections = _to_bullet_lines(_generate(service_connection_prompt(news_text, knowledge)))
-    update_check_lines = _build_update_check_lines(content, today, used_orchestrator)
-
     trello_section = ""
     try:
         trello_context = trello.get_card_context(user_id, company_name, limit_comments=3)
         trello_section = _format_trello_context_section(trello_context, today)
     except Exception as e:
         log.warning(f"Trello Wiki 맥락 저장 실패 ({company_name}): {e}")
+
+    company_context_for_connections = "\n\n".join(
+        part for part in (news_text, email_section, trello_section) if part.strip()
+    )
+    connections = _build_service_connections(company_context_for_connections, knowledge)
+    update_check_lines = _build_update_check_lines(content, today, used_orchestrator)
 
     # CM-09: 이메일 섹션에 출처 태그 추가
     if email_section and "[출처:" not in email_section:

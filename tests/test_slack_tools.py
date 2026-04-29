@@ -221,6 +221,19 @@ class TestBuildCompanyResearchBlock:
         assert "다날, 원화 기반 스테이블코인 기술 검증(PoC) 순조롭게 진행 중" in text
         assert "최근 동향 정보 없음" not in text
 
+    def test_low_value_service_connections_are_hidden(self):
+        blocks = build_company_research_block(
+            "다날핀테크",
+            [],
+            [],
+            ["명확한 접점 없음", "1. 서비스 영역 차이"],
+        )
+        text = _get_text(blocks)
+
+        assert "명확한 접점 없음" not in text
+        assert "서비스 영역 차이" not in text
+        assert "분석 정보 없음" in text
+
     def test_trello_summary_and_card_link_visible(self):
         blocks = build_company_research_block(
             "다날",

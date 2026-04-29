@@ -192,6 +192,25 @@ def _format_news_line_for_slack(news: str) -> str:
     return f"<{url}|{title}>"
 
 
+_LOW_VALUE_CONNECTION_PATTERNS = (
+    "명확한 접점 없음",
+    "서비스 영역 차이",
+    "접점 제한",
+    "직접적 협력 니즈는 높지",
+    "직접적인 협업 필요성이 드러나지",
+)
+
+
+def _format_connection_line_for_slack(conn: str) -> str:
+    cleaned = _strip_display_markdown(conn)
+    cleaned = re.sub(r"^\s*\d+[\.\)]\s*", "", cleaned).strip()
+    if not cleaned:
+        return ""
+    if any(pattern in cleaned for pattern in _LOW_VALUE_CONNECTION_PATTERNS):
+        return ""
+    return cleaned
+
+
 def build_company_research_block(
     company_name: str,
     news_lines: list[str],
@@ -230,11 +249,15 @@ def build_company_research_block(
     lines.append("")
 
     lines.append("🔗  *파라메타 서비스 연결점*")
-    if connection_lines:
-        for conn in connection_lines[:3]:
-            cleaned = _strip_display_markdown(conn)
-            if cleaned:
-                lines.append(f"• {cleaned}")
+    formatted_connections = [
+        cleaned for cleaned in (
+            _format_connection_line_for_slack(conn) for conn in connection_lines
+        )
+        if cleaned
+    ]
+    if formatted_connections:
+        for conn in formatted_connections[:3]:
+            lines.append(f"• {conn}")
     else:
         lines.append("• 분석 정보 없음")
 
