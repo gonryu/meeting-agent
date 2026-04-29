@@ -898,16 +898,37 @@ def _try_direct_todo_route(text: str) -> tuple[str, dict] | None:
             # 첫 줄이 트리거뿐이고 나머지도 비었으면 안내
             return ("todo_add_empty", {})
 
-    # 조회 트리거 (본문 없어도 됨)
-    list_triggers = ["할 일 목록", "할일 목록", "투두 목록",
-                     "할 일 보여줘", "할일 보여줘",
-                     "todo list", "todo 목록"]
+    # 조회 트리거 — 자연어 다양한 변형 모두 지원
+    list_triggers = [
+        # 명시 트리거
+        "할 일 목록", "할일 목록", "투두 목록",
+        "할 일 리스트", "할일 리스트", "투두 리스트",
+        "todo list", "todo 목록", "todo 리스트",
+        # 보여줘 류
+        "할 일 보여줘", "할일 보여줘", "투두 보여줘",
+        # 내/오늘 등 한정사
+        "내 할 일", "내 할일", "내 투두",
+        "오늘 할 일", "오늘 할일", "오늘 투두",
+        "할 일 확인", "할일 확인",
+    ]
     for trig in list_triggers:
         if stripped.lower().startswith(trig.lower()):
             return ("todo_list", {})
     # 단독 키워드
     if stripped.lower() in {"할 일", "할일", "todo", "투두"}:
         return ("todo_list", {})
+    # 폴백 휴리스틱: "할일"/"할 일"/"투두"/"todo"로 시작 + 명시 명령어 없음 + 뒷 단어가 짧으면 목록으로 해석
+    # 예: "할일 뭐 있어", "투두 뭐", "todo 보여줘" 등
+    todo_prefixes = ("할 일 ", "할일 ", "투두 ", "todo ")
+    for kw in todo_prefixes:
+        if stripped.lower().startswith(kw):
+            tail = stripped[len(kw):].strip().lower()
+            # 명시적 다른 동작 키워드면 LLM에 위임
+            if any(t in tail for t in ("추가", "등록", "완료", "취소", "삭제", "지워",
+                                          "수정", "변경", "마감", "바꿔", "고쳐")):
+                break
+            # 그 외는 목록 의도로 간주
+            return ("todo_list", {})
 
     return None
 

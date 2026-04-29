@@ -450,17 +450,52 @@ def _build_active_blocks(active: list[dict],
 
 def handle_list(slack_client, user_id: str,
                 channel: str | None = None, thread_ts: str | None = None) -> None:
-    """현재 활성 Todo + 최근 완료 5건을 Block Kit 으로 출력."""
-    active = user_store.list_active_todos(user_id)
-    recent = user_store.list_recent_completed(user_id, 5)
+    """현재 활성 Todo + 최근 완료 5건을 Block Kit 으로 출력. silent fail 차단."""
+    log.info(f"Todo 목록 조회 요청: user={user_id}")
+    try:
+        active = user_store.list_active_todos(user_id)
+        recent = user_store.list_recent_completed(user_id, 5)
+    except Exception as e:
+        log.exception(f"Todo 목록 DB 조회 실패: user={user_id}")
+        _post(slack_client, user_id=user_id, channel=channel, thread_ts=thread_ts,
+              text=f"⚠️ 할 일 목록을 불러오지 못했어요. 잠시 후 다시 시도해주세요.\n_(에러: {e})_")
+        return
+
+    log.info(f"Todo 목록 결과: user={user_id} active={len(active)} recent={len(recent)}")
     today = datetime.now(KST)
 
-    blocks = _build_active_blocks(active, recent, today)
+    try:
+        blocks = _build_active_blocks(active, recent, today)
+    except Exception as e:
+        log.exception(f"Todo 블록 빌드 실패: user={user_id}")
+        # 폴백: 단순 텍스트로라도 응답
+        text_lines = [f"📋 내 할 일 — 활성 *{len(active)}* / 최근 완료 *{len(recent)}*"]
+        if not active:
+            text_lines.append("_활성 할 일이 없어요. `할 일 추가 …` 으로 시작하세요._")
+        else:
+            for t in active[:20]:
+                due = t.get("due_date") or "—"
+                text_lines.append(f"• #{t.get('id')} {t.get('task','')} (마감 {due})")
+        _post(slack_client, user_id=user_id, channel=channel, thread_ts=thread_ts,
+              text="\n".join(text_lines))
+        return
+
     fallback = f"📋 내 할 일 — 활성 {len(active)}건"
-    _post(slack_client, user_id=user_id, channel=channel, thread_ts=thread_ts,
-          text=fallback, blocks=blocks)
+    try:
+        _post(slack_client, user_id=user_id, channel=channel, thread_ts=thread_ts,
+              text=fallback, blocks=blocks)
+    except Exception as e:
+        log.exception(f"Todo 목록 게시 실패: user={user_id}")
+        # 텍스트만이라도
+        _post(slack_client, user_id=user_id, channel=channel, thread_ts=thread_ts,
+              text=fallback + "  (블록 렌더링 실패)")
+        return
+
     # 조회 시점에도 Drive 미러 동기화 보장 (force=False — 디바운스 적용)
-    _safe_drive_upsert(user_id)
+    try:
+        _safe_drive_upsert(user_id)
+    except Exception as e:
+        log.warning(f"Drive 미러 갱신 실패 (무시): user={user_id} — {e}")
 
 
 # ── 완료/취소/삭제 (FR-T3) ──────────────────────────────────
