@@ -166,6 +166,10 @@ def _format_news_line_for_slack(news: str) -> str:
     if any(news.startswith(label) for label in overview_labels):
         return ""
 
+    slack_link = re.search(r"<(https?://[^|>\s]+)\|([^>]+)>", news)
+    if slack_link:
+        return f"<{slack_link.group(1)}|{slack_link.group(2).strip()}>"
+
     md_link = re.search(r"\[([^\]]+)\]\((https?://[^)\s]+)\)", news)
     if md_link:
         return f"<{md_link.group(2)}|{md_link.group(1).strip()}>"

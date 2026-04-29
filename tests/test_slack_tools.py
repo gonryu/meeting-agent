@@ -198,6 +198,17 @@ class TestBuildCompanyResearchBlock:
         assert "• 산업 위치" not in text
         assert "최근 동향 정보 없음" in text
 
+    def test_existing_slack_news_link_preserved(self):
+        blocks = build_company_research_block(
+            "다날핀테크",
+            ["<https://example.com/a|다날, 원화 기반 스테이블코인 PoC 진행>"],
+            [],
+            [],
+        )
+        text = _get_text(blocks)
+
+        assert "<https://example.com/a|다날, 원화 기반 스테이블코인 PoC 진행>" in text
+
     def test_trello_summary_and_card_link_visible(self):
         blocks = build_company_research_block(
             "다날",
