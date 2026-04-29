@@ -1957,15 +1957,33 @@ def _generate_and_post_minutes(slack_client, *, user_id: str, title: str,
     """내부용·외부용 회의록 생성 → Drive 저장 → Slack 발송 → After Agent 트리거"""
 
     # FR-D15: 복수 미팅 대기열 — 기존 미처리 초안이 있으면 사용자에게 알림
+    # 기존 초안 목록 + [📋 자세히] [🗑️ 모두 정리] 버튼 발송
     existing_drafts = [
         (eid, d) for eid, d in _pending_minutes.items()
         if d.get("user_id") == user_id
     ]
     if existing_drafts:
-        existing_titles = ", ".join(f"*{d['title']}*" for _, d in existing_drafts)
-        _post(slack_client, user_id=user_id,
-              text=f"ℹ️ 검토 대기 중인 회의록이 있습니다: {existing_titles}\n"
-                   f"*{title}* 회의록을 추가로 생성합니다.")
+        try:
+            blocks = _build_pending_notice_blocks(
+                existing=existing_drafts, new_title=title,
+            )
+            _post(
+                slack_client,
+                user_id=user_id,
+                channel=post_channel or user_id,
+                thread_ts=post_thread_ts,
+                text=(
+                    f"ℹ️ 검토 대기 중인 회의록 {len(existing_drafts)}건이 있어요. "
+                    f"*{title}* 회의록을 추가로 생성합니다."
+                ),
+                blocks=blocks,
+            )
+        except Exception as e:
+            log.warning(f"검토 대기 안내 블록 발송 실패, 텍스트로 폴백: {e}")
+            existing_titles = ", ".join(f"*{d['title']}*" for _, d in existing_drafts)
+            _post(slack_client, user_id=user_id,
+                  text=f"ℹ️ 검토 대기 중인 회의록이 있습니다: {existing_titles}\n"
+                       f"*{title}* 회의록을 추가로 생성합니다.")
 
     meeting_date = f"{date_str} {time_range}".strip()
 
@@ -2079,6 +2097,8 @@ def _generate_and_post_minutes(slack_client, *, user_id: str, title: str,
         # B2: 세션이 채널에서 시작된 경우 초안도 해당 채널(+스레드)로 응답
         "channel": post_channel or user_id,
         "thread_ts": post_thread_ts,
+        # 검토 대기 회의록 안내 — 생성 시각 (한국시간 ISO)
+        "created_at": datetime.now(KST).isoformat(),
     }
     _save_pending_minutes()
     _post_minutes_draft(slack_client, user_id=user_id, draft_key=draft_key)
@@ -2601,6 +2621,492 @@ def handle_minutes_edit_reply(slack_client, user_id: str, edit_text: str,
     draft["draft_ts"] = None  # 새 메시지로 재발송
     _save_pending_minutes()
     _post_minutes_draft(slack_client, user_id=user_id, draft_key=draft_key)
+
+
+# ── 검토 대기 회의록 관리 (대기 목록 / 일괄 정리) ─────────────
+
+
+def _format_pending_age(created_at_iso: str | None) -> str:
+    """검토 대기 회의록의 경과 시간 표시.
+
+    "방금 전" / "N분 전" / "N시간 전" / "N일 전" / "N주 전" 형태.
+    `created_at_iso`가 없거나 파싱 실패면 "이전" 반환.
+    """
+    if not created_at_iso:
+        return "이전"
+    try:
+        created = datetime.fromisoformat(created_at_iso)
+        if created.tzinfo is None:
+            created = created.replace(tzinfo=KST)
+    except Exception:
+        return "이전"
+
+    now = datetime.now(KST)
+    delta = now - created
+    seconds = int(delta.total_seconds())
+    if seconds < 0:
+        return "방금 전"
+    if seconds < 60:
+        return "방금 전"
+    minutes = seconds // 60
+    if minutes < 60:
+        return f"{minutes}분 전"
+    hours = minutes // 60
+    if hours < 24:
+        return f"{hours}시간 전"
+    days = hours // 24
+    if days < 7:
+        return f"{days}일 전"
+    weeks = days // 7
+    return f"{weeks}주 전"
+
+
+def _pending_drafts_for_user(user_id: str) -> list[tuple[str, dict]]:
+    """user_id의 검토 대기 회의록을 오래된 순으로 정렬하여 반환.
+
+    정렬 키: created_at(있으면) → 없는 항목은 가장 오래된 것으로 간주(맨 앞).
+    """
+    items = [
+        (key, draft) for key, draft in _pending_minutes.items()
+        if draft.get("user_id") == user_id
+    ]
+
+    def _sort_key(it):
+        created = (it[1] or {}).get("created_at") or ""
+        # created_at 없는 항목은 빈 문자열 → 가장 앞으로
+        return created
+
+    items.sort(key=_sort_key)
+    return items
+
+
+def _source_label_short(draft: dict) -> str:
+    """초안의 입력 소스를 짧게 표시 (트랜스크립트 / 노트만 / 트랜스크립트+노트 / 없음)."""
+    label = (draft or {}).get("source_label")
+    if label:
+        return label
+    if draft.get("transcript_text") and draft.get("notes_text"):
+        return "트랜스크립트 + 수동 노트"
+    if draft.get("transcript_text"):
+        return "트랜스크립트"
+    if draft.get("notes_text"):
+        return "노트만"
+    return "없음"
+
+
+def _build_pending_notice_blocks(*, existing: list[tuple[str, dict]],
+                                  new_title: str) -> list[dict]:
+    """새 회의록 생성 시 표시되는 "검토 대기 안내" 메시지 블록 (FR-D15 개선판).
+
+    상단 안내 + 상위 2건 미리보기 + [📋 대기 목록 자세히] [🗑️ 모두 정리] 버튼.
+    """
+    count = len(existing)
+    sorted_items = sorted(
+        existing,
+        key=lambda it: (it[1] or {}).get("created_at") or "",
+    )
+
+    # 미리보기는 상위 2건만 (오래된 순)
+    preview_lines = []
+    for _, draft in sorted_items[:2]:
+        title = draft.get("title") or "(제목 없음)"
+        age = _format_pending_age(draft.get("created_at"))
+        preview_lines.append(f"• {title} ({age})")
+    if count > 2:
+        preview_lines.append(f"_…외 {count - 2}건_")
+
+    header_text = (
+        f"ℹ️ 검토 대기 중인 회의록 *{count}건*이 있어요.\n"
+        f"이번엔 *{new_title}* 회의록을 추가로 생성합니다."
+    )
+
+    blocks: list[dict] = [
+        {"type": "section", "text": {"type": "mrkdwn", "text": header_text}},
+    ]
+    if preview_lines:
+        blocks.append({
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": "*대기 목록*\n" + "\n".join(preview_lines),
+            },
+        })
+    blocks.append({
+        "type": "actions",
+        "elements": [
+            {
+                "type": "button",
+                "text": {"type": "plain_text", "text": "📋 대기 목록 자세히"},
+                "action_id": "pending_drafts_view",
+                "value": "view",
+            },
+            {
+                "type": "button",
+                "text": {"type": "plain_text", "text": "🗑️ 모두 정리"},
+                "action_id": "pending_drafts_cleanup_all",
+                "style": "danger",
+                "value": "cleanup_all",
+            },
+        ],
+    })
+    return blocks
+
+
+def build_pending_drafts_blocks(user_id: str,
+                                 slack_client=None) -> list[dict]:
+    """검토 대기 회의록 전체 목록 메시지 블록 생성.
+
+    각 항목에 [📝 검토] [🗑️ 버리기] 버튼, 하단에 [🗑️ 모두 정리] 버튼.
+    `slack_client` 인자는 호출 호환성을 위해 받지만 현재는 사용하지 않음.
+    """
+    items = _pending_drafts_for_user(user_id)
+    count = len(items)
+
+    if count == 0:
+        return [
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": "✅ 검토 대기 중인 회의록이 없습니다.",
+                },
+            }
+        ]
+
+    blocks: list[dict] = [
+        {
+            "type": "header",
+            "text": {
+                "type": "plain_text",
+                "text": f"📋 검토 대기 회의록 {count}건",
+            },
+        }
+    ]
+
+    for idx, (key, draft) in enumerate(items, start=1):
+        title = draft.get("title") or "(제목 없음)"
+        created_at = draft.get("created_at")
+        age = _format_pending_age(created_at)
+        # 생성 시각 표시 — ISO 파싱 가능하면 'YYYY-MM-DD HH:MM'
+        created_disp = "-"
+        if created_at:
+            try:
+                dt = datetime.fromisoformat(created_at)
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=KST)
+                created_disp = dt.astimezone(KST).strftime("%Y-%m-%d %H:%M")
+            except Exception:
+                created_disp = created_at
+        source = _source_label_short(draft)
+        body = (
+            f"*{idx}. {title}*\n"
+            f"_생성_: {created_disp} ({age}) · _입력_: {source}"
+        )
+        blocks.append({
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": body},
+        })
+        blocks.append({
+            "type": "actions",
+            "elements": [
+                {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "📝 검토"},
+                    "action_id": "pending_draft_review",
+                    "value": key,
+                    "style": "primary",
+                },
+                {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "🗑️ 버리기"},
+                    "action_id": "pending_draft_discard",
+                    "value": key,
+                    "style": "danger",
+                },
+            ],
+        })
+
+    # 하단 — 모두 정리 버튼
+    blocks.append({"type": "divider"})
+    blocks.append({
+        "type": "actions",
+        "elements": [
+            {
+                "type": "button",
+                "text": {"type": "plain_text", "text": "🗑️ 모두 정리"},
+                "action_id": "pending_drafts_cleanup_all",
+                "style": "danger",
+                "value": "cleanup_all",
+            }
+        ],
+    })
+    return blocks
+
+
+def post_pending_drafts(slack_client, *, user_id: str,
+                         channel: str | None = None,
+                         thread_ts: str | None = None) -> None:
+    """검토 대기 회의록 목록 메시지 발송 (슬래시·인텐트·버튼 진입점)."""
+    blocks = build_pending_drafts_blocks(user_id, slack_client)
+    items = _pending_drafts_for_user(user_id)
+    fallback = (
+        f"📋 검토 대기 회의록 {len(items)}건"
+        if items else "검토 대기 회의록이 없습니다."
+    )
+    try:
+        slack_client.chat_postMessage(
+            channel=channel or user_id,
+            thread_ts=thread_ts,
+            text=fallback,
+            blocks=blocks,
+        )
+    except Exception as e:
+        log.warning(f"검토 대기 회의록 목록 발송 실패: {e}")
+
+
+def _replace_message_blocks(slack_client, body: dict,
+                             *, blocks: list[dict], text: str) -> None:
+    """버튼 클릭 후 원본 메시지를 새 블록으로 치환 (chat_update)."""
+    channel = (
+        (body.get("channel") or {}).get("id")
+        or (body.get("container") or {}).get("channel_id")
+    )
+    msg_ts = (
+        (body.get("message") or {}).get("ts")
+        or (body.get("container") or {}).get("message_ts")
+    )
+    if not (channel and msg_ts):
+        return
+    try:
+        slack_client.chat_update(
+            channel=channel,
+            ts=msg_ts,
+            text=text,
+            blocks=blocks,
+        )
+    except Exception as e:
+        log.warning(f"chat_update 실패 (무시): {e}")
+
+
+def _replace_clicked_actions_with_context(slack_client, body: dict,
+                                            status_label: str) -> None:
+    """클릭된 actions 블록을 상태 텍스트로 교체 (좀비 버튼 방지).
+    todo._disable_clicked_action_block 와 동일 패턴 — 단일 회의록 항목 정리용.
+    """
+    channel = (
+        (body.get("channel") or {}).get("id")
+        or (body.get("container") or {}).get("channel_id")
+    )
+    msg_ts = (
+        (body.get("message") or {}).get("ts")
+        or (body.get("container") or {}).get("message_ts")
+    )
+    if not (channel and msg_ts):
+        return
+    clicked_value = (body.get("actions") or [{}])[0].get("value", "")
+    if not clicked_value:
+        return
+    original_blocks = (body.get("message") or {}).get("blocks") or []
+    if not original_blocks:
+        return
+
+    new_blocks: list[dict] = []
+    for blk in original_blocks:
+        if blk.get("type") == "actions":
+            elements = blk.get("elements", []) or []
+            if any((el.get("value") or "") == clicked_value for el in elements):
+                new_blocks.append({
+                    "type": "context",
+                    "elements": [{"type": "mrkdwn",
+                                  "text": f"_✓ {status_label}_"}],
+                })
+                continue
+        new_blocks.append(blk)
+
+    try:
+        slack_client.chat_update(
+            channel=channel,
+            ts=msg_ts,
+            text=(body.get("message") or {}).get("text") or "검토 대기 회의록",
+            blocks=new_blocks,
+        )
+    except Exception as e:
+        log.warning(f"chat_update 실패 (무시): {e}")
+
+
+def handle_pending_view_button(slack_client, body: dict) -> None:
+    """[📋 대기 목록 자세히] 버튼 → 검토 대기 회의록 전체 목록 발송."""
+    user_id = (body.get("user") or {}).get("id")
+    if not user_id:
+        return
+    channel = (
+        (body.get("channel") or {}).get("id")
+        or (body.get("container") or {}).get("channel_id")
+        or user_id
+    )
+    thread_ts = (body.get("message") or {}).get("thread_ts")
+    post_pending_drafts(slack_client, user_id=user_id,
+                         channel=channel, thread_ts=thread_ts)
+
+
+def handle_pending_review_button(slack_client, body: dict) -> None:
+    """[📝 검토] — 해당 초안을 다시 발송 (`_post_minutes_draft`)."""
+    user_id = (body.get("user") or {}).get("id")
+    draft_key = (body.get("actions") or [{}])[0].get("value", "")
+    if not (user_id and draft_key):
+        return
+    draft = _pending_minutes.get(draft_key)
+    if not draft or draft.get("user_id") != user_id:
+        try:
+            slack_client.chat_postMessage(
+                channel=user_id,
+                text="⚠️ 해당 회의록 초안을 찾을 수 없습니다 (이미 처리되었을 수 있어요).",
+            )
+        except Exception:
+            pass
+        return
+    # 새 검토 메시지 발송 — 기존 draft_ts 무효화
+    draft["draft_ts"] = None
+    _save_pending_minutes()
+    _post_minutes_draft(slack_client, user_id=user_id, draft_key=draft_key)
+
+
+def handle_pending_discard_button(slack_client, body: dict) -> None:
+    """[🗑️ 버리기] — 단일 초안 삭제 (확인 없이 즉시 처리)."""
+    user_id = (body.get("user") or {}).get("id")
+    draft_key = (body.get("actions") or [{}])[0].get("value", "")
+    if not (user_id and draft_key):
+        return
+    draft = _pending_minutes.get(draft_key)
+    if not draft or draft.get("user_id") != user_id:
+        # 이미 정리된 경우에도 UX 일관성을 위해 안내만
+        _replace_clicked_actions_with_context(slack_client, body, "이미 처리됨")
+        return
+    title = draft.get("title") or "(제목 없음)"
+    # 단일 항목 삭제 — _save_pending_minutes로 영속화
+    _pending_minutes.pop(draft_key, None)
+    _save_pending_minutes()
+    log.info(f"검토 대기 회의록 단일 버리기: user={user_id} key={draft_key} title={title}")
+    _replace_clicked_actions_with_context(
+        slack_client, body, f"버림 — {title}",
+    )
+
+
+def _build_cleanup_confirm_blocks(count: int) -> list[dict]:
+    return [
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": (
+                    f"⚠️ 검토 대기 회의록 *{count}건*을 모두 버립니다. "
+                    f"되돌릴 수 없어요."
+                ),
+            },
+        },
+        {
+            "type": "actions",
+            "elements": [
+                {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "✅ 모두 버림"},
+                    "action_id": "pending_drafts_cleanup_confirm",
+                    "style": "danger",
+                    "value": "confirm",
+                },
+                {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "❌ 취소"},
+                    "action_id": "pending_drafts_cleanup_cancel",
+                    "value": "cancel",
+                },
+            ],
+        },
+    ]
+
+
+def handle_pending_cleanup_all_button(slack_client, body: dict) -> None:
+    """[🗑️ 모두 정리] — 일괄 삭제 확인 프롬프트 발송."""
+    user_id = (body.get("user") or {}).get("id")
+    if not user_id:
+        return
+    channel = (
+        (body.get("channel") or {}).get("id")
+        or (body.get("container") or {}).get("channel_id")
+        or user_id
+    )
+    thread_ts = (body.get("message") or {}).get("thread_ts")
+    items = _pending_drafts_for_user(user_id)
+    count = len(items)
+    if count == 0:
+        try:
+            slack_client.chat_postMessage(
+                channel=channel,
+                thread_ts=thread_ts,
+                text="✅ 검토 대기 회의록이 없습니다.",
+            )
+        except Exception:
+            pass
+        return
+    blocks = _build_cleanup_confirm_blocks(count)
+    try:
+        slack_client.chat_postMessage(
+            channel=channel,
+            thread_ts=thread_ts,
+            text=f"⚠️ 검토 대기 회의록 {count}건 모두 버리시겠어요?",
+            blocks=blocks,
+        )
+    except Exception as e:
+        log.warning(f"일괄 정리 확인 메시지 발송 실패: {e}")
+
+
+def handle_pending_cleanup_confirm_button(slack_client, body: dict) -> None:
+    """[✅ 모두 버림] — 검토 대기 회의록 전체 삭제 (실제 정리)."""
+    user_id = (body.get("user") or {}).get("id")
+    if not user_id:
+        return
+    items = _pending_drafts_for_user(user_id)
+    count = len(items)
+    for key, _draft in items:
+        _pending_minutes.pop(key, None)
+    if items:
+        _save_pending_minutes()
+    log.info(f"검토 대기 회의록 일괄 정리: user={user_id} count={count}")
+
+    # 원본 확인 메시지를 결과 안내로 치환
+    new_blocks = [
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": (
+                    f"🗑️ 검토 대기 회의록 *{count}건*을 모두 버렸습니다."
+                    if count else "✅ 정리할 회의록이 없습니다."
+                ),
+            },
+        }
+    ]
+    _replace_message_blocks(
+        slack_client, body, blocks=new_blocks,
+        text=f"🗑️ 검토 대기 회의록 {count}건 정리 완료",
+    )
+
+
+def handle_pending_cleanup_cancel_button(slack_client, body: dict) -> None:
+    """[❌ 취소] — 일괄 정리 확인 취소 (메시지에서 버튼 제거)."""
+    new_blocks = [
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": "↩️ 일괄 정리를 취소했습니다.",
+            },
+        }
+    ]
+    _replace_message_blocks(
+        slack_client, body, blocks=new_blocks,
+        text="일괄 정리 취소됨",
+    )
 
 
 # ── 유틸리티 ──────────────────────────────────────────────────

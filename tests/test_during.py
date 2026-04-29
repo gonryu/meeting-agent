@@ -907,6 +907,82 @@ class TestUtilFunctions:
         assert attendees_str == "정보 없음"
 
 
+# ── 검토 대기 회의록 헬퍼 ─────────────────────────────────────
+
+class TestPendingDraftsHelpers:
+    """검토 대기 회의록 안내·목록 헬퍼."""
+
+    def setup_method(self):
+        _pending_minutes.clear()
+
+    def test_format_pending_age_buckets(self):
+        """ISO 시각 → '방금 전 / N분 전 / N시간 전 / N일 전 / N주 전' 분기."""
+        now = datetime.now(KST)
+        cases = [
+            (now - timedelta(seconds=10), "방금 전"),
+            (now - timedelta(minutes=5), "5분 전"),
+            (now - timedelta(hours=3), "3시간 전"),
+            (now - timedelta(days=2), "2일 전"),
+            (now - timedelta(days=21), "3주 전"),
+        ]
+        for created, expected in cases:
+            assert during._format_pending_age(created.isoformat()) == expected
+
+        # 빈 값 또는 파싱 불가 → "이전"
+        assert during._format_pending_age(None) == "이전"
+        assert during._format_pending_age("not-a-date") == "이전"
+
+    def test_build_pending_drafts_blocks_includes_per_item_buttons(self):
+        """대기 목록 블록 — 항목별 [📝 검토] [🗑️ 버리기] + 하단 [🗑️ 모두 정리]."""
+        now = datetime.now(KST)
+        _pending_minutes["k1"] = {
+            "user_id": _TEST_USER,
+            "title": "NIPA 협의",
+            "created_at": (now - timedelta(days=3)).isoformat(),
+            "source_label": "트랜스크립트",
+        }
+        _pending_minutes["k2"] = {
+            "user_id": _TEST_USER,
+            "title": "미팅",
+            "created_at": (now - timedelta(hours=1)).isoformat(),
+            "notes_text": "메모",
+        }
+        # 다른 사용자의 초안은 무시되어야 함
+        _pending_minutes["k3"] = {
+            "user_id": "OTHER",
+            "title": "남의 미팅",
+            "created_at": now.isoformat(),
+        }
+
+        blocks = during.build_pending_drafts_blocks(_TEST_USER)
+
+        # 헤더 + 2건(섹션+actions씩) + divider + 모두정리 actions
+        action_blocks = [b for b in blocks if b.get("type") == "actions"]
+        # 항목별 actions(2개) + 하단 모두정리(1개) = 3
+        assert len(action_blocks) == 3
+        per_item_action_ids = {
+            (el.get("action_id"), el.get("value"))
+            for blk in action_blocks[:2]
+            for el in blk.get("elements", [])
+        }
+        assert ("pending_draft_review", "k1") in per_item_action_ids
+        assert ("pending_draft_discard", "k1") in per_item_action_ids
+        assert ("pending_draft_review", "k2") in per_item_action_ids
+        assert ("pending_draft_discard", "k2") in per_item_action_ids
+        # 하단 actions는 모두 정리
+        cleanup_ids = [
+            el.get("action_id") for el in action_blocks[-1].get("elements", [])
+        ]
+        assert "pending_drafts_cleanup_all" in cleanup_ids
+
+    def test_build_pending_drafts_blocks_empty(self):
+        """대기 회의록 0건이면 안내 섹션만 발송."""
+        blocks = during.build_pending_drafts_blocks(_TEST_USER)
+        assert len(blocks) == 1
+        assert blocks[0]["type"] == "section"
+        assert "없습니다" in blocks[0]["text"]["text"]
+
+
 # ── 세션 파일 영속성 ──────────────────────────────────────────
 
 class TestSessionPersistence:
