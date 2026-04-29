@@ -672,6 +672,48 @@ def build_todo_block(user_id: str, today_date: datetime | None = None) -> list[d
 
 # ── 버튼 라우팅 ──────────────────────────────────────────────
 
+def _disable_clicked_action_block(slack_client, body: dict, status_label: str) -> None:
+    """버튼 클릭 후 원본 메시지의 해당 actions 블록을 상태 표시 텍스트로 교체.
+
+    동일 todo의 좀비 버튼 클릭 방지 — '완료해놓고 삭제 누르는' 케이스 차단.
+    같은 메시지 내 다른 todo의 actions 블록은 그대로 유지.
+    """
+    channel = (body.get("channel") or {}).get("id") or (body.get("container") or {}).get("channel_id")
+    msg_ts = (body.get("message") or {}).get("ts") or (body.get("container") or {}).get("message_ts")
+    if not (channel and msg_ts):
+        return
+    clicked_value = (body.get("actions") or [{}])[0].get("value", "")
+    if not clicked_value:
+        return
+
+    original_blocks = (body.get("message") or {}).get("blocks") or []
+    if not original_blocks:
+        return
+
+    new_blocks: list[dict] = []
+    for blk in original_blocks:
+        if blk.get("type") == "actions":
+            elements = blk.get("elements", []) or []
+            # 이 actions 블록이 클릭된 버튼(=todo_id)에 속하면 상태 텍스트로 교체
+            if any((el.get("value") or "") == clicked_value for el in elements):
+                new_blocks.append({
+                    "type": "context",
+                    "elements": [{"type": "mrkdwn", "text": f"_✓ {status_label}_"}],
+                })
+                continue
+        new_blocks.append(blk)
+
+    try:
+        slack_client.chat_update(
+            channel=channel,
+            ts=msg_ts,
+            blocks=new_blocks,
+            text=(body.get("message") or {}).get("text") or "할 일 처리됨",
+        )
+    except Exception as e:
+        log.warning(f"chat_update 실패 (무시): {e}")
+
+
 def handle_complete_button(slack_client, body: dict) -> None:
     user_id = body["user"]["id"]
     todo_id = body.get("actions", [{}])[0].get("value", "")
@@ -681,6 +723,7 @@ def handle_complete_button(slack_client, body: dict) -> None:
     msg_thread_ts = (body.get("message") or {}).get("thread_ts")
     handle_complete(slack_client, user_id=user_id, target=int(todo_id),
                     channel=msg_channel, thread_ts=msg_thread_ts)
+    _disable_clicked_action_block(slack_client, body, "완료됨")
 
 
 def handle_cancel_button(slack_client, body: dict) -> None:
@@ -692,6 +735,7 @@ def handle_cancel_button(slack_client, body: dict) -> None:
     msg_thread_ts = (body.get("message") or {}).get("thread_ts")
     handle_cancel(slack_client, user_id=user_id, target=int(todo_id),
                   channel=msg_channel, thread_ts=msg_thread_ts)
+    _disable_clicked_action_block(slack_client, body, "취소됨")
 
 
 def handle_delete_button(slack_client, body: dict) -> None:
@@ -703,6 +747,7 @@ def handle_delete_button(slack_client, body: dict) -> None:
     msg_thread_ts = (body.get("message") or {}).get("thread_ts")
     handle_delete(slack_client, user_id=user_id, target=int(todo_id),
                   channel=msg_channel, thread_ts=msg_thread_ts)
+    _disable_clicked_action_block(slack_client, body, "삭제됨")
 
 
 # ── 자연어 의도 파서 (완료/취소/삭제/수정) ─────────────────
