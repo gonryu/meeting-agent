@@ -870,15 +870,85 @@ def _post_company_research_result(client, *, user_id: str, company: str,
     )
 
 
+def _try_direct_todo_route(text: str) -> tuple[str, dict] | None:
+    """Todo 트리거 단어로 시작하면 LLM 분류 없이 직접 라우팅.
+
+    LLM 분류기가 멀티라인이나 복잡한 입력에서 실패하는 경우를 우회.
+    Returns (intent, params) or None.
+    """
+    if not text:
+        return None
+    stripped = text.strip()
+    if not stripped:
+        return None
+
+    # 첫 줄을 기준으로 트리거 매칭 (멀티라인이면 본문은 나머지)
+    first_line = stripped.split("\n", 1)[0].strip()
+    rest = stripped[len(first_line):].lstrip("\n").rstrip()
+
+    # 추가 트리거 (본문 필요)
+    add_triggers = ["할 일 추가", "할일 추가", "할일추가", "투두 추가", "todo add", "todo:"]
+    for trig in add_triggers:
+        if first_line.lower().startswith(trig.lower()):
+            head_body = first_line[len(trig):].strip(" :,-")
+            full_body = head_body + ("\n" + rest if rest else "")
+            full_body = full_body.strip()
+            if full_body:
+                return ("todo_add", {"raw": full_body})
+            # 첫 줄이 트리거뿐이고 나머지도 비었으면 안내
+            return ("todo_add_empty", {})
+
+    # 조회 트리거 (본문 없어도 됨)
+    list_triggers = ["할 일 목록", "할일 목록", "투두 목록",
+                     "할 일 보여줘", "할일 보여줘",
+                     "todo list", "todo 목록"]
+    for trig in list_triggers:
+        if stripped.lower().startswith(trig.lower()):
+            return ("todo_list", {})
+    # 단독 키워드
+    if stripped.lower() in {"할 일", "할일", "todo", "투두"}:
+        return ("todo_list", {})
+
+    return None
+
+
 def _route_message(text: str, client, user_id: str, channel: str = None,
                    thread_ts: str = None, user_msg_ts: str = None):
-    log.info(f"메시지 라우팅 ({user_id}): {text}")
+    log.info(f"메시지 라우팅 ({user_id}): {text!r}")
 
     if _is_trello_setup_text(text):
         _send_trello_setup_link(
             client, user_id, channel=channel, thread_ts=thread_ts
         )
         return
+
+    # LLM 우회 직접 라우팅 — Todo 트리거 단어로 시작하면 인텐트 분류 없이 처리
+    direct = _try_direct_todo_route(text)
+    if direct is not None:
+        intent, params = direct
+        log.info(f"직접 라우팅: intent={intent} / params keys={list(params.keys())}")
+        if intent == "todo_add_empty":
+            client.chat_postMessage(
+                channel=channel or user_id, thread_ts=thread_ts,
+                text="⚠️ 할 일 본문이 비어있어요. 예: `할일 추가 내일까지 AIA 제안서 이슈 작성`",
+            )
+            return
+        if intent == "todo_add":
+            threading.Thread(
+                target=todo_agent.handle_add,
+                args=(client, user_id, params["raw"]),
+                kwargs=dict(channel=channel, thread_ts=thread_ts),
+                daemon=True,
+            ).start()
+            return
+        if intent == "todo_list":
+            threading.Thread(
+                target=todo_agent.handle_list,
+                args=(client, user_id),
+                kwargs=dict(channel=channel, thread_ts=thread_ts),
+                daemon=True,
+            ).start()
+            return
 
     intent_data = _classify_intent(text)
     intent = intent_data.get("intent", "unknown")
