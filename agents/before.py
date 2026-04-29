@@ -637,6 +637,44 @@ def _build_trello_summary(trello_context: dict) -> list[str]:
     return summary[:3]
 
 
+def _format_trello_context_section(trello_context: dict, today: str) -> str:
+    """Trello 카드 컨텍스트를 업체 Wiki 섹션으로 변환."""
+    if not trello_context:
+        return ""
+
+    lines = [f"## Trello 맥락 `[출처: Trello, {today}]`"]
+    card_name = (trello_context.get("card_name") or "").strip()
+    url = (trello_context.get("url") or "").strip()
+    if card_name:
+        lines.append(f"- 카드: [{card_name}]({url})" if url else f"- 카드: {card_name}")
+
+    desc = re.sub(r"\s+", " ", (trello_context.get("description") or "").strip())
+    if desc:
+        lines.append(f"- 설명 요약: {desc[:500]}")
+
+    incomplete = [
+        re.sub(r"\s+", " ", (item or "").strip())
+        for item in trello_context.get("incomplete_items", [])[:5]
+        if (item or "").strip()
+    ]
+    if incomplete:
+        lines.append("- 미완료 항목:")
+        lines.extend(f"  - {item}" for item in incomplete)
+
+    comments = []
+    for comment in trello_context.get("recent_comments", [])[:3]:
+        text = re.sub(r"\s+", " ", (comment.get("text") or "").strip())
+        if not text:
+            continue
+        author = comment.get("author") or "작성자"
+        comments.append(f"{author}: {text[:200]}")
+    if comments:
+        lines.append("- 최근 코멘트:")
+        lines.extend(f"  - {item}" for item in comments)
+
+    return "\n".join(lines) + "\n"
+
+
 def _build_update_check_lines(existing_content: str | None, today: str,
                               used_orchestrator: bool) -> list[str]:
     if not existing_content:
@@ -714,6 +752,13 @@ def research_company(user_id: str, company_name: str, force: bool = False) -> tu
     connections = _to_bullet_lines(_generate(service_connection_prompt(news_text, knowledge)))
     update_check_lines = _build_update_check_lines(content, today, used_orchestrator)
 
+    trello_section = ""
+    try:
+        trello_context = trello.get_card_context(user_id, company_name, limit_comments=3)
+        trello_section = _format_trello_context_section(trello_context, today)
+    except Exception as e:
+        log.warning(f"Trello Wiki 맥락 저장 실패 ({company_name}): {e}")
+
     # CM-09: 이메일 섹션에 출처 태그 추가
     if email_section and "[출처:" not in email_section:
         email_section = email_section.replace(
@@ -745,7 +790,7 @@ def research_company(user_id: str, company_name: str, force: bool = False) -> tu
             body_for_preserve = content
         _RESEARCH_HEADERS = {
             "# ", "## 최근 동향", "## 이메일 맥락", "## 파라메타 서비스 연결점",
-            "## ParaScope", "## 업데이트 체크", "## 출처 로그",
+            "## ParaScope", "## 업데이트 체크", "## Trello 맥락", "## 출처 로그",
         }
         current_section = []
         is_preserved = False
@@ -772,13 +817,14 @@ def research_company(user_id: str, company_name: str, force: bool = False) -> tu
     new_fm = _drive_merge_frontmatter(existing_fm, fm_updates)
     fm_block = _drive_render_frontmatter(new_fm)
 
-    # 섹션 순서: 최근 동향 → 이메일 맥락 → 파라메타 서비스 연결점 → ParaScope → 보존 섹션 → 출처 로그
-    sources_log_line = f"- {today}, 웹 검색 + Gmail 자동 리서치 결과"
+    # 섹션 순서: 최근 동향 → 이메일 맥락 → Trello → 연결점 → ParaScope → 보존 섹션 → 출처 로그
+    sources_log_line = f"- {today}, 웹 검색 + Gmail + Trello 자동 리서치 결과"
     new_content = (
         fm_block
         + f"# {company_name}\n\n"
         + f"## 최근 동향\n- last_searched: {today}\n{news_text}\n\n"
         + f"{email_section}\n"
+        + f"{trello_section}\n"
         + f"## 파라메타 서비스 연결점\n{connections}\n\n"
         + f"## 업데이트 체크\n" + "\n".join(f"- {line}" for line in update_check_lines) + "\n\n"
         + f"{parascope_section}"

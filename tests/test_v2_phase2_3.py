@@ -312,6 +312,38 @@ class TestSourcesStorage:
         assert call_args[0][2] == "Research"  # subfolder
         assert "카카오" in call_args[0][3]  # filename
 
+    def test_company_research_saves_trello_context_to_wiki(self):
+        """업체 Wiki에 Trello 카드 설명/미완료/코멘트를 저장"""
+        trello_context = {
+            "card_name": "다날핀테크 - PoC/Pilot 제안",
+            "url": "https://trello.com/c/CXQzHjRn",
+            "description": "스테이블코인 파일럿 제안 진행 중",
+            "incomplete_items": ["파일럿 제안 방향 내부 정리"],
+            "recent_comments": [{"author": "김민환", "text": "다음 미팅 전 제안서 정리"}],
+        }
+        with patch.object(before, "_get_creds_and_config",
+                          return_value=(MagicMock(), "contacts_id", "knowledge_id")), \
+             patch.object(before, "drive") as mock_drive, \
+             patch.object(before, "_search", return_value="- 뉴스"), \
+             patch.object(before, "_generate", return_value="- 연결점"), \
+             patch.object(before, "gmail") as mock_gmail, \
+             patch.object(before, "trello") as mock_trello:
+            mock_drive.get_company_info.return_value = (None, None, False)
+            mock_drive.get_company_knowledge.return_value = "서비스 정보"
+            mock_drive.save_company_info.return_value = "file_123"
+            mock_drive.save_source_file.return_value = "source_123"
+            mock_gmail.search_recent_emails.return_value = []
+            mock_trello.get_card_context.return_value = trello_context
+
+            content, _ = before.research_company("UTEST", "다날핀테크", force=True)
+
+        assert "## Trello 맥락" in content
+        assert "[출처: Trello" in content
+        assert "[다날핀테크 - PoC/Pilot 제안](https://trello.com/c/CXQzHjRn)" in content
+        assert "스테이블코인 파일럿 제안 진행 중" in content
+        assert "파일럿 제안 방향 내부 정리" in content
+        assert "김민환: 다음 미팅 전 제안서 정리" in content
+
 
 # ── FR-D13: 자연어 회의록 검색 ───────────────────────────────────
 
