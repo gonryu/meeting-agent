@@ -261,6 +261,9 @@ class TestCardMatching:
         assert _card_matches_company("다날핀테크 - PoC/Pilot 제안", "다날")
         assert _card_matches_company("다날 핀테크 - PoC/Pilot 제안", "다날")
 
+    def test_spacing_variant_matches(self):
+        assert _card_matches_company("NH 상호금융 - PoC", "NH상호금융")
+
 
 # ── create_card ─────────────────────────────────────────────
 

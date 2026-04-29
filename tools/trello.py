@@ -110,6 +110,16 @@ def _normalize_company_name(name: str) -> str:
     return value
 
 
+def _normalize_company_variants(name: str) -> set[str]:
+    """공백 표기 차이를 흡수한 비교 후보."""
+    normalized = _normalize_company_name(name)
+    variants = {normalized}
+    compact = re.sub(r"\s+", "", normalized)
+    if compact:
+        variants.add(compact)
+    return {v for v in variants if v}
+
+
 def _card_company_part(card_name: str) -> str:
     """'업체명 - 사업내용' 카드명에서 업체명 부분만 추출."""
     head = re.split(r"\s+[-–—]\s+", card_name or "", maxsplit=1)[0]
@@ -124,10 +134,11 @@ def _company_aliases(company_name: str) -> set[str]:
     """
     aliases = {company_name}
     normalized_company = _normalize_company_name(company_name)
+    normalized_company_variants = _normalize_company_variants(company_name)
     for key, values in _DEFAULT_COMPANY_ALIASES.items():
         names = {key, *values}
-        normalized = {_normalize_company_name(v) for v in names if v}
-        if normalized_company in normalized:
+        normalized = set().union(*(_normalize_company_variants(v) for v in names if v))
+        if normalized_company_variants & normalized:
             aliases.update(v for v in names if v)
 
     raw = os.getenv("TRELLO_COMPANY_ALIASES", "").strip()
@@ -136,12 +147,15 @@ def _company_aliases(company_name: str) -> set[str]:
             mapping = json.loads(raw)
             for key, values in mapping.items():
                 names = {key, *values} if isinstance(values, list) else {key, values}
-                normalized = {_normalize_company_name(v) for v in names if v}
-                if normalized_company in normalized:
+                normalized = set().union(*(_normalize_company_variants(v) for v in names if v))
+                if normalized_company_variants & normalized:
                     aliases.update(v for v in names if v)
         except Exception as e:
             log.warning(f"TRELLO_COMPANY_ALIASES 파싱 실패: {e}")
-    return {_normalize_company_name(a) for a in aliases if a}
+    variants: set[str] = set()
+    for alias in aliases:
+        variants.update(_normalize_company_variants(alias))
+    return variants
 
 
 def _company_card_shortlinks(company_name: str) -> set[str]:
@@ -189,8 +203,8 @@ def _card_matches_shortlink(card, shortlinks: set[str]) -> bool:
 
 def _card_matches_company(card_name: str, company_name: str) -> bool:
     """브리핑용 정확 매칭: 카드 업체명 부분이 업체명/별칭과 같을 때만 True."""
-    company_part = _normalize_company_name(_card_company_part(card_name))
-    return company_part in _company_aliases(company_name)
+    company_parts = _normalize_company_variants(_card_company_part(card_name))
+    return bool(company_parts & _company_aliases(company_name))
 
 
 def _find_card(user_id: str, company_name: str):
