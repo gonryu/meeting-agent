@@ -404,7 +404,6 @@ def _build_active_blocks(active: list[dict],
             blocks.append({
                 "type": "section",
                 "text": {"type": "mrkdwn", "text": line},
-                "accessory": None,
             })
             blocks.append({
                 "type": "actions",
