@@ -27,6 +27,9 @@ CHECKLIST_NAME = "Action Items"
 _DEFAULT_COMPANY_ALIASES = {
     "다날": ["다날핀테크", "다날 핀테크"],
 }
+_DEFAULT_COMPANY_CARD_SHORTLINKS = {
+    "NH상호금융": ["RYIPeZxh"],
+}
 
 # ── 내부 헬퍼 ────────────────────────────────────────────────
 
@@ -141,6 +144,49 @@ def _company_aliases(company_name: str) -> set[str]:
     return {_normalize_company_name(a) for a in aliases if a}
 
 
+def _company_card_shortlinks(company_name: str) -> set[str]:
+    """업체명에 고정 매핑된 Trello 카드 shortLink 후보."""
+    shortlinks: set[str] = set()
+    normalized_company = _normalize_company_name(company_name)
+
+    for key, values in _DEFAULT_COMPANY_CARD_SHORTLINKS.items():
+        names = {key}
+        if normalized_company in {_normalize_company_name(v) for v in names}:
+            shortlinks.update(v for v in values if v)
+
+    raw = os.getenv("TRELLO_COMPANY_CARD_SHORTLINKS", "").strip()
+    if raw:
+        try:
+            mapping = json.loads(raw)
+            for key, values in mapping.items():
+                if normalized_company != _normalize_company_name(key):
+                    continue
+                if isinstance(values, list):
+                    shortlinks.update(v for v in values if v)
+                elif values:
+                    shortlinks.add(values)
+        except Exception as e:
+            log.warning(f"TRELLO_COMPANY_CARD_SHORTLINKS 파싱 실패: {e}")
+    return {s.strip() for s in shortlinks if s and s.strip()}
+
+
+def _card_matches_shortlink(card, shortlinks: set[str]) -> bool:
+    if not shortlinks:
+        return False
+    candidates = [
+        getattr(card, "shortLink", ""),
+        getattr(card, "short_link", ""),
+        getattr(card, "id", ""),
+        getattr(card, "url", ""),
+    ]
+    return any(
+        shortlink in str(candidate)
+        for shortlink in shortlinks
+        for candidate in candidates
+        if candidate
+    )
+
+
 def _card_matches_company(card_name: str, company_name: str) -> bool:
     """브리핑용 정확 매칭: 카드 업체명 부분이 업체명/별칭과 같을 때만 True."""
     company_part = _normalize_company_name(_card_company_part(card_name))
@@ -165,12 +211,16 @@ def _find_card(user_id: str, company_name: str):
         try:
             cards = board.open_cards()
             card_names = [c.name for c in cards]
+            card_shortlinks = _company_card_shortlinks(company_name)
             log.info(
                 f"Trello 카드 검색: target='{company_name}', board='{board_id}', "
                 f"보드 카드={card_names}"
             )
             for card in cards:
-                if _card_matches_company(card.name, company_name):
+                if (
+                    _card_matches_shortlink(card, card_shortlinks)
+                    or _card_matches_company(card.name, company_name)
+                ):
                     return card
         except Exception as e:
             log.warning(f"Trello 카드 검색 오류 ({board_id}): {e}")
@@ -206,14 +256,23 @@ def get_lookup_diagnostic(user_id: str, company_name: str) -> dict:
             ]
             if matches:
                 return {"status": "found", "message": f"카드 발견: {matches[0]}"}
+            shortlinks = _company_card_shortlinks(company_name)
+            shortlink_matches = [
+                getattr(card, "name", "") for card in cards
+                if _card_matches_shortlink(card, shortlinks)
+            ]
+            if shortlink_matches:
+                return {"status": "found", "message": f"카드 발견: {shortlink_matches[0]}"}
         except Exception as e:
             searched.append(f"{board_id}: 조회 실패 ({str(e)[:80]})")
 
     aliases = ", ".join(sorted(_company_aliases(company_name)))
+    shortlinks = ", ".join(sorted(_company_card_shortlinks(company_name)))
+    shortlink_part = f", card: {shortlinks}" if shortlinks else ""
     detail = "; ".join(searched) if searched else "조회 보드 없음"
     return {
         "status": "not_found",
-        "message": f"카드 미발견 (검색명: {company_name}, alias: {aliases}; {detail})",
+        "message": f"카드 미발견 (검색명: {company_name}, alias: {aliases}{shortlink_part}; {detail})",
     }
 
 

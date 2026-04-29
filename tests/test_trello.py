@@ -48,6 +48,7 @@ def _mock_card(name="카카오", card_id="card123"):
     card = MagicMock()
     card.name = name
     card.id = card_id
+    card.shortLink = card_id
     card.url = f"https://trello.com/c/{card_id}"
 
     mock_list = MagicMock()
@@ -169,6 +170,16 @@ class TestFindCardByName:
             result = find_card_by_name(_TEST_USER_ID, "카카오")
             assert result is None
 
+    def test_builtin_shortlink_mapping_matches_nh_mutual_finance(self):
+        card = _mock_card("농협 관련 카드 - PoC", "RYIPeZxh")
+        mock_board = MagicMock()
+        mock_board.open_cards.return_value = [card]
+        with patch.object(trello_mod, "_board_for_user", return_value=mock_board), \
+             patch.object(trello_mod, "_is_dry_run", return_value=False):
+            result = find_card_by_name(_TEST_USER_ID, "NH상호금융")
+
+        assert result["card_name"] == "농협 관련 카드 - PoC"
+
 
 # ── get_card_context ────────────────────────────────────────
 
@@ -223,6 +234,16 @@ class TestLookupDiagnostic:
         assert result["status"] == "not_found"
         assert "다날핀테크" in result["message"]
         assert "카드 미발견" in result["message"]
+
+    def test_diagnostic_includes_shortlink_mapping(self):
+        mock_board = MagicMock()
+        mock_board.open_cards.return_value = [_mock_card("다른회사 - PoC", "other")]
+        with patch.object(trello_mod, "_board_for_user", return_value=mock_board), \
+             patch.object(trello_mod.user_store, "get_trello_token", return_value="token"), \
+             patch.object(trello_mod, "_is_dry_run", return_value=False):
+            result = get_lookup_diagnostic(_TEST_USER_ID, "NH상호금융")
+
+        assert "RYIPeZxh" in result["message"]
 
 
 class TestCardMatching:
