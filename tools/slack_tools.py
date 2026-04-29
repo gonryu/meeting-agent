@@ -176,7 +176,7 @@ def _format_news_line_for_slack(news: str) -> str:
 
     url_m = re.search(r"https?://\S+", news)
     if not url_m:
-        return ""
+        return news
 
     url = url_m.group(0).rstrip(").,")
     title = news[:url_m.start()].strip()
