@@ -817,6 +817,169 @@ def update_obsidian_wiki(
         log.warning(f"Obsidian wiki 갱신 실패 ({kind}={name}): {e}")
 
 
+# ── Todo (할일) 미러링 (FR-T7) ──────────────────────────────────
+# DB가 단일 진실. Drive markdown은 read-only mirror.
+# - MeetingAgent/Todos/오픈루프.md: 활성 라이브 (덮어쓰기)
+# - MeetingAgent/Todos/이력.md: append-only 이력
+
+# 5분 디바운스 — 단시간 다발성 변경 시 Drive 호출 빈도 줄임
+_TODO_OPENLOOP_LAST_WRITE: dict[str, float] = {}
+
+
+def _todo_debounce_seconds() -> int:
+    try:
+        return int(os.getenv("TODO_DRIVE_DEBOUNCE_SECONDS", "300"))
+    except ValueError:
+        return 300
+
+
+def _ensure_todos_folder(creds: "Credentials", contacts_folder_id: str) -> str:
+    """MeetingAgent/Todos/ 폴더 ID 반환 (없으면 생성).
+    contacts_folder_id의 부모 위치(루트)에 MeetingAgent/Todos/ 구조를 만든다.
+    """
+    svc = _service(creds)
+    try:
+        parent_resp = svc.files().get(fileId=contacts_folder_id, fields="parents").execute()
+        root_id = parent_resp.get("parents", [None])[0]
+    except Exception:
+        root_id = None
+    meeting_agent_id = create_folder(creds, "MeetingAgent", root_id)
+    return create_folder(creds, "Todos", meeting_agent_id)
+
+
+def _format_due_label_for_md(due_date: str | None) -> str:
+    return due_date or ""
+
+
+_CATEGORY_HEADERS_MD = [
+    ("work", "## 업무 할 일"),
+    ("personal", "## 개인 할 일"),
+    ("ai", "## AI 논의 항목"),
+]
+
+
+def _render_openloop_md(user_label: str, today: str,
+                        active: list[dict], recent_done: list[dict]) -> str:
+    """오픈루프.md 본문을 렌더링."""
+    lines: list[str] = []
+    lines.append(f"# 오픈루프 — {user_label}")
+    lines.append("")
+    lines.append(f"- updated_at: {today}")
+    lines.append(f"- active_total: {len(active)}")
+    lines.append("")
+
+    grouped: dict[str, list[dict]] = {"work": [], "personal": [], "ai": []}
+    for t in active:
+        cat = t.get("category") or "work"
+        grouped.setdefault(cat, []).append(t)
+
+    for cat, header in _CATEGORY_HEADERS_MD:
+        items = grouped.get(cat, [])
+        if not items:
+            continue
+        lines.append(header)
+        for t in items:
+            opened = (t.get("opened_at") or "")[:10]
+            due = _format_due_label_for_md(t.get("due_date"))
+            source = t.get("source") or ""
+            lines.append(
+                f"- [ ] {t.get('task','')} | opened: {opened} | due: {due} | source: {source}"
+            )
+        lines.append("")
+
+    if recent_done:
+        lines.append("## 최근 완료")
+        for t in recent_done:
+            closed = (t.get("closed_at") or "")[:10]
+            source = t.get("source") or ""
+            lines.append(
+                f"- [x] {t.get('task','')} | completed: {closed} | source: {source}"
+            )
+        lines.append("")
+
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def upsert_todo_openloop(user_id: str, creds: "Credentials",
+                         contacts_folder_id: str,
+                         user_label: str = "paramee",
+                         force: bool = False) -> str | None:
+    """DB → 마크다운 → MeetingAgent/Todos/오픈루프.md 동기화.
+    Returns: file_id (디바운스로 건너뛰면 None).
+    """
+    import time as _time
+    last = _TODO_OPENLOOP_LAST_WRITE.get(user_id, 0.0)
+    debounce = _todo_debounce_seconds()
+    now_ts = _time.time()
+    if not force and debounce > 0 and (now_ts - last) < debounce:
+        log.info(f"오픈루프 Drive 동기화 디바운스 (user={user_id}, 남은={int(debounce - (now_ts - last))}s)")
+        return None
+
+    # 지연 import — 순환 의존성 방지
+    from store import user_store as _us
+
+    active = _us.list_active_todos(user_id)
+    recent_done = _us.list_recent_completed(user_id, 5)
+    today = datetime.now().strftime("%Y-%m-%d")
+    body = _render_openloop_md(user_label, today, active, recent_done)
+
+    folder_id = _ensure_todos_folder(creds, contacts_folder_id)
+    file_id = _write_file(creds, "오픈루프.md", body, folder_id)
+    _TODO_OPENLOOP_LAST_WRITE[user_id] = now_ts
+    log.info(f"오픈루프.md 동기화 완료 (user={user_id}, active={len(active)})")
+    return file_id
+
+
+def append_todo_history(user_id: str, creds: "Credentials",
+                        contacts_folder_id: str,
+                        line: str, today: str) -> str | None:
+    """이력.md 에 today 헤딩 아래로 한 줄 append. 헤딩 없으면 신규 추가."""
+    folder_id = _ensure_todos_folder(creds, contacts_folder_id)
+    existing = _find_file(creds, "이력.md", folder_id)
+    if existing:
+        try:
+            current = _read_file(creds, existing["id"])
+        except Exception as e:
+            log.warning(f"이력.md 읽기 실패: {e}")
+            current = ""
+    else:
+        current = ""
+
+    if not current.strip():
+        # 헤더 신규 작성
+        body_lines = ["# 이력 — paramee", "", f"## {today}", line, ""]
+        new_body = "\n".join(body_lines)
+    else:
+        date_header = f"## {today}"
+        if date_header in current:
+            # 해당 날짜 섹션 끝(다음 ## 이전)에 line 추가
+            idx = current.index(date_header)
+            after = current[idx + len(date_header):]
+            next_section = re.search(r"\n##\s", after)
+            if next_section:
+                insert_pos = idx + len(date_header) + next_section.start()
+                # 직전에 빈 줄이 없다면 보장
+                pre = current[:insert_pos].rstrip("\n")
+                post = current[insert_pos:]
+                new_body = pre + "\n" + line + "\n\n" + post.lstrip("\n")
+            else:
+                # 마지막 섹션 — 끝에 추가
+                new_body = current.rstrip() + "\n" + line + "\n"
+        else:
+            # 새 날짜 섹션 추가 (앞쪽에 — 최신 우선)
+            # 첫 ## 이전(헤더 영역 끝)에 새 섹션 삽입
+            first_section_match = re.search(r"\n##\s", current)
+            if first_section_match:
+                head = current[:first_section_match.start()].rstrip()
+                tail = current[first_section_match.start():].lstrip("\n")
+                new_body = head + f"\n\n## {today}\n{line}\n\n" + tail
+            else:
+                new_body = current.rstrip() + f"\n\n## {today}\n{line}\n"
+
+    file_id = existing["id"] if existing else None
+    return _write_file(creds, "이력.md", new_body, folder_id, file_id)
+
+
 def replace_auto_section(
     body: str, section_header: str, new_auto_content: str,
     *, create_if_missing: bool = True,
