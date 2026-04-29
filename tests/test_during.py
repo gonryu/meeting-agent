@@ -445,12 +445,74 @@ class TestEndSession:
         assert "## 회의 요약" in draft["internal_body"]
 
     def test_no_session_sends_warning(self):
-        """세션 없으면 경고 메시지"""
+        """세션 없음 + 최근 종료 미팅 0건 → 기존 경고 메시지 유지"""
+        from agents.during import _pending_recovery
+        _pending_recovery.clear()
         slack = _slack()
-        end_session(slack, _TEST_USER)
+
+        with _mock_store(), patch("agents.during.cal") as mock_cal:
+            mock_cal.get_recently_ended_meetings.return_value = []
+            end_session(slack, _TEST_USER)
 
         text = slack.chat_postMessage.call_args[1]["text"]
         assert "세션" in text
+        # 후보 0건 → 복구 대기 등록 안 됨
+        assert _TEST_USER not in _pending_recovery
+
+    def test_no_session_with_recent_event_shows_recovery_ui(self):
+        """세션 없음 + 최근 종료 미팅 1건 → 복구 선택 UI 발송 + _pending_recovery 등록"""
+        from agents.during import _pending_recovery
+        _pending_recovery.clear()
+        slack = _slack()
+
+        recent_event = {
+            "id": "evt_recent",
+            "summary": "카카오 PoC 회의",
+            "start_time": "2026-04-28T17:00:00+09:00",
+            "end_time": "2026-04-28T18:00:00+09:00",
+            "attendees": [],
+        }
+
+        with _mock_store(), patch("agents.during.cal") as mock_cal:
+            mock_cal.get_recently_ended_meetings.return_value = [recent_event]
+            end_session(slack, _TEST_USER)
+
+        # 복구 대기 등록
+        assert _TEST_USER in _pending_recovery
+        assert _pending_recovery[_TEST_USER]["events"][0]["id"] == "evt_recent"
+
+        # 복구 버튼이 포함된 블록이 발송되었는지 확인
+        block_calls = [c for c in slack.chat_postMessage.call_args_list
+                       if c[1].get("blocks")]
+        found_recover_button = False
+        for c in block_calls:
+            for block in c[1]["blocks"]:
+                for el in block.get("elements", []) or []:
+                    if el.get("action_id") == "recover_meeting_minutes":
+                        assert el.get("value") == "evt_recent"
+                        found_recover_button = True
+        assert found_recover_button, "recover_meeting_minutes 버튼이 있어야 함"
+
+    def test_no_session_with_token_expired_shows_friendly_error(self):
+        """세션 없음 + 토큰 만료 → 친화적 `/재등록` 안내"""
+        from agents.during import _pending_recovery
+        from store.user_store import TokenExpiredError
+        _pending_recovery.clear()
+        slack = _slack()
+
+        # get_credentials가 TokenExpiredError 던짐
+        mock = MagicMock()
+        mock.get_credentials.side_effect = TokenExpiredError("invalid_grant: revoked")
+        mock.get_user.return_value = _MOCK_USER
+        mock.is_token_expired_error.side_effect = lambda e: isinstance(e, TokenExpiredError) or "invalid_grant" in str(e)
+
+        with patch("agents.during.user_store", mock), patch("agents.during.cal"):
+            end_session(slack, _TEST_USER)
+
+        text = slack.chat_postMessage.call_args[1]["text"]
+        assert "재등록" in text
+        assert "🔐" in text or "인증이 만료" in text
+        assert _TEST_USER not in _pending_recovery
 
     def test_internal_and_external_saved_to_drive(self):
         """finalize_minutes에서 내부용·외부용 2개 Drive 저장"""

@@ -76,6 +76,10 @@ _pending_inputs: dict[str, dict] = {}
 # I1: /미팅종료 직후 "회의록 생성 방식 선택" 대기 payload. key = event_id
 _pending_source_select: dict[str, dict] = {}
 
+# 사후 회의록 복구 — /미팅종료 시 활성 세션이 없을 때 최근 종료된 캘린더 이벤트 후보
+# { user_id: { events: [parsed_event, ...], session_channel, session_thread_ts } }
+_pending_recovery: dict[str, dict] = {}
+
 
 # ── 세션 파일 저장/복구 헬퍼 ─────────────────────────────────
 
@@ -1278,13 +1282,246 @@ def generate_minutes_now(slack_client, user_id: str, channel: str = None, thread
     end_session(slack_client, user_id, channel=channel, thread_ts=thread_ts)
 
 
-def end_session(slack_client, user_id: str, channel: str = None, thread_ts: str = None):
-    """/미팅종료 — 세션을 종료하고 회의록 생성 방식(I1)을 사용자에게 선택받은 뒤 생성."""
-    if user_id not in _active_sessions:
+# ── 사후 회의록 복구 (post-hoc recovery) ─────────────────────
+
+
+def _format_recovery_button_label(event: dict) -> str:
+    """복구 버튼 라벨 — '제목 (HH:MM 종료)' 형식. 75자 제한."""
+    summary = (event.get("summary") or "(제목 없음)").strip()
+    end_str = event.get("end_time") or ""
+    end_label = ""
+    try:
+        if end_str:
+            end_dt = datetime.fromisoformat(end_str)
+            end_label = f" ({end_dt.strftime('%H:%M')} 종료)"
+    except Exception:
+        pass
+    return f"{summary}{end_label}"[:75]
+
+
+def _try_post_recovery_selection(slack_client, *, user_id: str,
+                                  channel: str | None,
+                                  thread_ts: str | None) -> None:
+    """활성 세션이 없을 때 호출 — 최근 종료된 캘린더 이벤트 후보를 찾아 복구 UI 발송.
+
+    후보 0건 또는 인증 오류 시에는 기존 경고 메시지로 폴백.
+    """
+    warning_text = (
+        "⚠️ 진행 중인 미팅 세션이 없습니다.\n"
+        "먼저 `/미팅시작` 또는 `/메모`로 메모를 기록해주세요."
+        + _hint("새 미팅이라면 `/미팅시작 [제목]` 부터 시작하세요")
+    )
+
+    try:
+        creds, _ = _get_creds_and_config(user_id)
+    except Exception as e:
+        # 토큰 만료 등은 친화적 안내, 그 외는 기존 경고 폴백
+        if user_store.is_token_expired_error(e):
+            _post(slack_client, user_id=user_id, channel=channel, thread_ts=thread_ts,
+                  text="🔐 Google 인증이 만료되었어요.\n`/재등록` 명령으로 다시 인증해주세요.")
+            return
+        log.warning(f"복구용 자격증명 조회 실패 ({user_id}): {e}")
         _post(slack_client, user_id=user_id, channel=channel, thread_ts=thread_ts,
-              text="⚠️ 진행 중인 미팅 세션이 없습니다.\n"
-                   "먼저 `/미팅시작` 또는 `/메모`로 메모를 기록해주세요."
+              text=warning_text)
+        return
+
+    # 최근 3시간 이내 종료된 미팅 탐색 — 0분 ago 부터 (방금 끝난 미팅 포함)
+    try:
+        recent = cal.get_recently_ended_meetings(
+            creds, min_minutes_ago=0, max_minutes_ago=180,
+        )
+    except Exception as e:
+        if user_store.is_token_expired_error(e):
+            _post(slack_client, user_id=user_id, channel=channel, thread_ts=thread_ts,
+                  text="🔐 Google 인증이 만료되었어요.\n`/재등록` 명령으로 다시 인증해주세요.")
+            return
+        log.warning(f"최근 종료 미팅 조회 실패 ({user_id}): {e}")
+        _post(slack_client, user_id=user_id, channel=channel, thread_ts=thread_ts,
+              text=warning_text)
+        return
+
+    if not recent:
+        # 후보 없음 → 기존 경고 유지
+        _post(slack_client, user_id=user_id, channel=channel, thread_ts=thread_ts,
+              text=warning_text)
+        return
+
+    # 후보 1건 이상 → 복구 선택 UI 발송
+    _pending_recovery[user_id] = {
+        "events": recent,
+        "session_channel": channel,
+        "session_thread_ts": thread_ts,
+    }
+    _post_recovery_selection(slack_client, user_id=user_id, events=recent,
+                             channel=channel, thread_ts=thread_ts)
+
+
+def _post_recovery_selection(slack_client, *, user_id: str, events: list[dict],
+                              channel: str | None,
+                              thread_ts: str | None) -> None:
+    """방금 끝난 미팅 후보를 버튼으로 표시 (사후 회의록 복구)."""
+    buttons = []
+    for ev in events[:5]:  # 최대 5개
+        ev_id = ev.get("id")
+        if not ev_id:
+            continue
+        buttons.append({
+            "type": "button",
+            "text": {"type": "plain_text",
+                     "text": _format_recovery_button_label(ev)},
+            "action_id": "recover_meeting_minutes",
+            "value": ev_id,
+        })
+
+    if not buttons:
+        # 안전장치 — 후보는 있는데 id가 없는 비정상 케이스
+        _post(slack_client, user_id=user_id, channel=channel, thread_ts=thread_ts,
+              text="⚠️ 진행 중인 미팅 세션이 없습니다."
                    + _hint("새 미팅이라면 `/미팅시작 [제목]` 부터 시작하세요"))
+        return
+
+    blocks = [
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": ("📋 진행 중인 세션이 없네요. *방금 끝난 미팅이 있나요?*\n"
+                         "회의록을 만들 미팅을 선택해주세요."),
+            },
+        },
+        {"type": "actions", "elements": buttons},
+        {
+            "type": "context",
+            "elements": [{
+                "type": "mrkdwn",
+                "text": "_트랜스크립트가 아직 도착하지 않았다면 최대 90분 대기 후 자동 생성됩니다._",
+            }],
+        },
+    ]
+    try:
+        slack_client.chat_postMessage(
+            channel=channel or user_id,
+            thread_ts=thread_ts,
+            text="방금 끝난 미팅을 선택해주세요.",
+            blocks=blocks,
+        )
+    except Exception as e:
+        log.warning(f"복구 선택 블록 발송 실패: {e}")
+
+
+def handle_recover_meeting_minutes_button(slack_client, body: dict) -> None:
+    """`recover_meeting_minutes` 버튼 콜백 — 사후 회의록 생성 시도.
+
+    - 선택된 event_id로 캘린더 이벤트를 조회해 제목·시간·참석자 메타 추출
+    - `_generate_from_session_end(source='transcript', notes=[])` 호출 →
+      트랜스크립트가 있으면 즉시, 없으면 `_awaiting_transcript`에 등록되어
+      10분 폴링으로 최대 90분간 대기.
+    """
+    user_id = body.get("user", {}).get("id")
+    action = (body.get("actions") or [{}])[0]
+    event_id = action.get("value", "")
+    container = body.get("container", {}) or {}
+    msg_ch = container.get("channel_id")
+    msg_ts = container.get("message_ts")
+
+    pending = _pending_recovery.pop(user_id, None) if user_id else None
+    post_channel = (pending or {}).get("session_channel") or msg_ch
+    post_thread_ts = (pending or {}).get("session_thread_ts")
+
+    if not user_id or not event_id:
+        log.warning(f"recover_meeting_minutes: user_id/event_id 없음 (body={list(body.keys())})")
+        return
+
+    # 중복 클릭 방지 — 원본 메시지 텍스트로 교체
+    if msg_ch and msg_ts:
+        try:
+            slack_client.chat_update(
+                channel=msg_ch, ts=msg_ts,
+                text="🔍 사후 회의록 복구 진행 중...",
+                blocks=[{
+                    "type": "section",
+                    "text": {"type": "mrkdwn",
+                             "text": "🔍 사후 회의록 복구 진행 중..."},
+                }],
+            )
+        except Exception:
+            pass
+
+    try:
+        creds, _ = _get_creds_and_config(user_id)
+    except Exception as e:
+        if user_store.is_token_expired_error(e):
+            _post(slack_client, user_id=user_id, channel=post_channel, thread_ts=post_thread_ts,
+                  text="🔐 Google 인증이 만료되었어요.\n`/재등록` 명령으로 다시 인증해주세요.")
+        else:
+            _post(slack_client, user_id=user_id, channel=post_channel, thread_ts=post_thread_ts,
+                  text=f"⚠️ 인증 오류: {e}")
+        return
+
+    # 캘린더 이벤트 메타 조회
+    try:
+        event_raw = cal.get_event(creds, event_id)
+    except Exception as e:
+        if user_store.is_token_expired_error(e):
+            _post(slack_client, user_id=user_id, channel=post_channel, thread_ts=post_thread_ts,
+                  text="🔐 Google 인증이 만료되었어요.\n`/재등록` 명령으로 다시 인증해주세요.")
+            return
+        log.warning(f"recover_meeting_minutes: 이벤트 조회 실패 ({event_id}): {e}")
+        _post(slack_client, user_id=user_id, channel=post_channel, thread_ts=post_thread_ts,
+              text=f"⚠️ 캘린더 이벤트 조회 실패: {e}")
+        return
+
+    parsed = cal.parse_event(event_raw)
+    title = parsed.get("summary") or "(제목 없음)"
+    end_raw = (event_raw.get("end") or {}).get("dateTime") \
+        or (event_raw.get("end") or {}).get("date") or ""
+    start_raw = parsed.get("start_time") or ""
+    started_at = ""
+    ended_at = datetime.now(KST).strftime("%H:%M")
+    try:
+        if start_raw:
+            sdt = datetime.fromisoformat(start_raw)
+            started_at = sdt.strftime("%Y-%m-%d %H:%M")
+        if end_raw:
+            edt = datetime.fromisoformat(end_raw)
+            ended_at = edt.strftime("%H:%M")
+    except Exception:
+        pass
+    if not started_at:
+        started_at = datetime.now(KST).strftime("%Y-%m-%d %H:%M")
+
+    _post(slack_client, user_id=user_id, channel=post_channel, thread_ts=post_thread_ts,
+          text=(f"🔍 *{title}* — 회의록 생성 시도 중. "
+                f"트랜스크립트가 있으면 즉시 생성, 없으면 도착 대기 (최대 90분)."))
+
+    # _generate_from_session_end 는 트랜스크립트 탐색 + 없으면 _awaiting_transcript 등록
+    threading.Thread(
+        target=_generate_from_session_end,
+        kwargs=dict(
+            slack_client=slack_client,
+            user_id=user_id,
+            event_id=event_id,
+            title=title,
+            notes=[],  # 사후 복구 — 사용자가 입력한 노트는 없음
+            started_at=started_at,
+            ended_at=ended_at,
+            source="transcript",
+            post_channel=post_channel,
+            post_thread_ts=post_thread_ts,
+        ),
+        daemon=True,
+    ).start()
+
+
+def end_session(slack_client, user_id: str, channel: str = None, thread_ts: str = None):
+    """/미팅종료 — 세션을 종료하고 회의록 생성 방식(I1)을 사용자에게 선택받은 뒤 생성.
+
+    활성 세션이 없으면 최근 종료된 캘린더 이벤트(최대 3시간 이내)를 찾아 사후 복구
+    선택 UI를 표시한다. 후보가 0건이면 기존 경고 메시지를 유지.
+    """
+    if user_id not in _active_sessions:
+        _try_post_recovery_selection(slack_client, user_id=user_id,
+                                     channel=channel, thread_ts=thread_ts)
         return
 
     session = _active_sessions.pop(user_id)
@@ -2411,8 +2648,13 @@ def get_minutes_list(slack_client, user_id: str, channel: str = None, thread_ts:
     try:
         creds, minutes_folder_id = _get_creds_and_config(user_id)
     except Exception as e:
-        _post(slack_client, user_id=user_id, channel=channel, thread_ts=thread_ts,
-              text=f"⚠️ 인증 오류: {e}")
+        # 토큰 만료는 친화적 안내, 그 외는 raw 에러
+        if user_store.is_token_expired_error(e):
+            _post(slack_client, user_id=user_id, channel=channel, thread_ts=thread_ts,
+                  text="🔐 Google 인증이 만료되었어요.\n`/재등록` 명령으로 다시 인증해주세요.")
+        else:
+            _post(slack_client, user_id=user_id, channel=channel, thread_ts=thread_ts,
+                  text=f"⚠️ 인증 오류: {e}")
         return
 
     if not minutes_folder_id:
@@ -2423,8 +2665,12 @@ def get_minutes_list(slack_client, user_id: str, channel: str = None, thread_ts:
     try:
         files = drive.list_minutes(creds, minutes_folder_id)
     except Exception as e:
-        _post(slack_client, user_id=user_id, channel=channel, thread_ts=thread_ts,
-              text=f"⚠️ 회의록 조회 실패: {e}")
+        if user_store.is_token_expired_error(e):
+            _post(slack_client, user_id=user_id, channel=channel, thread_ts=thread_ts,
+                  text="🔐 Google 인증이 만료되었어요.\n`/재등록` 명령으로 다시 인증해주세요.")
+        else:
+            _post(slack_client, user_id=user_id, channel=channel, thread_ts=thread_ts,
+                  text=f"⚠️ 회의록 조회 실패: {e}")
         return
 
     if not files:

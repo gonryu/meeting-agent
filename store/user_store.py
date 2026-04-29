@@ -10,6 +10,30 @@ from google.oauth2.credentials import Credentials
 
 _DB_PATH = os.path.join(os.path.dirname(__file__), "users.db")
 
+
+class TokenExpiredError(Exception):
+    """Google OAuth 토큰 만료/취소(invalid_grant) 시 발생.
+
+    호출자가 사용자에게 친화적인 `/재등록` 안내를 보낼 수 있도록 raw RefreshError를
+    감싸서 던진다.
+    """
+
+
+def is_token_expired_error(exc: BaseException) -> bool:
+    """예외가 Google OAuth 토큰 만료/취소를 의미하는지 판단.
+
+    - TokenExpiredError 인스턴스
+    - 메시지에 'invalid_grant' 또는 'Token has been expired' 포함
+    """
+    if isinstance(exc, TokenExpiredError):
+        return True
+    msg = str(exc) if exc else ""
+    if not msg:
+        return False
+    lowered = msg.lower()
+    return ("invalid_grant" in lowered) or ("token has been expired" in lowered) or ("token has been revoked" in lowered)
+
+
 SCOPES = [
     "https://www.googleapis.com/auth/calendar",
     "https://www.googleapis.com/auth/drive",
@@ -210,7 +234,11 @@ def register(slack_user_id: str, token_dict: dict):
 
 
 def get_credentials(slack_user_id: str) -> Credentials:
-    """복호화된 Google Credentials 반환"""
+    """복호화된 Google Credentials 반환.
+
+    토큰이 만료되어 있으면 즉시 refresh를 시도하고, refresh 실패(invalid_grant 등) 시
+    `TokenExpiredError`를 던져 호출자가 친화적 안내를 표시할 수 있게 한다.
+    """
     with _conn() as conn:
         row = conn.execute(
             "SELECT encrypted_token FROM users WHERE slack_user_id = ?",
@@ -219,7 +247,31 @@ def get_credentials(slack_user_id: str) -> Credentials:
     if not row:
         raise ValueError(f"등록되지 않은 사용자: {slack_user_id}")
     token_dict = json.loads(_fernet().decrypt(row["encrypted_token"].encode()))
-    return Credentials.from_authorized_user_info(token_dict, SCOPES)
+    creds = Credentials.from_authorized_user_info(token_dict, SCOPES)
+
+    # 만료된 토큰은 사전 refresh — 실패 시 친화적 에러로 변환
+    try:
+        if creds and creds.expired and creds.refresh_token:
+            from google.auth.transport.requests import Request
+            from google.auth.exceptions import RefreshError
+            try:
+                creds.refresh(Request())
+            except RefreshError as e:
+                raise TokenExpiredError(
+                    f"Google 인증이 만료되었습니다 ({slack_user_id}): {e}"
+                ) from e
+    except TokenExpiredError:
+        raise
+    except Exception as e:
+        # invalid_grant 같은 텍스트가 RefreshError 외 형태로 올라오는 경우 대비
+        if is_token_expired_error(e):
+            raise TokenExpiredError(
+                f"Google 인증이 만료되었습니다 ({slack_user_id}): {e}"
+            ) from e
+        # 그 외 예외는 그대로 전달
+        raise
+
+    return creds
 
 
 def get_user(slack_user_id: str) -> dict:

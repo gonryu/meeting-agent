@@ -59,6 +59,7 @@ from agents.during import (
     request_minutes_edit,
     handle_minutes_edit_reply,
     handle_minutes_source_select,
+    handle_recover_meeting_minutes_button,
     handle_event_selection,
     handle_event_title_reply,
     start_document_based_minutes,
@@ -586,12 +587,43 @@ def _classify_intent(text: str) -> dict:
 
 # ── 회의록 검색 헬퍼 (FR-D11/D12) ─────────────────────────────
 
+def _post_token_expired_message(client, *, user_id: str,
+                                 channel: str = None, thread_ts: str = None) -> None:
+    """OAuth 토큰 만료 시 친화적 안내 — `/재등록` 유도."""
+    client.chat_postMessage(
+        channel=channel or user_id, thread_ts=thread_ts,
+        text="🔐 Google 인증이 만료되었어요.\n`/재등록` 명령으로 다시 인증해주세요.",
+    )
+
+
+def _handle_credentials_error(e: BaseException, client, *, user_id: str,
+                               channel: str = None, thread_ts: str = None) -> bool:
+    """OAuth 토큰 만료 예외라면 친화적 안내 후 True 반환. 아니면 False.
+
+    호출자는 True가 반환되면 즉시 return 해야 한다.
+    """
+    if user_store.is_token_expired_error(e):
+        _post_token_expired_message(client, user_id=user_id,
+                                     channel=channel, thread_ts=thread_ts)
+        return True
+    return False
+
+
 def _search_minutes(client, *, user_id: str, query: str,
                     channel: str = None, thread_ts: str = None):
     """업체명·회의명·기간 기반 회의록 검색 (Drive 파일명 기반)"""
     from tools import drive as _drive
 
-    creds = user_store.get_credentials(user_id)
+    try:
+        creds = user_store.get_credentials(user_id)
+    except Exception as e:
+        if _handle_credentials_error(e, client, user_id=user_id,
+                                      channel=channel, thread_ts=thread_ts):
+            return
+        client.chat_postMessage(
+            channel=channel or user_id, thread_ts=thread_ts,
+            text=f"⚠️ 인증 오류: {e}")
+        return
     if not creds:
         client.chat_postMessage(
             channel=channel or user_id, thread_ts=thread_ts,
@@ -715,6 +747,9 @@ def _search_minutes(client, *, user_id: str, query: str,
     try:
         files = _drive.list_minutes(creds, minutes_folder_id)
     except Exception as e:
+        if _handle_credentials_error(e, client, user_id=user_id,
+                                      channel=channel, thread_ts=thread_ts):
+            return
         client.chat_postMessage(
             channel=channel or user_id, thread_ts=thread_ts,
             text=f"⚠️ 회의록 조회 실패: {e}")
@@ -1906,6 +1941,25 @@ def _handle_minutes_src(ack, body, client):
 
 for _src in ("transcript", "notes", "wait", "cancel"):
     app.action(f"minutes_src_{_src}")(_handle_minutes_src)
+
+
+# ── 사후 회의록 복구 액션 핸들러 ──────────────────────────────
+
+@app.action("recover_meeting_minutes")
+def _handle_recover_meeting_minutes(ack, body, client):
+    """`/미팅종료` 시 활성 세션이 없을 때 표시된 후보 버튼 콜백."""
+    ack()
+    user_id = body.get("user", {}).get("id")
+    # 본인만 클릭 가능 — _pending_recovery 에 user_id 키가 있으면 그 사용자만 허용
+    from agents.during import _pending_recovery
+    expected = user_id if user_id in _pending_recovery else user_id
+    if not _ensure_creator(client, body, expected):
+        return
+    threading.Thread(
+        target=handle_recover_meeting_minutes_button,
+        args=(client, body),
+        daemon=True,
+    ).start()
 
 
 # ── F2: 일정 취소 액션 핸들러 ────────────────────────────────
