@@ -150,6 +150,39 @@ def init_db():
         conn.execute("CREATE INDEX IF NOT EXISTS idx_meeting_date ON meeting_index(date)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_meeting_user ON meeting_index(user_id)")
 
+        # 개인 Todo (FR-T1~T7) — 활성 라이브 + 히스토리 분리
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS todos (
+                id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id       TEXT NOT NULL,
+                task          TEXT NOT NULL,
+                category      TEXT NOT NULL DEFAULT 'work',
+                due_date      TEXT,
+                status        TEXT NOT NULL DEFAULT 'open',
+                opened_at     TEXT NOT NULL,
+                last_seen_at  TEXT NOT NULL,
+                closed_at     TEXT,
+                source        TEXT,
+                note          TEXT
+            )
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_todos_user_status ON todos(user_id, status)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_todos_due ON todos(due_date)")
+
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS todo_history (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                todo_id     INTEGER NOT NULL,
+                user_id     TEXT NOT NULL,
+                event       TEXT NOT NULL,
+                payload     TEXT,
+                occurred_at TEXT NOT NULL,
+                FOREIGN KEY (todo_id) REFERENCES todos(id)
+            )
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_todo_history_todo ON todo_history(todo_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_todo_history_user ON todo_history(user_id)")
+
 
 def is_registered(slack_user_id: str) -> bool:
     with _conn() as conn:
@@ -584,3 +617,144 @@ def update_feedback_resolution(feedback_id: int, resolution: str) -> bool:
             (resolution, feedback_id),
         )
         return cur.rowcount > 0
+
+
+# ── Todo (할일) ──────────────────────────────────────────────
+# FR-T1~T7: 개인 Todo 관리. user_id 단위 스코프, 히스토리는 append-only.
+
+def add_todo(user_id: str, task: str, category: str = "work",
+             due_date: str | None = None, source: str | None = None,
+             note: str | None = None) -> int:
+    """Todo 추가. Returns: todo_id"""
+    now = datetime.now().isoformat()
+    with _conn() as conn:
+        cur = conn.execute(
+            """INSERT INTO todos
+               (user_id, task, category, due_date, status,
+                opened_at, last_seen_at, source, note)
+               VALUES (?, ?, ?, ?, 'open', ?, ?, ?, ?)""",
+            (user_id, task, category, due_date, now, now, source, note),
+        )
+        return cur.lastrowid
+
+
+def list_active_todos(user_id: str) -> list[dict]:
+    """활성(open) Todo 목록을 due_date ASC NULLS LAST, opened_at ASC 순으로 조회."""
+    with _conn() as conn:
+        rows = conn.execute(
+            """SELECT * FROM todos
+               WHERE user_id = ? AND status = 'open'
+               ORDER BY
+                   CASE WHEN due_date IS NULL OR due_date = '' THEN 1 ELSE 0 END,
+                   due_date ASC,
+                   opened_at ASC""",
+            (user_id,),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def list_recent_completed(user_id: str, limit: int = 5) -> list[dict]:
+    """최근 완료된 Todo n건 (closed_at DESC). status='done'만."""
+    with _conn() as conn:
+        rows = conn.execute(
+            """SELECT * FROM todos
+               WHERE user_id = ? AND status = 'done'
+               ORDER BY closed_at DESC
+               LIMIT ?""",
+            (user_id, limit),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_todo(user_id: str, todo_id: int) -> dict | None:
+    """ID로 Todo 단건 조회. 다른 사용자의 Todo는 반환하지 않음."""
+    with _conn() as conn:
+        row = conn.execute(
+            "SELECT * FROM todos WHERE id = ? AND user_id = ?",
+            (todo_id, user_id),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def find_todo_by_text(user_id: str, text_match: str,
+                      include_closed: bool = False) -> list[dict]:
+    """제목 부분 일치로 Todo 검색. 기본은 활성(open)만."""
+    pattern = f"%{text_match}%"
+    if include_closed:
+        query = ("SELECT * FROM todos WHERE user_id = ? AND task LIKE ? "
+                 "ORDER BY status='open' DESC, opened_at DESC")
+        params = (user_id, pattern)
+    else:
+        query = ("SELECT * FROM todos WHERE user_id = ? AND status = 'open' AND task LIKE ? "
+                 "ORDER BY opened_at ASC")
+        params = (user_id, pattern)
+    with _conn() as conn:
+        rows = conn.execute(query, params).fetchall()
+    return [dict(r) for r in rows]
+
+
+def update_todo(todo_id: int, **kwargs) -> bool:
+    """Todo 필드 갱신. 허용 필드: task, due_date, category, note. last_seen_at도 갱신."""
+    allowed = {"task", "due_date", "category", "note"}
+    fields = {k: v for k, v in kwargs.items() if k in allowed}
+    if not fields:
+        return False
+    fields["last_seen_at"] = datetime.now().isoformat()
+    set_clause = ", ".join(f"{k} = ?" for k in fields)
+    params = list(fields.values()) + [todo_id]
+    with _conn() as conn:
+        cur = conn.execute(
+            f"UPDATE todos SET {set_clause} WHERE id = ?",
+            params,
+        )
+        return cur.rowcount > 0
+
+
+def close_todo(todo_id: int, status: str, note: str | None = None) -> bool:
+    """Todo를 종료 상태(done | cancelled | deleted)로 전환."""
+    if status not in ("done", "cancelled", "deleted"):
+        raise ValueError(f"잘못된 status: {status}")
+    now = datetime.now().isoformat()
+    with _conn() as conn:
+        if note is not None:
+            cur = conn.execute(
+                """UPDATE todos
+                   SET status = ?, closed_at = ?, last_seen_at = ?, note = ?
+                   WHERE id = ?""",
+                (status, now, now, note, todo_id),
+            )
+        else:
+            cur = conn.execute(
+                """UPDATE todos
+                   SET status = ?, closed_at = ?, last_seen_at = ?
+                   WHERE id = ?""",
+                (status, now, now, todo_id),
+            )
+        return cur.rowcount > 0
+
+
+def log_todo_history(todo_id: int, user_id: str, event: str,
+                     payload: dict | None = None) -> int:
+    """Todo 히스토리 append. event: created|updated|completed|cancelled|deleted"""
+    now = datetime.now().isoformat()
+    payload_str = json.dumps(payload, ensure_ascii=False) if payload else None
+    with _conn() as conn:
+        cur = conn.execute(
+            """INSERT INTO todo_history (todo_id, user_id, event, payload, occurred_at)
+               VALUES (?, ?, ?, ?, ?)""",
+            (todo_id, user_id, event, payload_str, now),
+        )
+        return cur.lastrowid
+
+
+def get_todo_history(user_id: str, limit: int = 100) -> list[dict]:
+    """사용자의 Todo 히스토리 조회 (최신순)."""
+    with _conn() as conn:
+        rows = conn.execute(
+            """SELECT * FROM todo_history
+               WHERE user_id = ?
+               ORDER BY occurred_at DESC
+               LIMIT ?""",
+            (user_id, limit),
+        ).fetchall()
+    return [dict(r) for r in rows]

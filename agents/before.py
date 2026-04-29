@@ -1206,6 +1206,16 @@ def run_briefing(slack_client, user_id: str, event: dict = None,
             daemon=True,
         ).start()
 
+    # FR-T5: 활성 Todo 블록을 별도 메시지로 추가 (지연 import — 순환 의존성 방지)
+    try:
+        from agents import todo as _todo_agent
+        todo_blocks = _todo_agent.build_todo_block(user_id)
+        if todo_blocks and len(todo_blocks) <= 50:
+            _post(slack_client, user_id=user_id, channel=channel, thread_ts=thread_ts,
+                  text="📋 오늘의 Todo", blocks=todo_blocks)
+    except Exception as e:
+        log.warning(f"Todo 브리핑 블록 발송 실패: {e}")
+
     user_store.update_last_active(user_id)
     return sent_threads
 
