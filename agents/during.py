@@ -2447,12 +2447,22 @@ def _post_minutes_draft(slack_client, *, user_id: str, draft_key: str = None):
         {"type": "divider"},
         {"type": "actions", "elements": action_elements},
     ]
+    # 사용 팁 — 사용자가 흐름을 직관적으로 파악하기 어려우므로 카드 하단에 항상 노출
+    tip_lines = []
     if doc_id:
-        blocks.append({
-            "type": "context",
-            "elements": [{"type": "mrkdwn",
-                          "text": "📝 _직접 편집 후 *저장 및 완료*를 누르면 편집된 내용으로 최종 저장됩니다._"}],
-        })
+        tip_lines.append("📝 _*직접 편집* 후 *✅ 저장 및 완료* 를 누르면 편집된 내용으로 최종 저장됩니다._")
+    tip_lines.append(
+        "💡 _*✏️ 수정 요청* 클릭 후 스레드에 답글을 달면 LLM이 새 초안을 다시 발송합니다 — "
+        "이전 초안 카드는 무시하고 *새로 발송된 카드*에서 저장/편집해주세요._"
+    )
+    tip_lines.append(
+        "🔄 _처음부터 다시 만들고 싶으면: *❌ 취소* → `/미팅종료` 재실행 "
+        "(또는 `📎 트랜스크립트 첨부`로 직접 업로드한 텍스트로 재생성)._"
+    )
+    blocks.append({
+        "type": "context",
+        "elements": [{"type": "mrkdwn", "text": "\n".join(tip_lines)}],
+    })
 
     # B2: 세션이 채널에서 시작된 경우 draft["channel"]에 채널 ID 저장되어 있음
     post_channel = draft.get("channel") or user_id
@@ -2739,7 +2749,13 @@ def request_minutes_edit(slack_client, user_id: str, draft_key: str = None):
     resp = slack_client.chat_postMessage(
         channel=draft.get("channel") or user_id,
         thread_ts=draft["draft_ts"],
-        text="✏️ 수정할 내용을 이 스레드에 답글로 작성해주세요.\n예: '액션아이템의 기한을 다음 주 금요일로 수정해줘', '담당자 이름을 홍길동으로 변경해줘'",
+        text=(
+            "✏️ 수정할 내용을 이 스레드에 답글로 작성해주세요.\n"
+            "예: _'액션아이템의 기한을 다음 주 금요일로 수정해줘'_, _'담당자 이름을 홍길동으로 변경해줘'_\n\n"
+            "💡 답글을 받으면 LLM이 *새 초안 카드*를 다시 발송합니다. "
+            "*이전 초안 카드는 무시*하고 새 카드에서 저장/편집/취소해주세요. "
+            "아무 카드든 ✅ 저장은 한 번만 처리됩니다 (이중 저장 방지)."
+        ),
     )
     if resp and resp.get("ok"):
         draft["edit_prompt_ts"] = resp["ts"]

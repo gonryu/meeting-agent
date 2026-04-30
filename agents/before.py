@@ -51,6 +51,17 @@ load_dotenv(override=True)
 _claude = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
 _CLAUDE_MODEL = "claude-haiku-4-5"
 
+def _internal_domains_set() -> set[str]:
+    """프라이버시 보호 — 내부 직원·내부 메일 식별 기준.
+
+    환경변수 `INTERNAL_DOMAINS` 값(쉼표 구분)을 정규화하여 반환.
+    인물/회사 리서치에서 내부 도메인 직원의 메일 본문이 외부 wiki 로
+    유출되지 않도록 차단하는 데 사용된다.
+    """
+    raw = os.getenv("INTERNAL_DOMAINS", "parametacorp.com,iconloop.com")
+    return {d.strip().lower() for d in raw.split(",") if d.strip()}
+
+
 _PARAMETA_RELEVANCE_KEYWORDS = (
     "스테이블코인", "stablecoin", "블록체인", "blockchain", "rwa",
     "디지털자산", "digital asset", "토큰증권", "sto", "did", "신원인증",
@@ -649,18 +660,18 @@ def _build_service_connections(company_context: str, knowledge: str) -> str:
 
 
 def _format_email_context_section(emails: list[dict], today: str) -> str:
-    """Gmail 검색 결과를 업체 Wiki의 이메일 맥락 섹션으로 정리."""
+    """Gmail 검색 결과를 업체 Wiki의 이메일 맥락 섹션으로 정리.
+
+    프라이버시 가드: 메일 본문(snippet)·발신자 주소는 wiki 에 저장하지 않고
+    날짜와 제목만 영속화한다. 본문은 LLM 입력으로만 사용됨.
+    """
     if not emails:
         return ""
     lines = []
     for e in emails[:5]:
         subject = (e.get("subject") or "(제목 없음)").strip()
-        snippet = (e.get("snippet") or "").replace("\n", " ").replace("\r", " ").strip()
-        sender = (e.get("from") or "").strip()
         date = (e.get("date") or "").strip()
-        context = snippet[:180] if snippet else "본문 요약 없음"
-        sender_part = f" | {sender}" if sender else ""
-        lines.append(f"- {date}{sender_part} | {subject} | {context}")
+        lines.append(f"- {date} | {subject}")
     return f"## 이메일 맥락\n- last_searched: {today}\n" + "\n".join(lines) + "\n"
 
 
@@ -892,6 +903,12 @@ def research_person(user_id: str, person_name: str, company_name: str,
     force=True 이면 파일 존재 여부와 무관하게 강제 재검색.
     card_data 가 제공되면 명함 정보를 별도 섹션으로 포함.
     인물 정보 저장 후 연관 기업정보도 자동 갱신(force=False).
+
+    프라이버시 가드:
+      - Gmail 헤더에서 추출한 이메일 도메인이 INTERNAL_DOMAINS 에 속하면
+        내부 직원으로 판정하여 리서치 자체를 거부 (외부 인물 전용 기능).
+      - Gmail 검색 결과의 메일 본문(snippet)은 LLM 입력으로만 사용하고
+        Wiki 파일에는 저장하지 않는다 (영구 노출 방지).
     """
     creds, contacts_folder_id, _ = _get_creds_and_config(user_id)
     content, file_id = drive.get_person_info(creds, contacts_folder_id, person_name)
@@ -900,37 +917,55 @@ def research_person(user_id: str, person_name: str, company_name: str,
 
     today = datetime.now().strftime("%Y-%m-%d")
 
-    # 1단계: Gmail 이메일 맥락 수집 + 헤더에서 이메일 주소 추출
-    email_section = ""
+    # 1단계: Gmail 헤더에서 인물 이메일 주소 추정 (본문은 wiki 저장 X)
     extracted_email = ""
+    emails: list[dict] = []
     try:
         emails = gmail.search_recent_emails(creds, person_name, company_name)
-        if emails:
-            lines = [f"- {e['date']} | {e['subject']} | {e.get('snippet', '')[:100]}"
-                     for e in emails[:5]]
-            email_section = "\n## 이메일 맥락\n" + "\n".join(lines) + "\n"
-
-            # From/To/CC 헤더에서 person_name 매칭 이메일 주소 추출
-            for e in emails:
-                for field in ["from", "to", "cc"]:
-                    for addr in gmail.parse_address_header(e.get(field, "")):
-                        if person_name in addr["name"] and addr["email"]:
-                            extracted_email = addr["email"]
-                            log.info(f"Gmail 헤더에서 이메일 추출: {person_name} → {extracted_email}")
-                            break
-                    if extracted_email:
+        # From/To/CC 헤더에서 person_name 매칭 이메일 주소 추출
+        for e in emails:
+            for field in ["from", "to", "cc"]:
+                for addr in gmail.parse_address_header(e.get(field, "")):
+                    if person_name in addr["name"] and addr["email"]:
+                        extracted_email = addr["email"]
+                        log.info(f"Gmail 헤더에서 이메일 추출: {person_name} → {extracted_email}")
                         break
                 if extracted_email:
                     break
+            if extracted_email:
+                break
     except Exception as e:
         log.warning(f"Gmail 검색 실패 ({person_name}): {e}")
 
-    # CM-09: 이메일 섹션에 출처 태그 추가
-    if email_section and "[출처:" not in email_section:
-        email_section = email_section.replace(
-            "## 이메일 맥락",
-            f"## 이메일 맥락 `[출처: Gmail, {today}]`",
-        )
+    # 프라이버시 가드 — 내부 직원으로 판정되면 리서치 거부
+    internal_domains = _internal_domains_set()
+    candidate_email = (
+        (card_data.get("email") if card_data else "")
+        or extracted_email
+    ).lower()
+    if candidate_email and "@" in candidate_email:
+        candidate_domain = candidate_email.split("@")[-1].strip()
+        if candidate_domain in internal_domains:
+            log.warning(
+                f"내부 직원 인물 리서치 차단: {person_name} <{candidate_email}> "
+                f"(domain={candidate_domain})"
+            )
+            blocked_msg = (
+                f"⚠️ *{person_name}* ({candidate_email}) 은(는) 내부 도메인 "
+                f"`{candidate_domain}` 소속으로 보여 리서치를 진행하지 않았습니다.\n"
+                f"_인물 리서치는 외부 고객사 담당자 전용입니다. "
+                f"내부 직원 정보는 Slack 프로필 / 사내 시스템을 활용해주세요._"
+            )
+            return blocked_msg, None
+
+    # LLM 입력용 이메일 메타데이터 (Wiki 저장 X — 본문 snippet 비포함)
+    email_section = ""
+    if emails:
+        meta_lines = [
+            f"- {e.get('date', '')} | {(e.get('subject') or '(제목 없음)').strip()}"
+            for e in emails[:5]
+        ]
+        email_section = "## 이메일 맥락\n" + "\n".join(meta_lines) + "\n"
 
     # 2단계: 인물 공개 정보 리서치
     # — 오케스트레이터 활성 시 다단계 파이프라인, 실패 시 기존 단일 호출로 폴백
@@ -1004,6 +1039,8 @@ def research_person(user_id: str, person_name: str, company_name: str,
     fm_block = _drive_render_frontmatter(new_fm)
 
     sources_log_line = f"- {today}, 웹 검색 + Gmail 헤더 기반 자동 리서치"
+    # 프라이버시 가드: Gmail 메일 본문/제목/발신자는 wiki 에 저장하지 않는다
+    # (LLM 입력으로만 사용됨). 명함 정보·헤더에서 추출된 외부 도메인 이메일만 영속화.
     new_content = (
         fm_block
         + f"# {person_name}\n\n"
@@ -1011,8 +1048,7 @@ def research_person(user_id: str, person_name: str, company_name: str,
         + f"- 소속: [[{company_name}]]\n"
         + f"- last_searched: {today}\n"
         + f"{email_line}"
-        + f"{card_section}"
-        + f"{email_section}\n"
+        + f"{card_section}\n"
         + f"## 공개 정보\n{info_text}\n\n"
         + f"## 최근 히스토리\n{_DRIVE_AUTO_START}\n{_DRIVE_AUTO_END}\n\n"
         + f"## 출처 로그\n{_DRIVE_AUTO_START}\n{sources_log_line}\n{_DRIVE_AUTO_END}\n"

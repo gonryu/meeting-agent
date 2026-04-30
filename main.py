@@ -373,7 +373,12 @@ _HELP_TEXT = """*🤖 ParaMee 사용 가이드*
 • 🎙️ 음성 파일 업로드 — STT 변환 후 메모로 자동 등록
 • 📄 텍스트 문서 업로드 — 세션 중엔 메모로 추가, 세션 없이 업로드 시 **트랜스크립트로 간주해 회의록 초안 즉시 생성** (저장 시 업체 Wiki 자동 갱신)
 • `/미팅종료` or `미팅 종료` — 회의 종료 및 회의록 자동 생성
+  └ 5가지 소스 중 선택: 🎙️ 트랜스크립트 탐색 / 📎 트랜스크립트 첨부 / 📝 노트만 / 🕐 트랜스크립트 대기 / ❌ 취소
+  └ `📎 트랜스크립트 첨부` — 개인 녹음·외부 STT 결과 텍스트 파일을 그대로 트랜스크립트로 사용 (한글 cp949·euc-kr 자동 디코딩)
+  └ Google Meet 트랜스크립트는 *원문 Transcript* 를 우선 사용 — Gemini 요약본은 원문이 없을 때만 폴백
 • `/회의록작성` or `회의록 작성해줘` — 현재 세션 기반 회의록 즉시 생성
+• 📝 *회의록 초안에서 수정 요청 했을 때* — 답글 입력 → 새 초안 카드 재발송. 이전 카드는 무시하고 *새 카드에서* 저장/편집
+• 🔄 *회의록을 처음부터 다시 만들기* — 초안 카드의 ❌ 취소 → `/미팅종료` 재실행 또는 `📎 트랜스크립트 첨부`로 텍스트 직접 업로드
 • `/회의록` or `회의록 보여줘` — 저장된 회의록 목록 조회
   └ `/회의록 카카오` — 업체 기반 검색  |  `/회의록 2026-03` — 기간 기반 검색
   └ `카카오 지난달 회의록 찾아줘` — 자연어 검색
@@ -1140,13 +1145,18 @@ def _route_message(text: str, client, user_id: str, channel: str = None,
         client.chat_postMessage(channel=channel or user_id, thread_ts=thread_ts,
                                 text=f"🔍 *{person}* 인물정보 리서치 중..." + (f" (소속: {company})" if company else ""))
         try:
-            content, _ = research_person(user_id, person, company, force=True)
-            preview = "\n".join(
-                l for l in content.splitlines()
-                if l.strip() and not l.startswith("#") and "last_searched" not in l
-            )[:300]
-            client.chat_postMessage(channel=channel or user_id, thread_ts=thread_ts,
-                                    text=f"✅ *{person}* 인물정보 갱신 완료.\n\n```{preview}```")
+            content, fid = research_person(user_id, person, company, force=True)
+            # 프라이버시 가드 — 내부 직원 차단 시 file_id 가 None
+            if fid is None:
+                client.chat_postMessage(channel=channel or user_id, thread_ts=thread_ts,
+                                        text=content)
+            else:
+                preview = "\n".join(
+                    l for l in content.splitlines()
+                    if l.strip() and not l.startswith("#") and "last_searched" not in l
+                )[:300]
+                client.chat_postMessage(channel=channel or user_id, thread_ts=thread_ts,
+                                        text=f"✅ *{person}* 인물정보 갱신 완료.\n\n```{preview}```")
         except Exception as e:
             client.chat_postMessage(channel=channel or user_id, thread_ts=thread_ts,
                                     text=f"⚠️ 인물정보 리서치 실패: {e}")
@@ -1486,15 +1496,19 @@ def _person_handler(ack, body, client):
         text=f"🔍 *{person_name}* 인물정보 리서치 중..." + (f" (소속: {company_name})" if company_name else ""),
     )
     try:
-        content, _ = research_person(user_id, person_name, company_name, force=True)
-        preview = "\n".join(
-            line for line in content.splitlines()
-            if line.strip() and not line.startswith("#") and "last_searched" not in line
-        )[:300]
-        msg = f"✅ *{person_name}* 인물정보가 갱신되었습니다.\n\n```{preview}```"
-        if company_name:
-            msg += f"\n_(연관 기업정보 *{company_name}* 도 함께 갱신되었습니다)_"
-        client.chat_postMessage(channel=user_id, text=msg)
+        content, fid = research_person(user_id, person_name, company_name, force=True)
+        # 프라이버시 가드 — 내부 직원 차단 시 file_id 가 None
+        if fid is None:
+            client.chat_postMessage(channel=user_id, text=content)
+        else:
+            preview = "\n".join(
+                line for line in content.splitlines()
+                if line.strip() and not line.startswith("#") and "last_searched" not in line
+            )[:300]
+            msg = f"✅ *{person_name}* 인물정보가 갱신되었습니다.\n\n```{preview}```"
+            if company_name:
+                msg += f"\n_(연관 기업정보 *{company_name}* 도 함께 갱신되었습니다)_"
+            client.chat_postMessage(channel=user_id, text=msg)
     except Exception as e:
         client.chat_postMessage(channel=user_id, text=f"⚠️ 인물정보 리서치 실패: {e}")
 
