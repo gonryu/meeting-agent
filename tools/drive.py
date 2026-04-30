@@ -185,14 +185,21 @@ def find_meet_transcript(creds: Credentials, meeting_title: str,
                          ended_after: "datetime" = None) -> dict | None:
     """
     Google Meet 트랜스크립트/회의록 파일 검색.
-    Drive의 'Meet Recordings' 폴더에서 아래 두 유형을 탐색:
-      - 구형 Meet: '{meeting_title} - Transcript' (영문)
-      - Gemini 회의록: '{meeting_title} - ... - Gemini가 작성한 회의록' (한국어)
-    서브폴더 없이 루트에 바로 저장된 경우도 지원.
+
+    우선순위 (Claude Sonnet 으로 회의록을 직접 생성하므로 원문이 항상 우선):
+      1. **원문 Transcript** (`'{meeting_title} - Transcript'`) — 발화 그대로의 1차 자료.
+         영어 컨콜 등 비한국어 회의에서도 발언자·뉘앙스·고유명사가 손실 없이 보존된다.
+      2. **Gemini 회의록** (`'... - Gemini가 작성한 회의록'`) — 원문이 없을 때만 폴백.
+         이미 LLM 이 한 번 요약·번역한 2차 자료라 정보 손실이 있다.
+
+    Drive 'Meet Recordings' 폴더(서브폴더 또는 루트)를 모두 탐색.
     Returns: {id, name, mimeType} 또는 None
     """
+    import logging
     import unicodedata
+    log = logging.getLogger(__name__)
     svc = _service(creds)
+    transcript_mime = "application/vnd.google-apps.document"
 
     # Meet Recordings 폴더 탐색 (루트 레벨)
     q = ("name='Meet Recordings' "
@@ -206,8 +213,6 @@ def find_meet_transcript(creds: Credentials, meeting_title: str,
     recordings_id = recordings_folders[0]["id"]
 
     # 회의명 서브폴더 탐색 (NFD/NFC 대응).
-    # 1) 정확 매칭 (name='{title}')
-    # 2) 실패 시 부분 매칭 (name contains) — 반복 미팅의 '{title} (YYYY-MM-DD HH:MM)' 폴더 대응
     meeting_folder_id = None
     for form in ("NFD", "NFC"):
         normalized = unicodedata.normalize(form, meeting_title)
@@ -233,41 +238,72 @@ def find_meet_transcript(creds: Credentials, meeting_title: str,
             meeting_folder_id = folders[0]["id"]
             break
 
-    transcript_mime = "application/vnd.google-apps.document"
-
-    # modifiedTime 하한 필터 — 정기 회의(같은 제목 반복)에서 과거 회차 트랜스크립트가
-    # 잘못 매칭되는 것을 방지. 서브폴더/루트 양쪽에 동일하게 적용.
+    # modifiedTime 하한 필터 — 정기 회의(같은 제목 반복)에서 과거 회차가 매칭되지 않도록
     ended_after_clause = ""
     if ended_after:
         ended_after_utc = ended_after.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         ended_after_clause = f" and modifiedTime > '{ended_after_utc}'"
 
-    if meeting_folder_id:
-        # 서브폴더 내 탐색: 'Transcript' 또는 'Gemini가 작성한 회의록' 포함 파일
-        q3 = (f"'{meeting_folder_id}' in parents "
+    def _query(parent_id: str, name_filter: str) -> list[dict]:
+        """공통 검색 헬퍼."""
+        q3 = (f"'{parent_id}' in parents "
               f"and mimeType='{transcript_mime}' "
-              f"and (name contains 'Transcript' or name contains 'Gemini가 작성한 회의록') "
+              f"and {name_filter} "
               f"and trashed=false"
               + ended_after_clause)
         r3 = svc.files().list(q=q3, fields="files(id,name,mimeType,modifiedTime)",
                               orderBy="modifiedTime desc").execute()
-        files = r3.get("files", [])
-        return files[0] if files else None
+        return r3.get("files", [])
 
-    # 서브폴더 없음 → 루트 Meet Recordings에서 회의명 포함 파일 탐색.
-    # ended_after 필터를 적용해 과거 회차 파일을 배제한다.
+    # ── 서브폴더 내 우선순위 탐색 ──
+    if meeting_folder_id:
+        # 1순위: 원문 Transcript
+        # ('Gemini가 작성한 회의록'에는 'Transcript' 가 들어있지 않으므로 안전)
+        files_raw = _query(meeting_folder_id, "name contains 'Transcript'")
+        if files_raw:
+            log.info(f"원문 Transcript 사용: {files_raw[0]['name']}")
+            return files_raw[0]
+
+        # 2순위: Gemini 회의록 (원문이 없을 때만)
+        files_gemini = _query(meeting_folder_id, "name contains 'Gemini가 작성한 회의록'")
+        if files_gemini:
+            log.info(f"Gemini 회의록 폴백 (원문 없음): {files_gemini[0]['name']}")
+            return files_gemini[0]
+        return None
+
+    # ── 서브폴더 없음 → 루트 Meet Recordings 직접 탐색 ──
+    # NFD/NFC 양쪽 시도 + 원문/Gemini 우선순위 동일 적용.
     for form in ("NFD", "NFC"):
         normalized_title = unicodedata.normalize(form, meeting_title)
-        q3 = (f"'{recordings_id}' in parents "
-              f"and mimeType='{transcript_mime}' "
-              f"and name contains '{normalized_title}' "
-              f"and trashed=false"
-              + ended_after_clause)
-        r3 = svc.files().list(q=q3, fields="files(id,name,mimeType,modifiedTime)",
-                              orderBy="modifiedTime desc").execute()
-        files = r3.get("files", [])
+        # 1순위: 원문 Transcript ("'제목' AND 'Transcript' contains")
+        files_raw = _query(
+            recordings_id,
+            f"name contains '{normalized_title}' and name contains 'Transcript'"
+        )
+        if files_raw:
+            log.info(f"원문 Transcript 사용 (루트): {files_raw[0]['name']}")
+            return files_raw[0]
+
+    for form in ("NFD", "NFC"):
+        normalized_title = unicodedata.normalize(form, meeting_title)
+        # 2순위: Gemini 회의록
+        files_gemini = _query(
+            recordings_id,
+            f"name contains '{normalized_title}' and name contains 'Gemini가 작성한 회의록'"
+        )
+        if files_gemini:
+            log.info(f"Gemini 회의록 폴백 (루트, 원문 없음): {files_gemini[0]['name']}")
+            return files_gemini[0]
+
+    # ── 마지막 폴백: 과거 호환 — '제목' 만으로 매칭된 임의 파일도 허용 ──
+    # (Transcript 키워드가 없는 비표준 파일명 대응. 우선순위 가장 낮음)
+    for form in ("NFD", "NFC"):
+        normalized_title = unicodedata.normalize(form, meeting_title)
+        files = _query(recordings_id, f"name contains '{normalized_title}'")
         if files:
+            log.info(f"비표준 파일명 매칭 폴백: {files[0]['name']}")
             return files[0]
+
     return None
 
 
