@@ -1554,6 +1554,7 @@ def _handle_audio_upload(client, user_id: str, file_info: dict):
 def _handle_text_upload(client, user_id: str, file_info: dict):
     """텍스트 문서 업로드 처리.
 
+    - I1+: '📎 트랜스크립트 첨부' 대기 중이면 해당 페이로드로 회의록 생성
     - 활성 세션이 있으면: 기존 동작 — 텍스트 추출 후 세션 노트로 추가
     - 활성 세션이 없으면(F4): 문서를 트랜스크립트로 한 회의록 생성 경로 진입
       캘린더 이벤트 없이도 회의록 저장 + 업체/인물 Wiki 갱신 가능
@@ -1583,6 +1584,20 @@ def _handle_text_upload(client, user_id: str, file_info: dict):
         client.chat_postMessage(channel=user_id,
                                 text=f"📄 *{filename}* 텍스트가 길어 ({len(text):,}자) 앞부분 50,000자만 사용합니다.")
         text = text[:50000]
+
+    # I1+: '📎 트랜스크립트 첨부' 선택 후 대기 중이면 해당 세션으로 회의록 생성
+    from agents.during import (
+        consume_pending_uploaded_transcript,
+        apply_uploaded_transcript,
+    )
+    pending_upload = consume_pending_uploaded_transcript(user_id)
+    if pending_upload:
+        threading.Thread(
+            target=apply_uploaded_transcript,
+            args=(client, user_id, pending_upload, filename, text),
+            daemon=True,
+        ).start()
+        return
 
     # F4: 활성 세션이 없으면 문서 기반 회의록 생성 경로로 진입
     if user_id not in _active_sessions and user_id not in _pending_inputs:
@@ -2030,7 +2045,7 @@ def _handle_minutes_src(ack, body, client):
     ack()
     action = body.get("actions", [{}])[0]
     action_id = action.get("action_id", "")
-    source = action_id.removeprefix("minutes_src_")  # transcript | notes | wait | cancel
+    source = action_id.removeprefix("minutes_src_")  # transcript | upload | notes | wait | cancel
     event_id = action.get("value", "")
     if not event_id:
         return
@@ -2048,7 +2063,7 @@ def _handle_minutes_src(ack, body, client):
         daemon=True,
     ).start()
 
-for _src in ("transcript", "notes", "wait", "cancel"):
+for _src in ("transcript", "upload", "notes", "wait", "cancel"):
     app.action(f"minutes_src_{_src}")(_handle_minutes_src)
 
 

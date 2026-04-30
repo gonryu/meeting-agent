@@ -76,6 +76,12 @@ _pending_inputs: dict[str, dict] = {}
 # I1: /미팅종료 직후 "회의록 생성 방식 선택" 대기 payload. key = event_id
 _pending_source_select: dict[str, dict] = {}
 
+# I1+: 사용자가 "📎 트랜스크립트 첨부"를 선택한 후 파일 업로드 대기 상태. key = user_id
+# { user_id: { event_id, title, notes, started_at, ended_at, post_channel,
+#              post_thread_ts, created_at(KST datetime) } }
+# 30분 경과 시 자동 만료(_handle_text_upload·신규 /미팅종료 시 정리).
+_pending_uploaded_transcript: dict[str, dict] = {}
+
 # 사후 회의록 복구 — /미팅종료 시 활성 세션이 없을 때 최근 종료된 캘린더 이벤트 후보
 # { user_id: { events: [parsed_event, ...], session_channel, session_thread_ts } }
 _pending_recovery: dict[str, dict] = {}
@@ -241,16 +247,17 @@ def _generate(prompt: str) -> str:
 
 # ── 회의록 품질 검증 (FR-D09, FR-D10) ────────────────────────
 
-# 내부용 필수 섹션 (구버전 단일 호출 폴백 + Obsidian 신규 양식 모두 허용)
-# 신규 7섹션: 회의 개요 / 결론 / 액션아이템 / 주요 논의 내용 / 제3자 관련 언급 / 오픈 이슈 / 신뢰도 및 검토 메모
-# 검증은 핵심 4섹션(회의 개요, 결론, 액션아이템, 주요 논의 내용)을 기본으로 한다.
-# 레거시 섹션명("회의 요약", "주요 결정 사항", "액션 아이템") 도 폴백으로 인정.
-_INTERNAL_REQUIRED_SECTIONS = ["회의 개요", "결론", "액션아이템", "주요 논의 내용"]
+# 내부용 필수 섹션 — docs/requirements.md L400 표준 (5섹션):
+#   회의 요약 / 주요 결정 사항 / 액션 아이템 / 주요 논의 내용 / 내부 메모
+# Orchestrator 의 옛 7섹션 양식("회의 개요/결론/액션아이템/...")도 폴백으로 인정하여
+# 기존에 저장된 회의록 검증 호환성을 유지한다.
+_INTERNAL_REQUIRED_SECTIONS = ["회의 요약", "주요 결정 사항", "액션 아이템", "주요 논의 내용", "내부 메모"]
 _INTERNAL_LEGACY_ALIASES = {
-    "회의 개요": ["회의 개요", "회의 요약"],
-    "결론": ["결론", "주요 결정 사항"],
-    "액션아이템": ["액션아이템", "액션 아이템"],
+    "회의 요약": ["회의 요약", "회의 개요"],
+    "주요 결정 사항": ["주요 결정 사항", "결론"],
+    "액션 아이템": ["액션 아이템", "액션아이템"],
     "주요 논의 내용": ["주요 논의 내용"],
+    "내부 메모": ["내부 메모", "신뢰도 및 검토 메모", "검토 메모"],
 }
 
 # 외부용 필수 섹션 (Obsidian 10섹션 양식 + 레거시 양식 모두 허용)
@@ -1606,6 +1613,9 @@ def _post_source_selection(slack_client, *, user_id: str, event_id: str,
                  "text": {"type": "plain_text", "text": "🎙️ 트랜스크립트 탐색"},
                  "action_id": "minutes_src_transcript", "value": event_id},
                 {"type": "button",
+                 "text": {"type": "plain_text", "text": "📎 트랜스크립트 첨부"},
+                 "action_id": "minutes_src_upload", "value": event_id},
+                {"type": "button",
                  "text": {"type": "plain_text", "text": "📝 노트만"},
                  "action_id": "minutes_src_notes", "value": event_id},
                 {"type": "button",
@@ -1620,6 +1630,7 @@ def _post_source_selection(slack_client, *, user_id: str, event_id: str,
             "type": "context",
             "elements": [{"type": "mrkdwn",
                           "text": "_🎙️ 트랜스크립트가 없으면 90분간 기다렸다 자동 보강합니다. "
+                                  "📎 첨부는 직접 업로드한 텍스트(.txt/.md/.pdf 등)를 트랜스크립트로 사용. "
                                   "📝 노트만은 즉시 생성. 🕐 대기는 바로 생성하지 않고 도착 시 생성._"}],
         },
     ]
@@ -1637,7 +1648,7 @@ def _post_source_selection(slack_client, *, user_id: str, event_id: str,
 def handle_minutes_source_select(slack_client, user_id: str, event_id: str,
                                   source: str, body: dict | None = None):
     """I1: 회의록 소스 선택 버튼 콜백.
-    source: 'transcript' | 'notes' | 'wait' | 'cancel'"""
+    source: 'transcript' | 'upload' | 'notes' | 'wait' | 'cancel'"""
     payload = _pending_source_select.pop(event_id, None)
     if not payload:
         _post(slack_client, user_id=user_id,
@@ -1658,6 +1669,7 @@ def handle_minutes_source_select(slack_client, user_id: str, event_id: str,
         msg_ts = container.get("message_ts")
         label_map = {
             "transcript": "🎙️ 트랜스크립트 탐색",
+            "upload": "📎 트랜스크립트 첨부",
             "notes": "📝 노트만 사용",
             "wait": "🕐 트랜스크립트 대기",
             "cancel": "❌ 회의록 생성 취소",
@@ -1680,6 +1692,24 @@ def handle_minutes_source_select(slack_client, user_id: str, event_id: str,
               text=f"❌ *{title}* 회의록 생성을 취소했습니다.")
         return
 
+    if source == "upload":
+        # 파일 업로드 대기 상태 등록 — 파일 도착 시 _handle_text_upload 가 처리
+        _pending_uploaded_transcript[user_id] = {
+            "event_id": event_id,
+            "title": title,
+            "notes": notes,
+            "started_at": started_at,
+            "ended_at": ended_at,
+            "post_channel": post_channel,
+            "post_thread_ts": post_thread_ts,
+            "created_at": datetime.now(KST),
+        }
+        _post(slack_client, user_id=user_id, channel=post_channel, thread_ts=post_thread_ts,
+              text=(f"📎 *{title}* — 트랜스크립트 파일을 DM에 업로드해주세요.\n"
+                    f"_지원: .txt / .md / .pdf / .docx / .doc 등 (10MB 이내). "
+                    f"30분 내 도착하지 않으면 만료됩니다._"))
+        return
+
     threading.Thread(
         target=_generate_from_session_end,
         kwargs=dict(
@@ -1696,6 +1726,84 @@ def handle_minutes_source_select(slack_client, user_id: str, event_id: str,
         ),
         daemon=True,
     ).start()
+
+
+def consume_pending_uploaded_transcript(user_id: str) -> dict | None:
+    """I1+: 첨부 대기 payload 반환 + 만료(30분) 정리.
+
+    main.py 의 텍스트 업로드 핸들러가 호출. 활성 payload 가 있으면 pop 하여 반환,
+    만료된 payload 는 자동 삭제 후 None 반환."""
+    data = _pending_uploaded_transcript.get(user_id)
+    if not data:
+        return None
+    age = (datetime.now(KST) - data["created_at"]).total_seconds()
+    if age > 30 * 60:
+        _pending_uploaded_transcript.pop(user_id, None)
+        return None
+    return _pending_uploaded_transcript.pop(user_id, None)
+
+
+def apply_uploaded_transcript(slack_client, user_id: str, payload: dict,
+                               filename: str, transcript_text: str) -> None:
+    """I1+: 사용자가 업로드한 텍스트를 트랜스크립트로 사용해 회의록 생성.
+
+    payload 는 consume_pending_uploaded_transcript() 가 반환한 _pending_source_select
+    페이로드 + event_id. transcript_text 는 이미 추출·인코딩 정상화된 본문."""
+    event_id = payload["event_id"]
+    title = payload["title"]
+    notes = payload["notes"] or []
+    started_at = payload["started_at"]
+    ended_at = payload["ended_at"]
+    post_channel = payload.get("post_channel")
+    post_thread_ts = payload.get("post_thread_ts")
+
+    # /미팅종료 명시 호출 흐름이므로 중복 처리 플래그 해제
+    _processed_events.setdefault(user_id, set()).discard(event_id)
+
+    try:
+        creds, minutes_folder_id = _get_creds_and_config(user_id)
+    except Exception as e:
+        log.error(f"인증 오류 ({user_id}): {e}")
+        _post(slack_client, user_id=user_id, channel=post_channel, thread_ts=post_thread_ts,
+              text=f"⚠️ 인증 오류: {e}")
+        return
+
+    # Calendar 이벤트에서 날짜·참석자 조회 시도 (없으면 폴백)
+    date_str = datetime.now(KST).strftime("%Y-%m-%d")
+    time_range = f"{started_at.split(' ')[-1]} ~ {ended_at}" if started_at else ""
+    attendees_str = "정보 없음"
+    attendees_raw: list[dict] = []
+    if event_id:
+        try:
+            recently_ended = cal.get_recently_ended_meetings(
+                creds, min_minutes_ago=0, max_minutes_ago=180
+            )
+            for m in recently_ended:
+                if m.get("id") == event_id:
+                    date_str, time_range, attendees_str = _parse_meeting_meta(m)
+                    attendees_raw = m.get("attendees", [])
+                    break
+        except Exception as e:
+            log.warning(f"Calendar 이벤트 조회 실패: {e}")
+
+    notes_text = _format_notes(notes)
+
+    _post(slack_client, user_id=user_id, channel=post_channel, thread_ts=post_thread_ts,
+          text=(f"📎 *{title}* — 첨부 파일 *{filename}* "
+                f"({len(transcript_text):,}자)을 트랜스크립트로 회의록을 생성합니다..."))
+
+    _processed_events.setdefault(user_id, set()).add(event_id)
+    _save_processed_events(user_id)
+
+    _generate_and_post_minutes(
+        slack_client, user_id=user_id,
+        title=title, date_str=date_str, time_range=time_range,
+        attendees=attendees_str,
+        transcript_text=transcript_text, notes_text=notes_text,
+        minutes_folder_id=minutes_folder_id, creds=creds,
+        event_id=event_id, attendees_raw=attendees_raw,
+        post_channel=post_channel, post_thread_ts=post_thread_ts,
+    )
 
 
 # ── 트랜스크립트 폴링 ──────────────────────────────────────────
