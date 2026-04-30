@@ -1145,13 +1145,18 @@ def _route_message(text: str, client, user_id: str, channel: str = None,
         client.chat_postMessage(channel=channel or user_id, thread_ts=thread_ts,
                                 text=f"🔍 *{person}* 인물정보 리서치 중..." + (f" (소속: {company})" if company else ""))
         try:
-            content, _ = research_person(user_id, person, company, force=True)
-            preview = "\n".join(
-                l for l in content.splitlines()
-                if l.strip() and not l.startswith("#") and "last_searched" not in l
-            )[:300]
-            client.chat_postMessage(channel=channel or user_id, thread_ts=thread_ts,
-                                    text=f"✅ *{person}* 인물정보 갱신 완료.\n\n```{preview}```")
+            content, fid = research_person(user_id, person, company, force=True)
+            # 프라이버시 가드 — 내부 직원 차단 시 file_id 가 None
+            if fid is None:
+                client.chat_postMessage(channel=channel or user_id, thread_ts=thread_ts,
+                                        text=content)
+            else:
+                preview = "\n".join(
+                    l for l in content.splitlines()
+                    if l.strip() and not l.startswith("#") and "last_searched" not in l
+                )[:300]
+                client.chat_postMessage(channel=channel or user_id, thread_ts=thread_ts,
+                                        text=f"✅ *{person}* 인물정보 갱신 완료.\n\n```{preview}```")
         except Exception as e:
             client.chat_postMessage(channel=channel or user_id, thread_ts=thread_ts,
                                     text=f"⚠️ 인물정보 리서치 실패: {e}")
@@ -1491,15 +1496,19 @@ def _person_handler(ack, body, client):
         text=f"🔍 *{person_name}* 인물정보 리서치 중..." + (f" (소속: {company_name})" if company_name else ""),
     )
     try:
-        content, _ = research_person(user_id, person_name, company_name, force=True)
-        preview = "\n".join(
-            line for line in content.splitlines()
-            if line.strip() and not line.startswith("#") and "last_searched" not in line
-        )[:300]
-        msg = f"✅ *{person_name}* 인물정보가 갱신되었습니다.\n\n```{preview}```"
-        if company_name:
-            msg += f"\n_(연관 기업정보 *{company_name}* 도 함께 갱신되었습니다)_"
-        client.chat_postMessage(channel=user_id, text=msg)
+        content, fid = research_person(user_id, person_name, company_name, force=True)
+        # 프라이버시 가드 — 내부 직원 차단 시 file_id 가 None
+        if fid is None:
+            client.chat_postMessage(channel=user_id, text=content)
+        else:
+            preview = "\n".join(
+                line for line in content.splitlines()
+                if line.strip() and not line.startswith("#") and "last_searched" not in line
+            )[:300]
+            msg = f"✅ *{person_name}* 인물정보가 갱신되었습니다.\n\n```{preview}```"
+            if company_name:
+                msg += f"\n_(연관 기업정보 *{company_name}* 도 함께 갱신되었습니다)_"
+            client.chat_postMessage(channel=user_id, text=msg)
     except Exception as e:
         client.chat_postMessage(channel=user_id, text=f"⚠️ 인물정보 리서치 실패: {e}")
 

@@ -270,8 +270,12 @@ def handle_confirm_save(slack_client, user_id: str):
         _post(slack_client, user_id=user_id,
               text=f"💾 *{person_name}* ({company_name}) 인물정보 저장 중...\n웹 검색도 함께 진행합니다.")
         try:
-            research_person(user_id, person_name, company_name,
-                            force=True, card_data=card_data)
+            content, fid = research_person(user_id, person_name, company_name,
+                                            force=True, card_data=card_data)
+            # 프라이버시 가드 — 내부 직원 차단 시 file_id 가 None
+            if fid is None:
+                _post(slack_client, user_id=user_id, text=content)
+                return
             msg = f"✅ *{person_name}* 인물정보가 저장되었습니다."
             if company_name:
                 msg += f"\n명함 정보 + 웹 검색 결과가 함께 저장됐어요."
