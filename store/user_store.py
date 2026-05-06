@@ -88,7 +88,8 @@ def init_db():
                     "dreamplus_jwt TEXT",
                     "dreamplus_jwt_exp TEXT",
                     "trello_token_enc TEXT",
-                    "briefing_enabled INTEGER DEFAULT 1"):
+                    "briefing_enabled INTEGER DEFAULT 1",
+                    "meeting_start_alarm_enabled INTEGER DEFAULT 1"):
             try:
                 conn.execute(f"ALTER TABLE users ADD COLUMN {col}")
             except Exception:
@@ -174,6 +175,16 @@ def init_db():
         conn.execute("CREATE INDEX IF NOT EXISTS idx_meeting_company ON meeting_index(company_name)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_meeting_date ON meeting_index(date)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_meeting_user ON meeting_index(user_id)")
+
+        # 미팅 시작 알람 발송 이력 — (user_id, event_id) 단위 중복 방지
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS meeting_alarms (
+                user_id    TEXT NOT NULL,
+                event_id   TEXT NOT NULL,
+                sent_at    TEXT NOT NULL,
+                PRIMARY KEY (user_id, event_id)
+            )
+        """)
 
         # 개인 Todo (FR-T1~T7) — 활성 라이브 + 히스토리 분리
         conn.execute("""
@@ -346,6 +357,61 @@ def set_briefing_enabled(slack_user_id: str, enabled: bool) -> None:
             "UPDATE users SET briefing_enabled = ? WHERE slack_user_id = ?",
             (1 if enabled else 0, slack_user_id),
         )
+
+
+def is_meeting_start_alarm_enabled(slack_user_id: str) -> bool:
+    """미팅 시작 5분 전 알람 + 자동 세션 시작 여부. 미등록·미설정 시 True."""
+    with _conn() as conn:
+        row = conn.execute(
+            "SELECT meeting_start_alarm_enabled FROM users WHERE slack_user_id = ?",
+            (slack_user_id,),
+        ).fetchone()
+    if not row:
+        return True
+    val = row["meeting_start_alarm_enabled"]
+    return True if val is None else bool(val)
+
+
+def set_meeting_start_alarm_enabled(slack_user_id: str, enabled: bool) -> None:
+    """미팅 시작 알람 on/off 토글."""
+    with _conn() as conn:
+        conn.execute(
+            "UPDATE users SET meeting_start_alarm_enabled = ? WHERE slack_user_id = ?",
+            (1 if enabled else 0, slack_user_id),
+        )
+
+
+def was_meeting_alarm_sent(slack_user_id: str, event_id: str) -> bool:
+    """이미 시작 알람을 보낸 (user, event) 조합인지 확인."""
+    with _conn() as conn:
+        row = conn.execute(
+            "SELECT 1 FROM meeting_alarms WHERE user_id = ? AND event_id = ?",
+            (slack_user_id, event_id),
+        ).fetchone()
+    return row is not None
+
+
+def mark_meeting_alarm_sent(slack_user_id: str, event_id: str) -> None:
+    """알람 발송 기록. 이미 있으면 무시 (PK 충돌)."""
+    now = datetime.now().isoformat()
+    with _conn() as conn:
+        conn.execute(
+            "INSERT OR IGNORE INTO meeting_alarms (user_id, event_id, sent_at) "
+            "VALUES (?, ?, ?)",
+            (slack_user_id, event_id, now),
+        )
+
+
+def cleanup_old_meeting_alarms(days: int = 14) -> int:
+    """오래된 알람 발송 기록 삭제 (기본 14일). Returns: 삭제된 건수."""
+    from datetime import timedelta
+    cutoff = (datetime.now() - timedelta(days=days)).isoformat()
+    with _conn() as conn:
+        cur = conn.execute(
+            "DELETE FROM meeting_alarms WHERE sent_at < ?",
+            (cutoff,),
+        )
+        return cur.rowcount
 
 
 # ── Dreamplus 자격증명 ────────────────────────────────────────

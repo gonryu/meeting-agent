@@ -549,6 +549,39 @@ def _find_candidate_events(creds) -> dict:
     }
 
 
+def bind_event_session(user_id: str, event_raw: dict) -> bool:
+    """원본 캘린더 이벤트(dict)로 세션을 조용히 바인딩 (메시지 발송 없음).
+
+    미팅 시작 알람(`scheduled_meeting_alarm`) 등 외부 트리거에서 사용. 이미 활성
+    세션이 있으면 False 반환하여 호출자가 처리하도록 함.
+
+    Returns:
+        True: 새 세션 바인딩 성공
+        False: 이미 활성 세션이 있어 건너뜀
+    """
+    if user_id in _active_sessions:
+        return False
+    parsed = cal.parse_event(event_raw)
+    end_str = (event_raw.get("end") or {}).get("dateTime", "")
+    start_str = parsed.get("start_time", "")
+    event_time_str = ""
+    try:
+        if start_str and end_str:
+            event_time_str = f"{format_time(start_str)} ~ {format_time(end_str)}"
+    except Exception:
+        pass
+    _active_sessions[user_id] = {
+        "title": parsed["summary"],
+        "started_at": datetime.now(KST).strftime("%Y-%m-%d %H:%M"),
+        "notes": [],
+        "event_id": parsed["id"],
+        "event_summary": parsed["summary"],
+        "event_time_str": event_time_str,
+    }
+    _save_active_session(user_id)
+    return True
+
+
 def _start_session_with_event(slack_client, user_id: str, event: dict):
     """파싱된 캘린더 이벤트로 세션 자동 시작. 이미 세션이 있으면 무시."""
     if user_id in _active_sessions:

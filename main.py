@@ -90,6 +90,7 @@ from store import user_store
 from server import oauth as oauth_server
 from tools import stt
 from tools import text_extract
+from tools import calendar as cal_tools
 
 app = App(token=os.getenv("SLACK_BOT_TOKEN"))
 
@@ -175,6 +176,119 @@ def scheduled_trello_weekly():
         log.exception(f"Trello 주간 보고서 실패: {e}")
 
 
+def scheduled_meeting_alarm():
+    """매분 실행 — 약 5분 뒤 시작하는 미팅을 찾아 알람 + 자동 세션 시작."""
+    try:
+        _check_and_send_meeting_alarms(app.client)
+    except Exception as e:
+        log.exception(f"미팅 시작 알람 폴링 실패: {e}")
+
+
+# 알람 발송 윈도우 — 매분 폴링이라 ±30초 여유를 둠 (4.5~5.5분 후 시작)
+_ALARM_WINDOW_MIN_S = 4 * 60 + 30
+_ALARM_WINDOW_MAX_S = 5 * 60 + 30
+
+
+def _check_and_send_meeting_alarms(slack_client):
+    """전체 사용자 대상 미팅 시작 알람 발송 + 자동 세션 바인딩."""
+    from zoneinfo import ZoneInfo
+    kst = ZoneInfo("Asia/Seoul")
+    now_kst = datetime.now(kst)
+
+    # 24시간에 한 번 수준으로 오래된 알람 기록 정리 (분당 폴링 부하 회피)
+    if now_kst.hour == 0 and now_kst.minute == 0:
+        try:
+            removed = user_store.cleanup_old_meeting_alarms(days=14)
+            if removed:
+                log.info(f"오래된 미팅 알람 기록 {removed}건 정리")
+        except Exception as e:
+            log.warning(f"미팅 알람 기록 정리 실패: {e}")
+
+    for row in user_store.all_users():
+        user_id = row["slack_user_id"]
+        # 알람 비활성 사용자는 건너뜀 (NULL/1은 수신)
+        enabled = row.get("meeting_start_alarm_enabled")
+        if enabled is not None and not enabled:
+            continue
+        try:
+            _check_user_meeting_alarm(slack_client, user_id, now_kst)
+        except Exception as e:
+            if user_store.is_token_expired_error(e):
+                log.info(f"미팅 알람 — 토큰 만료, 건너뜀: {user_id}")
+            else:
+                log.exception(f"미팅 알람 실패 ({user_id}): {e}")
+
+
+def _check_user_meeting_alarm(slack_client, user_id: str, now_kst: datetime):
+    """사용자 1명 — 5분 뒤 시작 이벤트 알람 후보 검사."""
+    creds = user_store.get_credentials(user_id)
+    events = cal_tools.get_upcoming_meetings(creds, days=1, from_now=True)
+    for ev in events:
+        ev_id = ev.get("id")
+        start_str = (ev.get("start") or {}).get("dateTime")
+        if not ev_id or not start_str:
+            continue  # 종일 이벤트 등은 스킵
+        try:
+            start_dt = datetime.fromisoformat(start_str)
+        except Exception:
+            continue
+        if start_dt.tzinfo is None:
+            start_dt = start_dt.replace(tzinfo=now_kst.tzinfo)
+        delta_s = (start_dt - now_kst).total_seconds()
+        if not (_ALARM_WINDOW_MIN_S <= delta_s <= _ALARM_WINDOW_MAX_S):
+            continue
+        if user_store.was_meeting_alarm_sent(user_id, ev_id):
+            continue
+        try:
+            _send_meeting_start_alarm(slack_client, user_id, ev, start_dt)
+            user_store.mark_meeting_alarm_sent(user_id, ev_id)
+        except Exception as e:
+            log.exception(f"미팅 알람 발송 실패 ({user_id}, {ev_id}): {e}")
+
+
+def _send_meeting_start_alarm(slack_client, user_id: str, event_raw: dict,
+                              start_dt: datetime):
+    """단일 미팅 알람 DM 발송 + 활성 세션 없으면 자동 바인딩."""
+    parsed = cal_tools.parse_event(event_raw)
+    title = parsed.get("summary") or "(제목 없음)"
+    meet_link = parsed.get("meet_link") or ""
+    location = (parsed.get("location") or "").strip()
+    end_str = (event_raw.get("end") or {}).get("dateTime", "")
+
+    time_line = start_dt.strftime("%H:%M")
+    if end_str:
+        try:
+            end_dt = datetime.fromisoformat(end_str)
+            time_line = f"{start_dt.strftime('%H:%M')} ~ {end_dt.strftime('%H:%M')}"
+        except Exception:
+            pass
+
+    lines = [f"🔔 *5분 뒤 미팅 시작*", f"\n*{title}*", f"🕐 {time_line}"]
+    if location:
+        lines.append(f"📍 {location}")
+    if meet_link:
+        lines.append(f"🎥 <{meet_link}|Google Meet 참여>")
+    lines.append("")  # 빈 줄
+
+    # 자동 세션 바인딩 (이미 활성 세션 있으면 건너뜀)
+    bound = False
+    try:
+        bound = during_agent.bind_event_session(user_id, event_raw)
+    except Exception as e:
+        log.exception(f"미팅 알람 — 세션 자동 바인딩 실패 ({user_id}): {e}")
+
+    if bound:
+        lines.append("회의록 자동 생성을 위해 세션을 시작했어요. 미팅이 끝나면 트랜스크립트가 도착하는 대로 자동 처리되거나 `/미팅종료` 로 마무리하실 수 있어요.")
+    else:
+        lines.append("_이미 진행 중인 세션이 있어 자동 바인딩은 건너뛰었어요._")
+
+    fallback = f"🔔 5분 뒤 미팅 시작 — {title} ({time_line})"
+    blocks = [{"type": "section",
+               "text": {"type": "mrkdwn", "text": "\n".join(lines)}}]
+    slack_client.chat_postMessage(channel=user_id, text=fallback, blocks=blocks,
+                                  unfurl_links=False, unfurl_media=False)
+
+
 from datetime import datetime as _dt
 scheduler = BackgroundScheduler(timezone="Asia/Seoul")
 scheduler.add_job(scheduled_briefing, "cron", hour=9, minute=0)
@@ -184,6 +298,8 @@ scheduler.add_job(scheduled_action_item_reminder, "cron", hour=8, minute=0)
 scheduler.add_job(scheduled_feedback_digest, "cron", hour=22, minute=0)
 scheduler.add_job(scheduled_trello_weekly, "cron",
                   day_of_week="fri", hour=21, minute=0)
+# 미팅 시작 5분 전 알람 — 매분 폴링
+scheduler.add_job(scheduled_meeting_alarm, "interval", minutes=1)
 
 
 # ── @멘션 처리 ───────────────────────────────────────────────
@@ -546,8 +662,12 @@ _INTENT_PROMPT = """사용자의 Slack 메시지를 분석해서 의도(intent)�
 - todo_cancel: 할 일 취소 처리 (예: "워드프레스 이전 취소", "그 항목 취소해줘")
 - todo_delete: 할 일 삭제 (예: "병원 예약 삭제", "1번 삭제해줘", "그 todo 지워줘")
 - todo_update: 할 일 수정 — 마감일·카테고리·제목 (예: "AIA 제안서 마감 5/3로 변경", "병원 예약 마감을 다음주 월요일로", "그 항목 카테고리 개인으로")
-- settings: 사용자 설정 화면 — 매일 09:00 브리핑 알람 on/off 토글 (예: "설정", "내 설정", "브리핑 알람 켜줘", "브리핑 알람 꺼줘", "아침 브리핑 끄기", "9시 브리핑 받기 싫어", "브리핑 알림 설정", "설정 보여줘", "settings")
-  * params: {{"action": "show" | "enable" | "disable"}} — "켜줘"·"받을래"는 enable, "꺼줘"·"받기 싫어"·"끄기"는 disable, 그 외(설정 화면 요청)는 show.
+- settings: 사용자 설정 화면 — 알람 on/off 토글 (예: "설정", "내 설정", "브리핑 알람 켜줘", "브리핑 알람 꺼줘", "9시 브리핑 받기 싫어", "미팅 시작 알람 꺼줘", "5분전 알람 끄기", "미팅 알람 받을래", "settings")
+  * params: {{"target": "briefing" | "start_alarm" | "show", "action": "show" | "enable" | "disable"}}
+    - target="briefing": 매일 09:00 브리핑 알람 (예: "브리핑 알람", "9시 브리핑", "아침 브리핑")
+    - target="start_alarm": 미팅 시작 5분 전 알람 (예: "미팅 시작 알람", "5분 전 알람", "미팅 알람")
+    - target="show": 설정 화면만 보여주기 (예: "설정", "내 설정 보여줘")
+    - action: "켜줘"·"받을래"는 enable, "꺼줘"·"받기 싫어"·"끄기"는 disable, 단순 화면 요청이면 show. target="show"면 action도 "show".
 - feedback: 기능 요청·개선 제안·버그 리포트 (예: "~기능 추가해줘", "~이렇게 개선해줘", "~가 안 돼 버그 같아", "~기능 넣어줘", "~가 불편해", "~해줬으면 좋겠어", "~도 지원해줘")
   * 주의: 질문 형태(~어떻게 해?, ~방법 있어?, ~가능해?, ~하려면 뭘 하면 돼?)는 feedback이 아니라 question. 요구/불만/제안의 단정형일 때만 feedback.
   * 주의: 위 todo_* 인텐트(특히 todo_add/todo_complete)와 혼동 금지. 사용자가 자기 할 일을 추가·종료·수정하는 메시지면 todo_*.
@@ -1323,12 +1443,17 @@ def _route_message(text: str, client, user_id: str, channel: str = None,
             ).start()
 
     elif intent == "settings":
+        target = (params.get("target") or "show").strip().lower()
         action = (params.get("action") or "show").strip().lower()
-        if action in ("enable", "disable"):
+        setters = {
+            "briefing": user_store.set_briefing_enabled,
+            "start_alarm": user_store.set_meeting_start_alarm_enabled,
+        }
+        if action in ("enable", "disable") and target in setters:
             try:
-                user_store.set_briefing_enabled(user_id, action == "enable")
+                setters[target](user_id, action == "enable")
             except Exception as e:
-                log.exception(f"브리핑 설정 변경 실패 ({user_id}): {e}")
+                log.exception(f"설정 변경 실패 ({target}, {user_id}): {e}")
                 client.chat_postMessage(
                     channel=channel or user_id, thread_ts=thread_ts,
                     text="⚠️ 설정 변경에 실패했어요. 잠시 후 다시 시도해주세요.")
@@ -1432,29 +1557,52 @@ app.command("/brief")(_brief_handler)
 
 # ── 사용자 설정 ──────────────────────────────────────────────
 
-def _settings_blocks(user_id: str) -> tuple[str, list[dict]]:
-    """현재 설정 상태 + 토글 버튼 블록 생성."""
-    enabled = user_store.is_briefing_enabled(user_id)
+def _toggle_block(*, label: str, description: str, action_id: str,
+                  enabled: bool) -> list[dict]:
+    """단일 토글(섹션 + 액션) 블록 생성."""
     status_label = "🔔 켜짐" if enabled else "🔕 꺼짐"
     button_text = "끄기" if enabled else "켜기"
     button_style = "danger" if enabled else "primary"
     next_value = "off" if enabled else "on"
-    fallback = f"⚙️ 설정 — 매일 09:00 브리핑 알람: {status_label}"
-    blocks = [
-        {"type": "header",
-         "text": {"type": "plain_text", "text": "⚙️ 설정", "emoji": True}},
+    return [
         {"type": "section",
          "text": {"type": "mrkdwn",
-                  "text": f"*매일 09:00 브리핑 알람*\n현재 상태: *{status_label}*"}},
+                  "text": f"*{label}*\n{description}\n현재 상태: *{status_label}*"}},
         {"type": "actions",
          "elements": [{
              "type": "button",
-             "action_id": "toggle_briefing",
+             "action_id": action_id,
              "text": {"type": "plain_text", "text": button_text, "emoji": True},
              "style": button_style,
              "value": next_value,
          }]},
     ]
+
+
+def _settings_blocks(user_id: str) -> tuple[str, list[dict]]:
+    """현재 설정 상태 + 토글 버튼들 (브리핑 알람·미팅 시작 알람)."""
+    briefing_on = user_store.is_briefing_enabled(user_id)
+    alarm_on = user_store.is_meeting_start_alarm_enabled(user_id)
+    fallback = (f"⚙️ 설정 — 브리핑: {'켜짐' if briefing_on else '꺼짐'} / "
+                f"미팅 시작 알람: {'켜짐' if alarm_on else '꺼짐'}")
+    blocks: list[dict] = [
+        {"type": "header",
+         "text": {"type": "plain_text", "text": "⚙️ 설정", "emoji": True}},
+    ]
+    blocks.extend(_toggle_block(
+        label="매일 09:00 브리핑 알람",
+        description="아침 9시에 그날 미팅·업체 브리핑을 DM으로 받습니다.",
+        action_id="toggle_briefing",
+        enabled=briefing_on,
+    ))
+    blocks.append({"type": "divider"})
+    blocks.extend(_toggle_block(
+        label="미팅 시작 5분 전 알람",
+        description="캘린더 미팅 5분 전에 Google Meet 링크를 DM으로 받고, "
+                    "회의록 자동 생성을 위한 세션이 자동 시작됩니다.",
+        action_id="toggle_start_alarm",
+        enabled=alarm_on,
+    ))
     return fallback, blocks
 
 
@@ -1482,16 +1630,15 @@ app.command("/설정")(_settings_handler)
 app.command("/settings")(_settings_handler)
 
 
-@app.action("toggle_briefing")
-def handle_toggle_briefing(ack, body, client):
-    ack()
+def _apply_setting_toggle(client, body, setter, label: str):
+    """공통 토글 처리 — DB 갱신 후 설정 카드 in-place 업데이트."""
     user_id = body["user"]["id"]
     next_value = (body.get("actions") or [{}])[0].get("value", "")
     enable = next_value == "on"
     try:
-        user_store.set_briefing_enabled(user_id, enable)
+        setter(user_id, enable)
     except Exception as e:
-        log.exception(f"브리핑 설정 토글 실패 ({user_id}): {e}")
+        log.exception(f"설정 토글 실패 ({label}, {user_id}): {e}")
         try:
             client.chat_postMessage(channel=user_id,
                                     text="⚠️ 설정 변경에 실패했어요. 잠시 후 다시 시도해주세요.")
@@ -1511,6 +1658,20 @@ def handle_toggle_briefing(ack, body, client):
             log.warning(f"설정 메시지 업데이트 실패: {e}")
     # 업데이트 실패 시 새 메시지로 폴백
     client.chat_postMessage(channel=user_id, text=fallback, blocks=blocks)
+
+
+@app.action("toggle_briefing")
+def handle_toggle_briefing(ack, body, client):
+    ack()
+    _apply_setting_toggle(client, body, user_store.set_briefing_enabled, "briefing")
+
+
+@app.action("toggle_start_alarm")
+def handle_toggle_start_alarm(ack, body, client):
+    ack()
+    _apply_setting_toggle(client, body,
+                          user_store.set_meeting_start_alarm_enabled,
+                          "meeting_start_alarm")
 
 
 def _update_handler(ack, body, client):
