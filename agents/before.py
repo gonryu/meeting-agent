@@ -1161,13 +1161,13 @@ def run_briefing(slack_client, user_id: str, event: dict = None,
         else:
             events = cal.get_upcoming_meetings(creds, days=days, from_now=True)
 
+    sent_threads: list[str] = []
+    research_queue: list[tuple[dict, str]] = []  # (meeting, company_name)
+
     if not events:
+        # 미팅이 없어도 Todo 블록은 계속 진행 (return 하지 않음)
         _post(slack_client, user_id=user_id, channel=channel, thread_ts=thread_ts,
               text=f"📅 {period_text} 내 미팅이 없습니다.")
-        return []
-
-    sent_threads = []
-    research_queue: list[tuple[dict, str]] = []  # (meeting, company_name)
 
     # 기존 업체 목록 로딩 (LLM 추론 시 후보로 사용, FR-B14)
     existing_companies = []
@@ -1178,7 +1178,7 @@ def run_briefing(slack_client, user_id: str, event: dict = None,
     except Exception as e:
         log.warning(f"기존 업체 목록 로딩 실패: {e}")
 
-    # 1단계: 모든 미팅 헤더 즉시 발송 (리서치 없이)
+    # 1단계: 모든 미팅 헤더 즉시 발송 (리서치 없이; events가 비면 즉시 패스)
     for ev in events:
         meeting = cal.parse_event(ev)
 
