@@ -577,6 +577,8 @@ def bind_event_session(user_id: str, event_raw: dict) -> bool:
         "event_id": parsed["id"],
         "event_summary": parsed["summary"],
         "event_time_str": event_time_str,
+        # 적응형 폴링용 — 캘린더 종료시각이 지나면 트랜스크립트 즉시 탐색
+        "event_end_iso": end_str,
     }
     _save_active_session(user_id)
     return True

@@ -184,6 +184,53 @@ def scheduled_meeting_alarm():
         log.exception(f"미팅 시작 알람 폴링 실패: {e}")
 
 
+def scheduled_fast_transcript_check():
+    """2분 주기 — 캘린더 종료시각이 지난 활성 세션이 있으면 즉시 트랜스크립트 탐색.
+
+    `check_transcripts`(10분 주기)와 별개로, 자동 바인딩된 세션이 끝나자마자
+    회의록을 만들 수 있도록 빠른 경로 제공.
+    """
+    try:
+        _fast_transcript_check_for_ended_sessions(app.client)
+    except Exception as e:
+        log.exception(f"빠른 트랜스크립트 폴링 실패: {e}")
+
+
+def _fast_transcript_check_for_ended_sessions(slack_client):
+    from zoneinfo import ZoneInfo
+    kst = ZoneInfo("Asia/Seoul")
+    now_kst = datetime.now(kst)
+
+    # 종료시각이 지난 활성 세션을 가진 사용자만 추림 — 불필요한 캘린더 호출 회피
+    target_users: set[str] = set()
+    for user_id, sess in list(during_agent._active_sessions.items()):
+        end_iso = sess.get("event_end_iso") or ""
+        if not end_iso:
+            continue
+        try:
+            end_dt = datetime.fromisoformat(end_iso)
+        except Exception:
+            continue
+        if end_dt.tzinfo is None:
+            end_dt = end_dt.replace(tzinfo=kst)
+        if now_kst >= end_dt:
+            target_users.add(user_id)
+
+    if not target_users:
+        return
+
+    for user_id in target_users:
+        try:
+            during_agent._check_transcripts_for_user(
+                slack_client, user_id, min_minutes_ago=0,
+            )
+        except Exception as e:
+            if user_store.is_token_expired_error(e):
+                log.info(f"빠른 폴링 — 토큰 만료, 건너뜀: {user_id}")
+            else:
+                log.exception(f"빠른 폴링 실패 ({user_id}): {e}")
+
+
 # 알람 발송 윈도우 — 매분 폴링이라 ±30초 여유를 둠 (4.5~5.5분 후 시작)
 _ALARM_WINDOW_MIN_S = 4 * 60 + 30
 _ALARM_WINDOW_MAX_S = 5 * 60 + 30
@@ -278,13 +325,24 @@ def _send_meeting_start_alarm(slack_client, user_id: str, event_raw: dict,
         log.exception(f"미팅 알람 — 세션 자동 바인딩 실패 ({user_id}): {e}")
 
     if bound:
-        lines.append("회의록 자동 생성을 위해 세션을 시작했어요. 미팅이 끝나면 트랜스크립트가 도착하는 대로 자동 처리되거나 `/미팅종료` 로 마무리하실 수 있어요.")
+        lines.append("회의록 자동 생성을 위해 세션을 시작했어요. 미팅이 끝나면 아래 버튼을 누르거나, 트랜스크립트 도착 시 자동 처리됩니다.")
     else:
         lines.append("_이미 진행 중인 세션이 있어 자동 바인딩은 건너뛰었어요._")
 
     fallback = f"🔔 5분 뒤 미팅 시작 — {title} ({time_line})"
-    blocks = [{"type": "section",
-               "text": {"type": "mrkdwn", "text": "\n".join(lines)}}]
+    blocks: list[dict] = [{"type": "section",
+                           "text": {"type": "mrkdwn", "text": "\n".join(lines)}}]
+    # "지금 미팅 끝남" 버튼 — 사용자가 미팅 끝나자마자 누르면 즉시 회의록 흐름 진입
+    blocks.append({
+        "type": "actions",
+        "elements": [{
+            "type": "button",
+            "action_id": "meeting_end_now",
+            "text": {"type": "plain_text", "text": "🛑 지금 미팅 끝남", "emoji": True},
+            "style": "primary",
+            "value": parsed.get("id", ""),
+        }],
+    })
     slack_client.chat_postMessage(channel=user_id, text=fallback, blocks=blocks,
                                   unfurl_links=False, unfurl_media=False)
 
@@ -300,6 +358,8 @@ scheduler.add_job(scheduled_trello_weekly, "cron",
                   day_of_week="fri", hour=21, minute=0)
 # 미팅 시작 5분 전 알람 — 매분 폴링
 scheduler.add_job(scheduled_meeting_alarm, "interval", minutes=1)
+# 캘린더 종료 후 빠른 회의록 생성 — 2분 주기로 종료된 세션만 탐색
+scheduler.add_job(scheduled_fast_transcript_check, "interval", minutes=2)
 
 
 # ── @멘션 처리 ───────────────────────────────────────────────
@@ -1672,6 +1732,52 @@ def handle_toggle_start_alarm(ack, body, client):
     _apply_setting_toggle(client, body,
                           user_store.set_meeting_start_alarm_enabled,
                           "meeting_start_alarm")
+
+
+@app.action("meeting_end_now")
+def handle_meeting_end_now(ack, body, client):
+    """미팅 시작 알람 DM의 '🛑 지금 미팅 끝남' 버튼 — 즉시 end_session 흐름 진입."""
+    ack()
+    user_id = body["user"]["id"]
+    event_id = (body.get("actions") or [{}])[0].get("value", "")
+    container = body.get("container") or {}
+    msg_ch = container.get("channel_id")
+    msg_ts = container.get("message_ts")
+
+    # 활성 세션이 이 이벤트에 바인딩되어 있는지 확인 — 다른 세션 종료 방지
+    sess = during_agent._active_sessions.get(user_id)
+    if not sess or (event_id and sess.get("event_id") != event_id):
+        try:
+            client.chat_postMessage(
+                channel=user_id,
+                text="⚠️ 이 미팅 세션은 이미 종료되었거나 활성 상태가 아닙니다.",
+            )
+        except Exception:
+            pass
+        return
+
+    # 중복 클릭 방지 — 버튼 제거하고 진행 중 표시로 갱신
+    if msg_ch and msg_ts:
+        try:
+            client.chat_update(
+                channel=msg_ch, ts=msg_ts,
+                text="🛑 미팅 종료 처리 중...",
+                blocks=[{
+                    "type": "section",
+                    "text": {"type": "mrkdwn",
+                             "text": "🛑 *미팅 종료 처리 중...* 트랜스크립트가 준비되면 회의록 초안을 보내드릴게요."},
+                }],
+            )
+        except Exception:
+            pass
+
+    # 백그라운드로 종료 흐름 (Slack 3초 응답 제한 대응)
+    threading.Thread(
+        target=during_agent.end_session,
+        args=(client,),
+        kwargs=dict(user_id=user_id),
+        daemon=True,
+    ).start()
 
 
 def _update_handler(ack, body, client):
