@@ -87,7 +87,8 @@ def init_db():
                     "dreamplus_password_enc TEXT",
                     "dreamplus_jwt TEXT",
                     "dreamplus_jwt_exp TEXT",
-                    "trello_token_enc TEXT"):
+                    "trello_token_enc TEXT",
+                    "briefing_enabled INTEGER DEFAULT 1"):
             try:
                 conn.execute(f"ALTER TABLE users ADD COLUMN {col}")
             except Exception:
@@ -321,6 +322,30 @@ def all_users() -> list[dict]:
     with _conn() as conn:
         rows = conn.execute("SELECT * FROM users").fetchall()
     return [dict(r) for r in rows]
+
+
+# ── 브리핑 알람 on/off ───────────────────────────────────────
+
+def is_briefing_enabled(slack_user_id: str) -> bool:
+    """매일 09:00 자동 브리핑 수신 여부. 미등록·미설정 시 True (기본 on)."""
+    with _conn() as conn:
+        row = conn.execute(
+            "SELECT briefing_enabled FROM users WHERE slack_user_id = ?",
+            (slack_user_id,),
+        ).fetchone()
+    if not row:
+        return True
+    val = row["briefing_enabled"]
+    return True if val is None else bool(val)
+
+
+def set_briefing_enabled(slack_user_id: str, enabled: bool) -> None:
+    """자동 브리핑 수신 on/off 토글."""
+    with _conn() as conn:
+        conn.execute(
+            "UPDATE users SET briefing_enabled = ? WHERE slack_user_id = ?",
+            (1 if enabled else 0, slack_user_id),
+        )
 
 
 # ── Dreamplus 자격증명 ────────────────────────────────────────
