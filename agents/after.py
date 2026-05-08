@@ -1257,7 +1257,7 @@ def _register_to_card(slack_client, *, user_id: str, event_id: str,
             "due_date": it.get("due_date"),
         })
 
-    count = trello.add_checklist_items_by_id(user_id, card_id, checklist_items)
+    count, err = trello.add_checklist_items_by_id(user_id, card_id, checklist_items)
 
     # 회의록 요약을 카드 코멘트로 추가
     summary = _minutes_summary_cache.pop(event_id, "")
@@ -1280,9 +1280,11 @@ def _register_to_card(slack_client, *, user_id: str, event_id: str,
             ),
         )
     else:
+        # 실패 원인을 사용자 메시지에 노출 (어떤 에러였는지 알아야 다음 액션 결정 가능)
+        detail = f"\n원인: `{err}`" if err else ""
         slack_client.chat_postMessage(
             channel=target_channel, thread_ts=thread_ts,
-            text=f"❌ Trello 등록 실패: {card_name} 카드에 항목을 추가하지 못했습니다.",
+            text=f"❌ Trello 등록 실패: {card_name} 카드에 항목을 추가하지 못했습니다.{detail}",
         )
 
 
