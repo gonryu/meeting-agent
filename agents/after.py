@@ -12,7 +12,7 @@ import json
 import logging
 import os
 import re
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import anthropic
@@ -704,17 +704,151 @@ _SUMMARIZE_MINUTES_PROMPT = """다음 회의록을 10줄 이내로 요약하세�
 
 # ── D-2. Trello 액션아이템 등록 ─────────────────────────────
 
+def handle_trello_register_from_text(
+    slack_client, *,
+    user_id: str,
+    parent_text: str,
+    company_hint: str = "",
+    channel: str | None = None,
+    thread_ts: str | None = None,
+) -> None:
+    """스레드 부모 메시지(회의록·요약 텍스트)에서 액션아이템 추출 → Trello 카드 등록 제안.
+
+    채널 스레드에서 `@봇 위 회의록 트렐로에 등록해줘` 형태로 호출되는 진입점.
+    카드 선택 UI와 후속 결과 메시지 모두 호출 위치(channel/thread_ts)로 회신.
+    """
+    target_channel = channel or user_id
+
+    if not parent_text.strip():
+        slack_client.chat_postMessage(
+            channel=target_channel, thread_ts=thread_ts,
+            text=("⚠️ 등록할 회의록 텍스트를 찾지 못했어요.\n"
+                  "회의록이 적힌 메시지에 *답글(스레드)* 로 호출해주세요."),
+        )
+        return
+
+    # Trello 토큰 확인
+    if not user_store.get_trello_token(user_id):
+        try:
+            from server.oauth import build_trello_auth_url
+            trello_url = build_trello_auth_url(user_id)
+            slack_client.chat_postMessage(
+                channel=target_channel, thread_ts=thread_ts,
+                text=f"📌 Trello 연동이 필요해요.\n<{trello_url}|Trello 계정 연동>",
+            )
+        except Exception as e:
+            log.warning(f"Trello 연동 안내 발송 실패: {e}")
+            slack_client.chat_postMessage(
+                channel=target_channel, thread_ts=thread_ts,
+                text="📌 Trello 연동이 필요해요. `/trello` 명령으로 먼저 연결해주세요.",
+            )
+        return
+
+    # 처리 중 안내
+    slack_client.chat_postMessage(
+        channel=target_channel, thread_ts=thread_ts,
+        text="📌 트렐로 등록 처리 중... (액션아이템 추출 → 카드 후보 검색)",
+    )
+
+    # 1. 업체명 추론 — 힌트 우선, 없으면 본문 첫머리에서 LLM 추론
+    company = (company_hint or "").strip()
+    if not company:
+        try:
+            from agents.before import _infer_company_from_title
+            # 회의록 첫 줄~상단부에 보통 업체명/제목이 있음
+            preview = parent_text.strip().splitlines()[0][:200]
+            company = _infer_company_from_title(preview)
+        except Exception as e:
+            log.warning(f"업체명 추론 실패: {e}")
+            company = ""
+
+    if not company:
+        slack_client.chat_postMessage(
+            channel=target_channel, thread_ts=thread_ts,
+            text=("⚠️ 업체명을 찾지 못했어요.\n"
+                  "다시 호출하실 때 업체명을 함께 적어주세요. 예: `위 회의록 트렐로에 KISA 카드로 등록해줘`"),
+        )
+        return
+
+    # 2. 액션아이템 추출 (오케스트레이터 풀 파이프라인)
+    today_iso = datetime.now(KST).strftime("%Y-%m-%d")
+    title = f"{company} (스레드 등록)"
+    try:
+        if action_items_orchestrator.is_enabled():
+            enriched = action_items_orchestrator.extract_and_enrich(
+                parent_text,
+                meeting_title=title,
+                meeting_date=today_iso,
+                fallback=lambda: _legacy_extract_action_items(parent_text),
+            )
+        else:
+            enriched = _legacy_extract_action_items(parent_text)
+    except Exception as e:
+        log.exception(f"액션아이템 추출 실패: {e}")
+        slack_client.chat_postMessage(
+            channel=target_channel, thread_ts=thread_ts,
+            text=f"❌ 액션아이템 추출 실패: {e}",
+        )
+        return
+
+    if not enriched:
+        slack_client.chat_postMessage(
+            channel=target_channel, thread_ts=thread_ts,
+            text="⚠️ 텍스트에서 액션아이템을 찾지 못했어요.",
+        )
+        return
+
+    is_orchestrator_result = any("severity" in i or "task" in i for i in enriched)
+    items_to_save = (
+        _normalize_orchestrator_items(enriched) if is_orchestrator_result else enriched
+    )
+
+    # 3. 합성 event_id 발급 + DB 저장 (스레드 ts 기반, 캘린더 ID와 충돌 안 함)
+    safe_ch = (channel or "dm").replace(".", "_")
+    safe_ts = (thread_ts or "noid").replace(".", "_")
+    event_id = f"thread_{safe_ch}_{safe_ts}"
+    user_store.save_action_items(event_id, user_id, items_to_save)
+    log.info(f"스레드 액션아이템 {len(items_to_save)}개 저장 "
+             f"(orchestrator={is_orchestrator_result}): {event_id}")
+
+    # 4. 회의록 요약 생성 + 캐시 (Trello 카드 코멘트용)
+    try:
+        summary = _generate(_SUMMARIZE_MINUTES_PROMPT.format(minutes=parent_text))
+        _minutes_summary_cache[event_id] = summary.strip()
+    except Exception as e:
+        log.warning(f"회의록 요약 생성 실패 (무시): {e}")
+
+    # 5. 카드 선택 UI 발송 — 호출 위치(채널/스레드)로 회신
+    _propose_trello_registration(
+        slack_client,
+        user_id=user_id,
+        event_id=event_id,
+        company_names=[company],
+        channel=channel,
+        thread_ts=thread_ts,
+    )
+
+
 def _propose_trello_registration(
     slack_client, *,
     user_id: str,
     event_id: str,
     company_names: list[str],
+    channel: str | None = None,
+    thread_ts: str | None = None,
 ) -> None:
-    """액션아이템이 있으면 업체별로 Trello 카드 후보를 보여주고 선택하게 함"""
+    """액션아이템이 있으면 업체별로 Trello 카드 후보를 보여주고 선택하게 함.
+
+    channel/thread_ts 미지정 시 사용자 DM(=user_id)으로 발송 (기존 동작 유지).
+    지정 시 해당 채널/스레드에 발송하고, 버튼 페이로드에도 함께 실어 후속 핸들러가
+    동일 위치에 결과를 회신하도록 함.
+    """
     items = user_store.get_action_items(event_id)
     if not items:
         log.info(f"액션아이템 없음 — Trello 등록 스킵: {event_id}")
         return
+
+    target_channel = channel or user_id
 
     for company_name in company_names:
         # 유사 카드 후보 검색
@@ -763,6 +897,8 @@ def _propose_trello_registration(
                         "company": company_name,
                         "card_id": c["card_id"],
                         "card_name": c["card_name"],
+                        "channel": channel,
+                        "thread_ts": thread_ts,
                     }),
                 })
                 # style=None은 Slack API에서 무시되지 않으므로 제거
@@ -777,6 +913,8 @@ def _propose_trello_registration(
             "value": json.dumps({
                 "event_id": event_id,
                 "company": company_name,
+                "channel": channel,
+                "thread_ts": thread_ts,
             }),
         })
         buttons.append({
@@ -786,13 +924,16 @@ def _propose_trello_registration(
             "value": json.dumps({
                 "event_id": event_id,
                 "company": company_name,
+                "channel": channel,
+                "thread_ts": thread_ts,
             }),
         })
 
         blocks.append({"type": "actions", "elements": buttons})
 
         slack_client.chat_postMessage(
-            channel=user_id,
+            channel=target_channel,
+            thread_ts=thread_ts,
             text=f"📌 Trello에 액션아이템 등록할까요? ({company_name})",
             blocks=blocks,
         )
@@ -807,6 +948,8 @@ def handle_trello_select_card(slack_client, body: dict) -> None:
         company_name = payload["company"]
         card_id = payload["card_id"]
         card_name = payload["card_name"]
+        channel = payload.get("channel")
+        thread_ts = payload.get("thread_ts")
     except (KeyError, json.JSONDecodeError) as e:
         log.warning(f"Trello 카드 선택 payload 파싱 실패: {e}")
         slack_client.chat_postMessage(
@@ -815,7 +958,8 @@ def handle_trello_select_card(slack_client, body: dict) -> None:
         return
 
     _register_to_card(slack_client, user_id=user_id, event_id=event_id,
-                      card_id=card_id, card_name=card_name)
+                      card_id=card_id, card_name=card_name,
+                      channel=channel, thread_ts=thread_ts)
 
 
 def handle_trello_new_card(slack_client, body: dict) -> None:
@@ -825,6 +969,8 @@ def handle_trello_new_card(slack_client, body: dict) -> None:
         payload = json.loads(body["actions"][0]["value"])
         event_id = payload["event_id"]
         company_name = payload["company"]
+        channel = payload.get("channel")
+        thread_ts = payload.get("thread_ts")
     except (KeyError, json.JSONDecodeError) as e:
         log.warning(f"Trello 신규 카드 payload 파싱 실패: {e}")
         slack_client.chat_postMessage(
@@ -852,6 +998,8 @@ def handle_trello_new_card(slack_client, body: dict) -> None:
                     "value": json.dumps({
                         "event_id": event_id,
                         "company": company_name,
+                        "channel": channel,
+                        "thread_ts": thread_ts,
                     }),
                 },
                 {
@@ -861,6 +1009,8 @@ def handle_trello_new_card(slack_client, body: dict) -> None:
                     "value": json.dumps({
                         "event_id": event_id,
                         "company": company_name,
+                        "channel": channel,
+                        "thread_ts": thread_ts,
                     }),
                 },
             ],
@@ -868,7 +1018,8 @@ def handle_trello_new_card(slack_client, body: dict) -> None:
     ]
 
     slack_client.chat_postMessage(
-        channel=user_id,
+        channel=channel or user_id,
+        thread_ts=thread_ts,
         text=f"🆕 '{company_name}' 카드를 Trello에 새로 생성할까요?",
         blocks=blocks,
     )
@@ -881,6 +1032,8 @@ def handle_trello_confirm_new_card(slack_client, body: dict) -> None:
         payload = json.loads(body["actions"][0]["value"])
         event_id = payload["event_id"]
         company_name = payload["company"]
+        channel = payload.get("channel")
+        thread_ts = payload.get("thread_ts")
     except (KeyError, json.JSONDecodeError) as e:
         log.warning(f"Trello 카드 생성 확인 payload 파싱 실패: {e}")
         slack_client.chat_postMessage(
@@ -891,36 +1044,48 @@ def handle_trello_confirm_new_card(slack_client, body: dict) -> None:
     result = trello.create_card(user_id, company_name)
     if result is None:
         slack_client.chat_postMessage(
-            channel=user_id,
+            channel=channel or user_id, thread_ts=thread_ts,
             text=f"❌ Trello 카드 생성 실패: {company_name}",
         )
         return
 
     _register_to_card(slack_client, user_id=user_id, event_id=event_id,
-                      card_id=result["card_id"], card_name=result["card_name"])
+                      card_id=result["card_id"], card_name=result["card_name"],
+                      channel=channel, thread_ts=thread_ts)
 
 
 def handle_trello_cancel_new_card(slack_client, body: dict) -> None:
     """FR-A16: 신규 카드 생성 취소"""
     user_id = body["user"]["id"]
+    channel = None
+    thread_ts = None
     try:
         payload = json.loads(body["actions"][0]["value"])
         company_name = payload["company"]
+        channel = payload.get("channel")
+        thread_ts = payload.get("thread_ts")
     except (KeyError, json.JSONDecodeError):
         company_name = "알 수 없음"
     slack_client.chat_postMessage(
-        channel=user_id,
+        channel=channel or user_id, thread_ts=thread_ts,
         text=f"⏭️ *{company_name}* Trello 카드 생성을 건너뛰었습니다.",
     )
 
 
 def _register_to_card(slack_client, *, user_id: str, event_id: str,
-                      card_id: str, card_name: str) -> None:
-    """지정된 카드에 액션아이템 체크리스트 + 회의록 요약 코멘트 등록"""
+                      card_id: str, card_name: str,
+                      channel: str | None = None,
+                      thread_ts: str | None = None) -> None:
+    """지정된 카드에 액션아이템 체크리스트 + 회의록 요약 코멘트 등록.
+
+    channel/thread_ts 미지정 시 사용자 DM(=user_id)으로 회신 (기존 동작 유지).
+    """
+    target_channel = channel or user_id
     items = user_store.get_action_items(event_id)
     if not items:
         slack_client.chat_postMessage(
-            channel=user_id, text="액션아이템이 없어 Trello 등록을 건너뜁니다."
+            channel=target_channel, thread_ts=thread_ts,
+            text="액션아이템이 없어 Trello 등록을 건너뜁니다.",
         )
         return
 
@@ -947,7 +1112,7 @@ def _register_to_card(slack_client, *, user_id: str, event_id: str,
         card_url = card_info["url"] if card_info else ""
         url_text = f"\n<{card_url}|카드 열기>" if card_url else ""
         slack_client.chat_postMessage(
-            channel=user_id,
+            channel=target_channel, thread_ts=thread_ts,
             text=(
                 f"📌 *Trello 액션아이템 등록 완료*\n"
                 f"*카드:* {card_name}\n"
@@ -956,7 +1121,7 @@ def _register_to_card(slack_client, *, user_id: str, event_id: str,
         )
     else:
         slack_client.chat_postMessage(
-            channel=user_id,
+            channel=target_channel, thread_ts=thread_ts,
             text=f"❌ Trello 등록 실패: {card_name} 카드에 항목을 추가하지 못했습니다.",
         )
 
@@ -1022,8 +1187,17 @@ def handle_trello_register(slack_client, body: dict) -> None:
 def handle_trello_skip(slack_client, body: dict) -> None:
     """'건너뜀' 버튼 핸들러"""
     user_id = body["user"]["id"]
+    channel = None
+    thread_ts = None
+    try:
+        payload = json.loads(body["actions"][0]["value"])
+        channel = payload.get("channel")
+        thread_ts = payload.get("thread_ts")
+    except (KeyError, json.JSONDecodeError, IndexError):
+        pass
     slack_client.chat_postMessage(
-        channel=user_id, text="이번에는 Trello 등록을 건너뛰었습니다."
+        channel=channel or user_id, thread_ts=thread_ts,
+        text="이번에는 Trello 등록을 건너뛰었습니다.",
     )
 
 
