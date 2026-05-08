@@ -12,6 +12,7 @@ import json
 import logging
 import os
 import re
+import threading
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -817,14 +818,18 @@ def handle_trello_register_from_text(
     log.info(f"스레드 액션아이템 {len(items_to_save)}개 저장 "
              f"(orchestrator={is_orchestrator_result}): {event_id}")
 
-    # 4. 회의록 요약 생성 + 캐시 (Trello 카드 코멘트용)
-    try:
-        summary = _generate(_SUMMARIZE_MINUTES_PROMPT.format(minutes=parent_text))
-        _minutes_summary_cache[event_id] = summary.strip()
-    except Exception as e:
-        log.warning(f"회의록 요약 생성 실패 (무시): {e}")
+    # 4. 회의록 요약 생성을 백그라운드로 시작 — 카드 UI 발송과 병렬 진행.
+    # 사용자가 카드 고르는 동안(보통 5초 이상) 캐시가 채워짐. 미완료여도 _register_to_card가
+    # 빈 캐시를 그레이스풀하게 처리하므로 안전.
+    def _bg_generate_summary():
+        try:
+            summary = _generate(_SUMMARIZE_MINUTES_PROMPT.format(minutes=parent_text))
+            _minutes_summary_cache[event_id] = summary.strip()
+        except Exception as e:
+            log.warning(f"회의록 요약 생성 실패 (무시): {e}")
+    threading.Thread(target=_bg_generate_summary, daemon=True).start()
 
-    # 5. 카드 선택 UI 발송 — 호출 위치(채널/스레드)로 회신
+    # 5. 카드 선택 UI 발송 — 호출 위치(채널/스레드)로 회신 (요약 생성과 병렬)
     _propose_trello_registration(
         slack_client,
         user_id=user_id,
