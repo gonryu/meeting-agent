@@ -621,27 +621,31 @@ def _find_card_by_id(user_id: str, card_id: str):
         return None
 
 
-def add_checklist_items_by_id(user_id: str, card_id: str, items: list[dict]) -> int:
+def add_checklist_items_by_id(user_id: str, card_id: str,
+                                items: list[dict]) -> tuple[int, str]:
     """카드 ID로 직접 체크리스트 항목 추가.
+
     items: [{"assignee": str, "content": str, "due_date": str|None}, ...]
-    Returns: 추가된 항목 수
+    Returns: (추가된 항목 수, 에러 메시지). 성공 시 에러 메시지는 빈 문자열.
     """
     if not items:
-        return 0
+        return 0, ""
 
     if _is_dry_run():
         for item in items:
             desc = _format_checklist_item(item)
             log.info(f"[DRY_RUN] 체크리스트 항목 (by id): {desc}")
-        return len(items)
+        return len(items), ""
 
     card = _find_card_by_id(user_id, card_id)
     if card is None:
         log.warning(f"Trello 카드 없음 (id={card_id})")
-        return 0
+        return 0, f"카드를 찾을 수 없어요 (card_id={card_id[:8]}...)"
 
     try:
-        card.fetch()
+        # 주의: client.get_card()가 이미 카드 JSON을 fetch해서 Card 객체를 만들어주므로
+        # 추가 card.fetch() 호출은 불필요. 일부 경로에서 redundant fetch가 InvalidIDError
+        # 등을 일으킬 수 있어 제거.
         checklist = _find_or_create_checklist(card, CHECKLIST_NAME)
         count = 0
         for item in items:
@@ -649,10 +653,10 @@ def add_checklist_items_by_id(user_id: str, card_id: str, items: list[dict]) -> 
             checklist.add_checklist_item(desc)
             count += 1
         log.info(f"Trello 체크리스트 항목 {count}개 추가 (card_id={card_id})")
-        return count
+        return count, ""
     except Exception as e:
-        log.warning(f"체크리스트 항목 추가 실패 (card_id={card_id}): {e}")
-        return 0
+        log.exception(f"체크리스트 항목 추가 실패 (card_id={card_id}): {e}")
+        return 0, f"{type(e).__name__}: {e}"
 
 
 def add_comment_by_id(user_id: str, card_id: str, comment: str) -> bool:
