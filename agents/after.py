@@ -895,11 +895,13 @@ def _propose_trello_registration(
         ]
 
         buttons = []
-        if candidates:
+        # 카드명이 비어있는 후보는 모든 곳에서 제외 (Slack plain_text 1자 이상 필수)
+        valid_candidates = [c for c in (candidates or []) if (c.get("card_name") or "").strip()]
+        if valid_candidates:
             # 후보 카드 목록 표시
             card_list_text = "\n".join(
-                f"• *{c['card_name']}* ({c['list_name']})"
-                for c in candidates
+                f"• *{c['card_name']}* ({c.get('list_name', '')})"
+                for c in valid_candidates
             )
             blocks.append({
                 "type": "section",
@@ -909,7 +911,7 @@ def _propose_trello_registration(
                 },
             })
 
-            for c in candidates:
+            for c in valid_candidates:
                 label = c["card_name"]
                 if len(label) > 30:
                     label = label[:27] + "..."
@@ -942,29 +944,39 @@ def _propose_trello_registration(
 
         if all_cards:
             # 후보로 이미 노출된 카드는 드롭다운에서 제외 (중복 클릭 회피)
-            already_shown = {c["card_id"] for c in candidates} if candidates else set()
+            already_shown = {c["card_id"] for c in valid_candidates}
             remaining = [c for c in all_cards if c["card_id"] not in already_shown]
             # Slack static_select 옵션 최대 100개
             remaining = remaining[:100]
-            if remaining:
-                options = []
-                for c in remaining:
-                    label = c["card_name"]
-                    if c.get("list_name"):
-                        label = f"{label} ({c['list_name']})"
-                    if len(label) > 75:  # Slack option text 75자 제한
-                        label = label[:72] + "..."
-                    options.append({
-                        "text": {"type": "plain_text", "text": label},
-                        "value": json.dumps({
-                            "event_id": event_id,
-                            "company": company_name,
-                            "card_id": c["card_id"],
-                            "card_name": c["card_name"],
-                            "channel": channel,
-                            "thread_ts": thread_ts,
-                        })[:1990],  # Slack option value 2000자 제한
-                    })
+            options = []
+            for c in remaining:
+                # 카드명 비어있으면 스킵 (Slack plain_text는 1자 이상 필수)
+                raw_name = (c.get("card_name") or "").strip()
+                if not raw_name:
+                    log.warning(f"  카드명 없는 카드 스킵: card_id={c.get('card_id')}")
+                    continue
+                label = raw_name
+                if c.get("list_name"):
+                    label = f"{label} ({c['list_name']})"
+                if len(label) > 75:  # Slack option text 75자 제한
+                    label = label[:72] + "..."
+                value_json = json.dumps({
+                    "event_id": event_id,
+                    "company": company_name,
+                    "card_id": c["card_id"],
+                    "card_name": raw_name,
+                    "channel": channel,
+                    "thread_ts": thread_ts,
+                })
+                if len(value_json) > 1990:
+                    log.warning(f"  옵션 value 길이 초과 스킵: card={raw_name[:30]}")
+                    continue
+                options.append({
+                    "text": {"type": "plain_text", "text": label},
+                    "value": value_json,
+                })
+            log.info(f"  드롭다운 옵션 {len(options)}건 생성")
+            if options:
                 blocks.append({
                     "type": "actions",
                     "elements": [{
@@ -1016,11 +1028,26 @@ def _propose_trello_registration(
             )
             log.info(f"  카드 선택 UI 발송 완료")
         except Exception as e:
-            log.exception(f"카드 선택 UI chat_postMessage 실패: {e}")
-            # blocks가 너무 크거나 형식 오류일 가능성 — 텍스트 폴백
+            # SlackApiError면 실제 error 코드(invalid_blocks 등) + response_metadata 노출
+            err_code = ""
+            err_meta = ""
+            try:
+                resp = getattr(e, "response", None)
+                if resp:
+                    err_code = resp.get("error", "") or ""
+                    meta = resp.get("response_metadata") or {}
+                    msgs = meta.get("messages") or []
+                    if msgs:
+                        err_meta = " / ".join(str(m)[:200] for m in msgs[:3])
+            except Exception:
+                pass
+            detail = err_code or type(e).__name__
+            if err_meta:
+                detail = f"{detail}\n{err_meta}"
+            log.exception(f"카드 선택 UI chat_postMessage 실패: code={err_code} meta={err_meta}")
             slack_client.chat_postMessage(
                 channel=target_channel, thread_ts=thread_ts,
-                text=(f"❌ 카드 선택 UI 표시 실패 (`{type(e).__name__}`)\n"
+                text=(f"❌ 카드 선택 UI 표시 실패: `{detail}`\n"
                       f"수동 등록: `/트렐로조회 {company_name}` 후 카드 확인"),
             )
 
