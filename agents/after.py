@@ -830,14 +830,21 @@ def handle_trello_register_from_text(
     threading.Thread(target=_bg_generate_summary, daemon=True).start()
 
     # 5. 카드 선택 UI 발송 — 호출 위치(채널/스레드)로 회신 (요약 생성과 병렬)
-    _propose_trello_registration(
-        slack_client,
-        user_id=user_id,
-        event_id=event_id,
-        company_names=[company],
-        channel=channel,
-        thread_ts=thread_ts,
-    )
+    try:
+        _propose_trello_registration(
+            slack_client,
+            user_id=user_id,
+            event_id=event_id,
+            company_names=[company],
+            channel=channel,
+            thread_ts=thread_ts,
+        )
+    except Exception as e:
+        log.exception(f"카드 선택 UI 발송 실패: {e}")
+        slack_client.chat_postMessage(
+            channel=target_channel, thread_ts=thread_ts,
+            text=f"❌ 카드 선택 UI 발송 실패: `{type(e).__name__}: {e}`",
+        )
 
 
 def _propose_trello_registration(
@@ -854,6 +861,8 @@ def _propose_trello_registration(
     지정 시 해당 채널/스레드에 발송하고, 버튼 페이로드에도 함께 실어 후속 핸들러가
     동일 위치에 결과를 회신하도록 함.
     """
+    log.info(f"_propose_trello_registration 시작: event_id={event_id} "
+             f"companies={company_names} channel={channel} thread_ts={thread_ts}")
     items = user_store.get_action_items(event_id)
     if not items:
         log.info(f"액션아이템 없음 — Trello 등록 스킵: {event_id}")
@@ -863,7 +872,13 @@ def _propose_trello_registration(
 
     for company_name in company_names:
         # 유사 카드 후보 검색
-        candidates = trello.search_cards(user_id, company_name, limit=5)
+        log.info(f"  search_cards 호출: company={company_name}")
+        try:
+            candidates = trello.search_cards(user_id, company_name, limit=5)
+            log.info(f"  search_cards 결과: {len(candidates)}건")
+        except Exception as e:
+            log.exception(f"search_cards 실패: {e}")
+            candidates = []
 
         blocks = [
             {
@@ -917,10 +932,12 @@ def _propose_trello_registration(
                     del buttons[-1]["style"]
 
         # 전체 카드 드롭다운 — 유사 매칭이 0건이거나 유저가 다른 카드를 고르고 싶을 때
+        log.info(f"  list_all_cards 호출")
         try:
             all_cards = trello.list_all_cards(user_id)
+            log.info(f"  list_all_cards 결과: {len(all_cards)}건")
         except Exception as e:
-            log.warning(f"전체 카드 목록 조회 실패: {e}")
+            log.exception(f"전체 카드 목록 조회 실패: {e}")
             all_cards = []
 
         if all_cards:
@@ -989,12 +1006,23 @@ def _propose_trello_registration(
 
         blocks.append({"type": "actions", "elements": buttons})
 
-        slack_client.chat_postMessage(
-            channel=target_channel,
-            thread_ts=thread_ts,
-            text=f"📌 Trello에 액션아이템 등록할까요? ({company_name})",
-            blocks=blocks,
-        )
+        log.info(f"  카드 선택 UI 발송 시도: channel={target_channel} blocks={len(blocks)}")
+        try:
+            slack_client.chat_postMessage(
+                channel=target_channel,
+                thread_ts=thread_ts,
+                text=f"📌 Trello에 액션아이템 등록할까요? ({company_name})",
+                blocks=blocks,
+            )
+            log.info(f"  카드 선택 UI 발송 완료")
+        except Exception as e:
+            log.exception(f"카드 선택 UI chat_postMessage 실패: {e}")
+            # blocks가 너무 크거나 형식 오류일 가능성 — 텍스트 폴백
+            slack_client.chat_postMessage(
+                channel=target_channel, thread_ts=thread_ts,
+                text=(f"❌ 카드 선택 UI 표시 실패 (`{type(e).__name__}`)\n"
+                      f"수동 등록: `/트렐로조회 {company_name}` 후 카드 확인"),
+            )
 
 
 def handle_trello_card_dropdown(slack_client, body: dict) -> None:
