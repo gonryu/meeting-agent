@@ -327,21 +327,25 @@ def search_cards(user_id: str, query: str, limit: int = 5) -> list[dict]:
     if not target:
         return []
 
+    # 리스트 이름은 board.list_lists()로 한 번에 조회 후 매핑 (N+1 회피)
+    list_name_by_id: dict[str, str] = {}
+    try:
+        for lst in board.list_lists():
+            list_name_by_id[lst.id] = lst.name
+    except Exception as e:
+        log.warning(f"Trello 리스트 일괄 조회 오류: {e}")
+
     results = []
     try:
         cards = board.open_cards()
         for card in cards:
             score = _card_similarity(target, card.name)
             if score > 0:
-                list_name = ""
-                try:
-                    list_name = card.get_list().name
-                except Exception:
-                    pass
+                list_id = getattr(card, "idList", "") or ""
                 results.append({
                     "card_id": card.id,
                     "card_name": card.name,
-                    "list_name": list_name,
+                    "list_name": list_name_by_id.get(list_id, ""),
                     "url": card.url,
                     "exact_match": score >= 1.0,
                     "_score": score,
@@ -368,19 +372,24 @@ def list_all_cards(user_id: str) -> list[dict]:
     if board is None:
         return []
 
+    # 리스트 이름은 board.list_lists()로 한 번에 조회 후 idList → name 매핑
+    # (per-card get_list() API 호출 회피)
+    list_name_by_id: dict[str, str] = {}
+    try:
+        for lst in board.list_lists():
+            list_name_by_id[lst.id] = lst.name
+    except Exception as e:
+        log.warning(f"Trello 리스트 일괄 조회 오류: {e}")
+
     results = []
     try:
         cards = board.open_cards()
         for card in cards:
-            list_name = ""
-            try:
-                list_name = card.get_list().name
-            except Exception:
-                pass
+            list_id = getattr(card, "idList", "") or ""
             results.append({
                 "card_id": card.id,
                 "card_name": card.name,
-                "list_name": list_name,
+                "list_name": list_name_by_id.get(list_id, ""),
                 "url": card.url,
             })
     except Exception as e:

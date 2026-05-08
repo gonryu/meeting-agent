@@ -744,10 +744,10 @@ def handle_trello_register_from_text(
             )
         return
 
-    # 처리 중 안내
+    # 처리 중 안내 (오케스트레이터가 25~45초 걸리므로 시작·종료 양쪽 알림)
     slack_client.chat_postMessage(
         channel=target_channel, thread_ts=thread_ts,
-        text="📌 트렐로 등록 처리 중... (액션아이템 추출 → 카드 후보 검색)",
+        text="📌 트렐로 등록 처리 시작 — 액션아이템 추출 중... (약 30초~1분)",
     )
 
     # 1. 업체명 추론 — 힌트 우선, 없으면 본문 첫머리에서 LLM 추론
@@ -801,6 +801,12 @@ def handle_trello_register_from_text(
     is_orchestrator_result = any("severity" in i or "task" in i for i in enriched)
     items_to_save = (
         _normalize_orchestrator_items(enriched) if is_orchestrator_result else enriched
+    )
+
+    # 추출 완료 알림 — 다음 단계(카드 검색)로 진행 중임을 사용자에게 안내
+    slack_client.chat_postMessage(
+        channel=target_channel, thread_ts=thread_ts,
+        text=f"✅ 액션아이템 {len(items_to_save)}건 추출 완료 — 카드 후보 검색 중...",
     )
 
     # 3. 합성 event_id 발급 + DB 저장 (스레드 ts 기반, 캘린더 ID와 충돌 안 함)
