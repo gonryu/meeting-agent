@@ -1,0 +1,188 @@
+display_information:
+  name: ParaMee
+features:
+  bot_user:
+    display_name: ParaMee
+    always_online: true
+  slash_commands:
+    # ── 등록·설정 ───────────────────────────────
+    - command: /등록
+      description: 구글 계정 연결
+      should_escape: false
+    - command: /register
+      description: 구글 계정 연결
+      should_escape: false
+    - command: /재등록
+      description: 구글 계정 재연결
+      should_escape: false
+    - command: /reregister
+      description: 구글 계정 재연결
+      should_escape: false
+    - command: /설정
+      description: 알람 on/off·개인 설정
+      should_escape: false
+    - command: /settings
+      description: 알람 on/off·개인 설정
+      should_escape: false
+    - command: /업데이트
+      description: 기업 지식 업데이트
+      should_escape: false
+    - command: /update
+      description: 기업 지식 업데이트
+      should_escape: false
+    - command: /도움말
+      description: 사용법 안내
+      should_escape: false
+    - command: /help
+      description: 사용법 안내
+      should_escape: false
+
+    # ── 브리핑·리서치 ────────────────────────────
+    - command: /브리핑
+      description: 향후 일정에 있는 미팅 브리핑
+      should_escape: false
+    - command: /brief
+      description: 미팅 브리핑
+      should_escape: false
+    - command: /기업
+      description: 기업 리서치
+      should_escape: false
+    - command: /company
+      description: 기업 리서치
+      should_escape: false
+    - command: /인물
+      description: 인물 리서치
+      should_escape: false
+    - command: /person
+      description: 인물 리서치
+      should_escape: false
+
+    # ── 미팅 생성·편집 ──────────────────────────
+    - command: /미팅추가
+      description: 미팅 생성
+      should_escape: false
+    - command: /meet
+      description: 미팅 생성
+      should_escape: false
+    - command: /미팅편집
+      description: 기존 미팅 편집·수정
+      should_escape: false
+    - command: /미팅수정
+      description: 기존 미팅 편집·수정
+      should_escape: false
+    - command: /미팅변경
+      description: 기존 미팅 편집·수정
+      should_escape: false
+
+    # ── 미팅 진행·회의록 ────────────────────────
+    - command: /미팅시작
+      description: 회의 세션 시작
+      should_escape: false
+    - command: /메모
+      description: 회의 중 메모 추가
+      should_escape: false
+    - command: /미팅종료
+      description: 회의 세션 종료
+      should_escape: false
+    - command: /회의록작성
+      description: 회의록 수동 생성
+      should_escape: false
+    - command: /회의록
+      description: 회의록 조회
+      should_escape: false
+    - command: /대기회의록
+      description: 검토 대기 회의록 초안 목록
+      should_escape: false
+    - command: /회의록대기
+      description: 검토 대기 회의록 초안 목록
+      should_escape: false
+    - command: /회의록정리
+      description: 회의록 양식·구조 보정
+      should_escape: false
+    - command: /회의록보정
+      description: 회의록 양식·구조 보정
+      should_escape: false
+
+    # ── 할 일(Todo) ─────────────────────────────
+    - command: /할일
+      description: 내 할 일 목록
+      should_escape: false
+    - command: /todo
+      description: 내 할 일 목록
+      should_escape: false
+    - command: /할일추가
+      description: 할 일 추가
+      should_escape: false
+    - command: /todo-add
+      description: 할 일 추가
+      should_escape: false
+
+    # ── Trello ──────────────────────────────────
+    - command: /trello
+      description: Trello 연결
+      should_escape: false
+    - command: /trello-disconnect
+      description: Trello 연결 해제
+      should_escape: false
+    - command: /트렐로조회
+      description: 트렐로 카드 검색
+      should_escape: false
+    - command: /trello-search
+      description: 트렐로 카드 검색
+      should_escape: false
+    - command: /트렐로주간보고
+      description: 트렐로 워크스페이스 주간 보고서
+      should_escape: false
+    - command: /trello-weekly
+      description: 트렐로 워크스페이스 주간 보고서
+      should_escape: false
+
+    # ── 드림플러스 회의실 ────────────────────────
+    - command: /드림플러스
+      description: 드림플러스 설정
+      should_escape: false
+    - command: /dreamplus
+      description: 드림플러스 설정
+      should_escape: false
+    - command: /회의실예약
+      description: 드림플러스 회의실 예약
+      should_escape: false
+    - command: /회의실조회
+      description: 드림플러스 회의실 조회
+      should_escape: false
+    - command: /회의실취소
+      description: 드림플러스 회의실 취소
+      should_escape: false
+    - command: /크레딧조회
+      description: 드림플러스 크레딧 조회
+      should_escape: false
+
+oauth_config:
+  scopes:
+    bot:
+      - app_mentions:read
+      - channels:history
+      - chat:write
+      - commands
+      - files:read
+      - files:write
+      - groups:history
+      - im:history
+      - im:read
+      - im:write
+      - users:read
+      - users:read.email
+      - users.profile:read
+  pkce_enabled: false
+
+settings:
+  event_subscriptions:
+    bot_events:
+      - app_mention
+      - message.im
+  interactivity:
+    is_enabled: true
+  org_deploy_enabled: false
+  socket_mode_enabled: true
+  token_rotation_enabled: false
+  is_mcp_enabled: false
