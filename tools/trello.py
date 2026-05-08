@@ -398,11 +398,15 @@ def list_all_cards(user_id: str) -> list[dict]:
 
 
 def _find_or_create_checklist(card, checklist_name: str = CHECKLIST_NAME):
-    """카드에서 체크리스트 찾기. 없으면 새로 생성."""
+    """카드에서 체크리스트 찾기. 없으면 새로 생성.
+
+    py-trello `Card.add_checklist(title, items)` 는 items 가 필수 positional
+    인자라 빈 리스트 명시 필요. (생략 시 TypeError)
+    """
     for cl in card.checklists:
         if cl.name == checklist_name:
             return cl
-    return card.add_checklist(checklist_name)
+    return card.add_checklist(checklist_name, [])
 
 
 def _format_checklist_item(item: dict) -> str:
