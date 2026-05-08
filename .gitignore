@@ -32,3 +32,6 @@ nohup.out
 # IDE
 .vscode/
 .idea/
+
+# Claude Code 로컬 워크트리·세션 상태
+.claude/
