@@ -948,6 +948,17 @@ def _propose_trello_registration(
             remaining = [c for c in all_cards if c["card_id"] not in already_shown]
             # Slack static_select 옵션 최대 100개
             remaining = remaining[:100]
+            # 옵션 공용 컨텍스트(event_id 등)는 block_id(255자)에 두고,
+            # 옵션 value는 card_id|card_name만 (Slack static_select option value 150자 제한)
+            ctx_json = json.dumps({
+                "event_id": event_id,
+                "company": company_name,
+                "channel": channel,
+                "thread_ts": thread_ts,
+            }, ensure_ascii=False)
+            if len(ctx_json) > 240:  # block_id 255자 한도, 마진 두고 절단
+                log.warning(f"  block_id 길이 초과 ({len(ctx_json)}자), 잘림")
+                ctx_json = ctx_json[:240]
             options = []
             for c in remaining:
                 # 카드명 비어있으면 스킵 (Slack plain_text는 1자 이상 필수)
@@ -960,25 +971,21 @@ def _propose_trello_registration(
                     label = f"{label} ({c['list_name']})"
                 if len(label) > 75:  # Slack option text 75자 제한
                     label = label[:72] + "..."
-                value_json = json.dumps({
-                    "event_id": event_id,
-                    "company": company_name,
-                    "card_id": c["card_id"],
-                    "card_name": raw_name,
-                    "channel": channel,
-                    "thread_ts": thread_ts,
-                })
-                if len(value_json) > 1990:
-                    log.warning(f"  옵션 value 길이 초과 스킵: card={raw_name[:30]}")
-                    continue
+                # value = "card_id|card_name" (150자 한도). card_id는 24자 고정.
+                # card_name 한글이면 1자=1바이트로 인코딩되므로 100자까지 허용
+                safe_name = raw_name[:100]
+                option_value = f"{c['card_id']}|{safe_name}"
+                if len(option_value) > 145:
+                    option_value = option_value[:145]
                 options.append({
                     "text": {"type": "plain_text", "text": label},
-                    "value": value_json,
+                    "value": option_value,
                 })
-            log.info(f"  드롭다운 옵션 {len(options)}건 생성")
+            log.info(f"  드롭다운 옵션 {len(options)}건 생성 / block_id {len(ctx_json)}자")
             if options:
                 blocks.append({
                     "type": "actions",
+                    "block_id": ctx_json,
                     "elements": [{
                         "type": "static_select",
                         "action_id": "trello_card_dropdown",
@@ -1053,19 +1060,34 @@ def _propose_trello_registration(
 
 
 def handle_trello_card_dropdown(slack_client, body: dict) -> None:
-    """전체 카드 드롭다운 선택 핸들러 — 유사 매칭에 없는 카드 선택용"""
+    """전체 카드 드롭다운 선택 핸들러 — 유사 매칭에 없는 카드 선택용.
+
+    페이로드 구조 (Slack static_select option value 150자 제한 회피):
+    - 컨텍스트(event_id/company/channel/thread_ts)는 actions 블록의 block_id(JSON, 255자)
+    - option value 는 'card_id|card_name' 포맷
+    """
     user_id = body["user"]["id"]
     try:
         action = body["actions"][0]
+        block_id = action.get("block_id", "") or ""
+        ctx = json.loads(block_id) if block_id else {}
+        event_id = ctx["event_id"]
+        company_name = ctx.get("company", "")
+        channel = ctx.get("channel")
+        thread_ts = ctx.get("thread_ts")
+
         selected = action.get("selected_option") or {}
-        payload = json.loads(selected.get("value", "{}"))
-        event_id = payload["event_id"]
-        company_name = payload["company"]
-        card_id = payload["card_id"]
-        card_name = payload["card_name"]
-        channel = payload.get("channel")
-        thread_ts = payload.get("thread_ts")
-    except (KeyError, json.JSONDecodeError) as e:
+        sel_value = selected.get("value", "") or ""
+        if "|" in sel_value:
+            card_id, _, card_name = sel_value.partition("|")
+        else:
+            # 폴백: value가 card_id만이면 라벨에서 카드명 추출
+            card_id = sel_value
+            label = (selected.get("text") or {}).get("text", "")
+            card_name = label.rsplit(" (", 1)[0] if label else card_id
+        if not card_id:
+            raise ValueError("card_id 비어있음")
+    except (KeyError, ValueError, json.JSONDecodeError) as e:
         log.warning(f"Trello 드롭다운 선택 payload 파싱 실패: {e}")
         slack_client.chat_postMessage(
             channel=user_id, text="❌ Trello 등록 실패: 잘못된 요청"
