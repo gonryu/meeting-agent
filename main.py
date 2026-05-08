@@ -442,6 +442,8 @@ def handle_mention(event, say, client):
 
     # 스레드 답장이면 부모 메시지 본문을 읽어 트렐로 등록 등 컨텍스트 의존 인텐트에 사용
     parent_text = ""
+    parent_author_id = ""
+    parent_msg_ts = ""
     parent_fetch_error = ""
     if parent_ts:
         try:
@@ -452,12 +454,16 @@ def handle_mention(event, say, client):
             log.info(f"부모 메시지 조회: ok=True msgs_len={len(msgs)} "
                      f"text_len={len((msgs[0].get('text') or '')) if msgs else 0}")
             if msgs:
-                parent_text = (msgs[0].get("text") or "").strip()
+                parent_msg = msgs[0]
+                parent_text = (parent_msg.get("text") or "").strip()
                 # 텍스트가 없는 경우 blocks/attachments에서 추출 시도 (rich text 메시지 대응)
                 if not parent_text:
-                    blocks = msgs[0].get("blocks") or []
+                    blocks = parent_msg.get("blocks") or []
                     parent_text = _extract_text_from_blocks(blocks).strip()
                     log.info(f"부모 메시지 text 비어있어 blocks에서 추출: {len(parent_text)}자")
+                # 작성자·작성 시각 메타 — Trello 코멘트 헤더에 사용
+                parent_author_id = parent_msg.get("user", "") or ""
+                parent_msg_ts = parent_msg.get("ts", "") or ""
         except SlackApiError as e:
             err_code = (e.response.get("error") if hasattr(e, "response") else "") or str(e)
             parent_fetch_error = err_code
@@ -468,7 +474,9 @@ def handle_mention(event, say, client):
 
     _route_message(text, client, user_id=user_id, channel=channel,
                    thread_ts=thread_ts, parent_text=parent_text,
-                   parent_fetch_error=parent_fetch_error)
+                   parent_fetch_error=parent_fetch_error,
+                   parent_author_id=parent_author_id,
+                   parent_msg_ts=parent_msg_ts)
 
 
 # ── DM 처리 ─────────────────────────────────────────────────
@@ -1232,7 +1240,8 @@ def _try_direct_todo_route(text: str) -> tuple[str, dict] | None:
 
 def _route_message(text: str, client, user_id: str, channel: str = None,
                    thread_ts: str = None, user_msg_ts: str = None,
-                   parent_text: str = "", parent_fetch_error: str = ""):
+                   parent_text: str = "", parent_fetch_error: str = "",
+                   parent_author_id: str = "", parent_msg_ts: str = ""):
     log.info(f"메시지 라우팅 ({user_id}): {text!r}")
 
     if _is_trello_setup_text(text):
@@ -1471,7 +1480,9 @@ def _route_message(text: str, client, user_id: str, channel: str = None,
             args=(client,),
             kwargs=dict(user_id=user_id, parent_text=parent_text,
                         company_hint=company_hint,
-                        channel=channel, thread_ts=thread_ts),
+                        channel=channel, thread_ts=thread_ts,
+                        parent_author_id=parent_author_id,
+                        parent_msg_ts=parent_msg_ts),
             daemon=True,
         ).start()
 
