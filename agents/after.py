@@ -905,7 +905,52 @@ def _propose_trello_registration(
                 if buttons[-1]["style"] is None:
                     del buttons[-1]["style"]
 
-        # 신규 생성 + 건너뜀 버튼
+        # 전체 카드 드롭다운 — 유사 매칭이 0건이거나 유저가 다른 카드를 고르고 싶을 때
+        try:
+            all_cards = trello.list_all_cards(user_id)
+        except Exception as e:
+            log.warning(f"전체 카드 목록 조회 실패: {e}")
+            all_cards = []
+
+        if all_cards:
+            # 후보로 이미 노출된 카드는 드롭다운에서 제외 (중복 클릭 회피)
+            already_shown = {c["card_id"] for c in candidates} if candidates else set()
+            remaining = [c for c in all_cards if c["card_id"] not in already_shown]
+            # Slack static_select 옵션 최대 100개
+            remaining = remaining[:100]
+            if remaining:
+                options = []
+                for c in remaining:
+                    label = c["card_name"]
+                    if c.get("list_name"):
+                        label = f"{label} ({c['list_name']})"
+                    if len(label) > 75:  # Slack option text 75자 제한
+                        label = label[:72] + "..."
+                    options.append({
+                        "text": {"type": "plain_text", "text": label},
+                        "value": json.dumps({
+                            "event_id": event_id,
+                            "company": company_name,
+                            "card_id": c["card_id"],
+                            "card_name": c["card_name"],
+                            "channel": channel,
+                            "thread_ts": thread_ts,
+                        })[:1990],  # Slack option value 2000자 제한
+                    })
+                blocks.append({
+                    "type": "actions",
+                    "elements": [{
+                        "type": "static_select",
+                        "action_id": "trello_card_dropdown",
+                        "placeholder": {
+                            "type": "plain_text",
+                            "text": "📁 기존 카드에서 선택",
+                        },
+                        "options": options,
+                    }],
+                })
+
+        # 신규 생성 + 취소(스레드 흐름) 또는 건너뜀(자동 흐름) 버튼
         buttons.append({
             "type": "button",
             "text": {"type": "plain_text", "text": "➕ 신규 카드 생성"},
@@ -917,9 +962,11 @@ def _propose_trello_registration(
                 "thread_ts": thread_ts,
             }),
         })
+        # 사용자가 직접 호출한 스레드 흐름이면 "취소", 자동 제안 흐름(DM)이면 "건너뜀"
+        cancel_label = "❌ 취소" if channel else "건너뜀"
         buttons.append({
             "type": "button",
-            "text": {"type": "plain_text", "text": "건너뜀"},
+            "text": {"type": "plain_text", "text": cancel_label},
             "action_id": "trello_skip",
             "value": json.dumps({
                 "event_id": event_id,
@@ -937,6 +984,31 @@ def _propose_trello_registration(
             text=f"📌 Trello에 액션아이템 등록할까요? ({company_name})",
             blocks=blocks,
         )
+
+
+def handle_trello_card_dropdown(slack_client, body: dict) -> None:
+    """전체 카드 드롭다운 선택 핸들러 — 유사 매칭에 없는 카드 선택용"""
+    user_id = body["user"]["id"]
+    try:
+        action = body["actions"][0]
+        selected = action.get("selected_option") or {}
+        payload = json.loads(selected.get("value", "{}"))
+        event_id = payload["event_id"]
+        company_name = payload["company"]
+        card_id = payload["card_id"]
+        card_name = payload["card_name"]
+        channel = payload.get("channel")
+        thread_ts = payload.get("thread_ts")
+    except (KeyError, json.JSONDecodeError) as e:
+        log.warning(f"Trello 드롭다운 선택 payload 파싱 실패: {e}")
+        slack_client.chat_postMessage(
+            channel=user_id, text="❌ Trello 등록 실패: 잘못된 요청"
+        )
+        return
+
+    _register_to_card(slack_client, user_id=user_id, event_id=event_id,
+                      card_id=card_id, card_name=card_name,
+                      channel=channel, thread_ts=thread_ts)
 
 
 def handle_trello_select_card(slack_client, body: dict) -> None:
