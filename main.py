@@ -2300,6 +2300,14 @@ def handle_trello_select_card(ack, body, client):
     ).start()
 
 
+@app.action("trello_card_dropdown")
+def handle_trello_card_dropdown(ack, body, client):
+    ack()
+    threading.Thread(
+        target=after.handle_trello_card_dropdown, args=(client, body), daemon=True
+    ).start()
+
+
 # ── 제안서 액션 핸들러 (Phase 2.4) ────────────────────────────
 
 @app.action("proposal_start")
