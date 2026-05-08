@@ -16,6 +16,7 @@ log = logging.getLogger(__name__)
 
 from slack_bolt import App
 from slack_bolt.adapter.socket_mode import SocketModeHandler
+from slack_sdk.errors import SlackApiError
 from apscheduler.schedulers.background import BackgroundScheduler
 import uvicorn
 
@@ -362,6 +363,34 @@ scheduler.add_job(scheduled_meeting_alarm, "interval", minutes=1)
 scheduler.add_job(scheduled_fast_transcript_check, "interval", minutes=2)
 
 
+def _extract_text_from_blocks(blocks: list) -> str:
+    """Slack rich_text 블록 트리에서 사람이 읽을 텍스트만 평탄화 추출.
+
+    text 필드가 비어있는 메시지(블록 형식 전용)에 대비. text/element 키를 재귀적으로
+    수집하여 줄바꿈으로 연결.
+    """
+    out: list[str] = []
+
+    def _walk(node):
+        if isinstance(node, dict):
+            t = node.get("text")
+            if isinstance(t, str) and t:
+                out.append(t)
+            elif isinstance(t, dict):
+                _walk(t)
+            for key in ("elements", "blocks"):
+                children = node.get(key)
+                if isinstance(children, list):
+                    for c in children:
+                        _walk(c)
+        elif isinstance(node, list):
+            for c in node:
+                _walk(c)
+
+    _walk(blocks)
+    return "\n".join(s for s in out if s.strip())
+
+
 # ── @멘션 처리 ───────────────────────────────────────────────
 
 @app.event("app_mention")
@@ -413,19 +442,33 @@ def handle_mention(event, say, client):
 
     # 스레드 답장이면 부모 메시지 본문을 읽어 트렐로 등록 등 컨텍스트 의존 인텐트에 사용
     parent_text = ""
+    parent_fetch_error = ""
     if parent_ts:
         try:
             resp = client.conversations_replies(
                 channel=channel, ts=parent_ts, limit=1, inclusive=True
             )
             msgs = resp.get("messages", [])
+            log.info(f"부모 메시지 조회: ok=True msgs_len={len(msgs)} "
+                     f"text_len={len((msgs[0].get('text') or '')) if msgs else 0}")
             if msgs:
                 parent_text = (msgs[0].get("text") or "").strip()
+                # 텍스트가 없는 경우 blocks/attachments에서 추출 시도 (rich text 메시지 대응)
+                if not parent_text:
+                    blocks = msgs[0].get("blocks") or []
+                    parent_text = _extract_text_from_blocks(blocks).strip()
+                    log.info(f"부모 메시지 text 비어있어 blocks에서 추출: {len(parent_text)}자")
+        except SlackApiError as e:
+            err_code = (e.response.get("error") if hasattr(e, "response") else "") or str(e)
+            parent_fetch_error = err_code
+            log.warning(f"부모 메시지 조회 실패 (Slack API): {err_code}")
         except Exception as e:
+            parent_fetch_error = type(e).__name__
             log.warning(f"부모 메시지 조회 실패: {e}")
 
     _route_message(text, client, user_id=user_id, channel=channel,
-                   thread_ts=thread_ts, parent_text=parent_text)
+                   thread_ts=thread_ts, parent_text=parent_text,
+                   parent_fetch_error=parent_fetch_error)
 
 
 # ── DM 처리 ─────────────────────────────────────────────────
@@ -1189,7 +1232,7 @@ def _try_direct_todo_route(text: str) -> tuple[str, dict] | None:
 
 def _route_message(text: str, client, user_id: str, channel: str = None,
                    thread_ts: str = None, user_msg_ts: str = None,
-                   parent_text: str = ""):
+                   parent_text: str = "", parent_fetch_error: str = ""):
     log.info(f"메시지 라우팅 ({user_id}): {text!r}")
 
     if _is_trello_setup_text(text):
@@ -1403,10 +1446,24 @@ def _route_message(text: str, client, user_id: str, channel: str = None,
     elif intent == "trello_register_from_thread":
         company_hint = (params.get("company") or "").strip()
         if not parent_text:
+            # 원인별 안내 — 권한 누락·채널 미초대 등 흔한 케이스 명시
+            hint = ""
+            if parent_fetch_error == "not_in_channel":
+                hint = ("\n💡 봇이 이 채널의 멤버가 아니라 본문을 읽을 수 없어요. "
+                        "채널 설정 > 통합에서 *ParaMee* 를 추가해주세요.")
+            elif parent_fetch_error == "missing_scope":
+                hint = ("\n💡 Slack 봇 권한이 부족해요 (`channels:history`/`groups:history` 필요). "
+                        "관리자에게 문의해주세요.")
+            elif parent_fetch_error:
+                hint = f"\n💡 부모 메시지 조회 실패: `{parent_fetch_error}`"
+            elif not thread_ts or thread_ts == user_msg_ts:
+                hint = "\n💡 회의록이 적힌 메시지에 *답글(스레드)* 로 호출해주세요."
+            else:
+                hint = ("\n💡 부모 메시지에 텍스트가 없어요. "
+                        "회의록 본문이 포함된 메시지에 답글로 호출해주세요.")
             client.chat_postMessage(
                 channel=channel or user_id, thread_ts=thread_ts,
-                text=("⚠️ 등록할 회의록 텍스트를 찾지 못했어요.\n"
-                      "회의록이 적힌 메시지에 *답글(스레드)* 로 호출해주세요."),
+                text=f"⚠️ 등록할 회의록 텍스트를 찾지 못했어요.{hint}",
             )
             return
         threading.Thread(
