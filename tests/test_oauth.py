@@ -135,3 +135,62 @@ class TestOAuthCallback:
 
         call_args = mock_store.register.call_args[0]
         assert call_args[0] == "U005"
+
+
+# ── /deploy 웹훅 (회귀: 조용한 실패 방지) ────────────────────────
+
+class TestDeployWebhook:
+    """fetch+reset로 dirty 트리 대응, pip 실패 시 재시작 중단, 시그니처 검증."""
+
+    def _sign(self, body: bytes, secret: str) -> str:
+        import hmac, hashlib
+        return hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
+
+    def _fake_run_factory(self, pip_rc: int = 0):
+        def _run(cmd, **kw):
+            m = MagicMock()
+            m.returncode = 0
+            m.stdout = ""
+            m.stderr = ""
+            if cmd[:2] == ["git", "rev-parse"]:
+                m.stdout = "abcdef1234567890"
+            elif cmd[:2] == ["git", "log"]:
+                m.stdout = "• fix something"
+            elif cmd and cmd[0].endswith("pip"):
+                m.returncode = pip_rc
+                m.stderr = "pip boom" if pip_rc else ""
+            return m
+        return _run
+
+    def test_uses_reset_not_pull_and_restarts(self, monkeypatch):
+        monkeypatch.setenv("DEPLOY_SECRET", "s3cr3t")
+        body = b'{"ref":"refs/heads/main"}'
+        sig = self._sign(body, "s3cr3t")
+        with patch("subprocess.run", side_effect=self._fake_run_factory()) as mrun, \
+             patch("subprocess.Popen") as mpopen:
+            r = client.post("/deploy", content=body,
+                            headers={"X-Deploy-Signature": sig})
+        assert r.status_code == 200
+        cmds = [c.args[0] for c in mrun.call_args_list]
+        assert ["git", "reset", "--hard", "origin/main"] in cmds   # reset 사용
+        assert ["git", "pull", "origin", "main"] not in cmds       # 옛 pull 제거
+        mpopen.assert_called_once()                                # 성공 시 재시작
+
+    def test_pip_failure_blocks_restart(self, monkeypatch):
+        monkeypatch.setenv("DEPLOY_SECRET", "s3cr3t")
+        body = b'{}'
+        sig = self._sign(body, "s3cr3t")
+        with patch("subprocess.run", side_effect=self._fake_run_factory(pip_rc=1)), \
+             patch("subprocess.Popen") as mpopen:
+            r = client.post("/deploy", content=body,
+                            headers={"X-Deploy-Signature": sig})
+        assert r.status_code == 500
+        mpopen.assert_not_called()                                 # 의존성 실패 → 재시작 안 함
+
+    def test_bad_signature_rejected(self, monkeypatch):
+        monkeypatch.setenv("DEPLOY_SECRET", "s3cr3t")
+        with patch("subprocess.Popen") as mpopen:
+            r = client.post("/deploy", content=b'{}',
+                            headers={"X-Deploy-Signature": "wrong"})
+        assert r.status_code == 403
+        mpopen.assert_not_called()

@@ -176,6 +176,21 @@ def _notify_deploy(version: str, changelog: str):
         log.warning(f"배포 알림 발송 실패: {e}")
 
 
+def _notify_deploy_failure(stage: str, detail: str):
+    """배포 실패 시 관리자 채널에 경보 — '조용한 실패'(구코드로 계속 도는 것) 방지."""
+    log.error(f"배포 실패 [{stage}]: {detail}")
+    channel = os.getenv("FEEDBACK_CHANNEL", "")
+    if not channel or not _slack_client:
+        return
+    try:
+        _slack_client.chat_postMessage(
+            channel=channel,
+            text=f"❌ *배포 실패* — 단계 `{stage}`\n```{detail}```\n(서버 코드는 갱신·재시작되지 않았습니다)",
+        )
+    except Exception as e:
+        log.warning(f"배포 실패 알림 발송 실패: {e}")
+
+
 def build_auth_url(slack_user_id: str) -> str:
     """Google OAuth 인증 URL 생성. 매 호출마다 고유 state 생성."""
     state = f"{slack_user_id}-{uuid.uuid4().hex[:12]}"
@@ -268,40 +283,42 @@ async def deploy_webhook(request: Request):
         log.warning("배포 웹훅: 시그니처 불일치")
         return JSONResponse({"error": "invalid signature"}, status_code=403)
 
-    log.info("배포 웹훅 수신 — git pull + 재시작 시작")
+    log.info("배포 웹훅 수신 — fetch + reset --hard + 재시작 시작")
     try:
-        # 배포 전 현재 커밋 해시 기록
-        prev_hash = subprocess.run(
-            ["git", "rev-parse", "HEAD"],
-            capture_output=True, text=True, timeout=5,
-        ).stdout.strip()
+        def _git(*args, timeout=30):
+            return subprocess.run(["git", *args], capture_output=True, text=True, timeout=timeout)
 
-        pull = subprocess.run(
-            ["git", "pull", "origin", "main"],
-            capture_output=True, text=True, timeout=30,
-        )
-        log.info(f"git pull: {pull.stdout.strip()}")
+        prev_hash = _git("rev-parse", "HEAD", timeout=5).stdout.strip()
 
-        # 배포 후 새 커밋 해시
-        new_hash = subprocess.run(
-            ["git", "rev-parse", "--short", "HEAD"],
-            capture_output=True, text=True, timeout=5,
-        ).stdout.strip()
+        # git pull은 로컬 변경(dirty 워크트리)이 있으면 중단됨 → 조용한 배포 실패의 원인.
+        # fetch + reset --hard로 origin/main에 무조건 맞춘다(서버 로컬 편집은 지원 안 함).
+        fetch = _git("fetch", "origin", "main")
+        if fetch.returncode != 0:
+            _notify_deploy_failure("git fetch", fetch.stderr.strip()[:500])
+            return JSONResponse({"error": "git fetch failed"}, status_code=500)
 
-        # 변경된 커밋 메시지 추출 (제목만)
-        changelog = ""
-        if prev_hash and prev_hash != new_hash:
-            log_result = subprocess.run(
-                ["git", "log", f"{prev_hash}..HEAD", "--pretty=format:• %s", "--no-merges"],
-                capture_output=True, text=True, timeout=10,
-            )
-            changelog = log_result.stdout.strip()
+        reset = _git("reset", "--hard", "origin/main")
+        if reset.returncode != 0:
+            _notify_deploy_failure("git reset", reset.stderr.strip()[:500])
+            return JSONResponse({"error": "git reset failed"}, status_code=500)
+        log.info(f"git reset: {reset.stdout.strip()}")
+
+        new_hash = _git("rev-parse", "--short", "HEAD", timeout=5).stdout.strip()
+
+        # 변경된 커밋 제목 추출 (prev..HEAD; 변경 없으면 빈 문자열)
+        changelog = _git(
+            "log", f"{prev_hash}..HEAD", "--pretty=format:• %s", "--no-merges", timeout=10,
+        ).stdout.strip() if prev_hash else ""
 
         pip = subprocess.run(
             [".venv/bin/pip", "install", "-r", "requirements.txt", "--quiet"],
             capture_output=True, text=True, timeout=120,
         )
-        log.info(f"pip install: {pip.returncode}")
+        if pip.returncode != 0:
+            # 의존성 설치 실패 시 재시작하면 기동 실패 위험 → 재시작 중단 + 경보
+            _notify_deploy_failure("pip install", pip.stderr.strip()[:500])
+            return JSONResponse({"error": "pip install failed — 재시작 중단"}, status_code=500)
+        log.info("pip install: OK")
 
         # 관리자 채널에 배포 알림
         _notify_deploy(new_hash, changelog)
@@ -310,9 +327,10 @@ async def deploy_webhook(request: Request):
             ["sudo", "systemctl", "restart", "meeting-agent"],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         )
-        return {"status": "deploying", "git": pull.stdout.strip()}
+        return {"status": "deploying", "version": new_hash}
     except Exception as e:
         log.exception(f"배포 실패: {e}")
+        _notify_deploy_failure("exception", str(e)[:500])
         return JSONResponse({"error": str(e)}, status_code=500)
 
 
