@@ -84,8 +84,11 @@ def _negative_fast_cut(news_text: str, negatives: list[str] = None) -> str:
     return "\n".join(kept)
 
 
-def _judge_with_llm(company_name: str, bullets: list[str], today: str = None) -> dict:
-    """남은 불릿을 Haiku로 high/mid/low/exclude 판정. Returns: {index: relevance}."""
+def _judge_with_llm(company_name: str, bullets: list[str], today: str = None,
+                    model: str = None) -> dict:
+    """남은 불릿을 LLM으로 high/mid/low/exclude 판정. Returns: {index: relevance}.
+
+    model 미지정 시 모듈 기본(_MODEL). eval 하네스가 Haiku/Sonnet 비교에 사용."""
     relevance_def = _load_relevance_def()
     from datetime import datetime
     today = today or datetime.now().strftime("%Y-%m-%d")
@@ -110,7 +113,7 @@ JSON만 출력(코드펜스·설명 없이):
 후보:
 {numbered}"""
     resp = _claude.messages.create(
-        model=_MODEL, max_tokens=1024,
+        model=model or _MODEL, max_tokens=1024,
         messages=[{"role": "user", "content": prompt}],
     )
     raw = resp.content[0].text.strip()

@@ -16,7 +16,9 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 _GOLDEN = Path(__file__).parent / "golden" / "news_relevance.jsonl"
 _LABELS = ["high", "mid", "low", "exclude"]
-_DEFAULT_THRESHOLD = {"oracle": 1.0, "stub": 0.0, "haiku": 0.55}
+_DEFAULT_THRESHOLD = {"oracle": 1.0, "stub": 0.0, "haiku": 0.55, "sonnet": 0.55}
+_HAIKU = "claude-haiku-4-5"
+_SONNET = "claude-sonnet-4-5"
 
 
 def load_golden() -> list[dict]:
@@ -36,15 +38,23 @@ def classify_stub(row: dict) -> str:
     return "mid"
 
 
-def classify_haiku(row: dict) -> str:
+def _classify_llm(row: dict, model: str) -> str:
     import agents.news_relevance as nr
     bullet = [f"- {row['title']} {row['description']}"]
     try:
-        verdict = nr._judge_with_llm(row["company"], bullet)
+        verdict = nr._judge_with_llm(row["company"], bullet, model=model)
         return verdict.get(0, "mid")
     except Exception as e:
         print(f"  ! {row['id']} 판정 실패: {e}")
         return "mid"
+
+
+def classify_haiku(row: dict) -> str:
+    return _classify_llm(row, _HAIKU)
+
+
+def classify_sonnet(row: dict) -> str:
+    return _classify_llm(row, _SONNET)
 
 
 def precision_recall_f1(matrix: dict) -> dict:
@@ -71,7 +81,7 @@ def fmt_matrix(matrix: dict) -> str:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="news_relevance 골든셋 eval")
-    parser.add_argument("--mode", choices=["oracle", "stub", "haiku"], default="oracle")
+    parser.add_argument("--mode", choices=["oracle", "stub", "haiku", "sonnet"], default="oracle")
     parser.add_argument("--max-cases", type=int, default=0, help="실행할 케이스 수 제한(0=전체)")
     parser.add_argument("--threshold", type=float, default=None, help="평균 F1 임계(미지정 시 mode 기본)")
     args = parser.parse_args()
@@ -79,7 +89,8 @@ def main() -> int:
     rows = load_golden()
     if args.max_cases:
         rows = rows[: args.max_cases]
-    classifier = {"oracle": classify_oracle, "stub": classify_stub, "haiku": classify_haiku}[args.mode]
+    classifier = {"oracle": classify_oracle, "stub": classify_stub,
+                  "haiku": classify_haiku, "sonnet": classify_sonnet}[args.mode]
 
     matrix: dict = {}
     correct = 0
