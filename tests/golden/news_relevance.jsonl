@@ -1,0 +1,16 @@
+{"id":"rel-001","company":"카카오","title":"카카오, 금융위 STO 발행 플랫폼 사업자 선정","description":"카카오가 분산원장 기반 토큰증권 발행·유통 플랫폼 사업자로 선정됐다.","expected":{"relevance":"high"},"notes":"STO+분산원장 직접 사업신호"}
+{"id":"rel-002","company":"신한은행","title":"신한은행, 한국은행 CBDC 2단계 실증 참여","description":"신한은행이 분산원장 기반 CBDC 모의실험 2단계 컨소시엄에 참여한다.","expected":{"relevance":"high"},"notes":"CBDC 컨소시엄 진입"}
+{"id":"rel-003","company":"삼성SDS","title":"삼성SDS, 기업용 DID 신원인증 솔루션 공공기관 공급","description":"삼성SDS가 공공기관 대상 DID 기반 모바일 신분증 인프라를 공급한다.","expected":{"relevance":"high"},"notes":"DID 공공 인프라"}
+{"id":"rel-004","company":"네이버","title":"네이버페이, 스테이블코인 결제 파일럿 검토","description":"네이버페이가 원화 스테이블코인 기반 결제 파일럿을 검토 중이다.","expected":{"relevance":"high"},"notes":"스테이블코인 결제 인프라"}
+{"id":"rel-005","company":"BlackRock","title":"BlackRock expands tokenized Treasury fund on-chain settlement","description":"BlackRock added on-chain settlement to its tokenized US Treasury (RWA) fund.","expected":{"relevance":"mid"},"notes":"RWA 글로벌 동향, 한국 직접성 낮음"}
+{"id":"rel-006","company":"KB국민은행","title":"KB, 디지털자산 custody 라이선스 검토 보도","description":"KB금융이 디지털자산 수탁(custody) 사업 진출을 검토한다는 보도.","expected":{"relevance":"mid"},"notes":"custody 관련 동향"}
+{"id":"rel-007","company":"우리은행","title":"우리은행, 블록체인 기반 무역금융 PoC 결과 공개","description":"우리은행이 분산원장 무역금융 PoC 결과를 공개했다.","expected":{"relevance":"mid"},"notes":"블록체인 PoC 동향"}
+{"id":"rel-008","company":"카카오","title":"카카오뱅크, 1분기 순이익 사상 최대","description":"카카오뱅크가 1분기 역대 최대 순이익을 기록했다.","expected":{"relevance":"low"},"notes":"일반 실적, 사업영역 액션 없음"}
+{"id":"rel-009","company":"빗썸","title":"비트코인 시세 9만달러 돌파, 김프 3%대","description":"비트코인이 9만달러를 넘으며 김치프리미엄이 확대됐다.","expected":{"relevance":"low"},"notes":"시세 노이즈 — fast-cut 대상"}
+{"id":"rel-010","company":"업비트","title":"[마감시황] 가상자산 일제히 급등","description":"가상자산 시장이 마감 기준 일제히 급등했다.","expected":{"relevance":"low"},"notes":"시황 노이즈 — fast-cut 대상"}
+{"id":"rel-011","company":"두나무","title":"두나무, NFT 마케팅 에어드롭 이벤트 진행","description":"두나무가 신규 사용자 대상 NFT 에어드롭 이벤트를 연다.","expected":{"relevance":"low"},"notes":"마케팅 이벤트 노이즈"}
+{"id":"rel-012","company":"카카오","title":"카카오미용실, 강남 2호점 오픈","description":"동명의 미용 프랜차이즈 카카오미용실이 강남 2호점을 열었다.","expected":{"relevance":"exclude"},"notes":"동명 타사·업종 무관"}
+{"id":"rel-013","company":"애플","title":"Apple, 신형 아이폰 카메라 성능 공개","description":"애플이 신형 아이폰의 카메라 사양을 공개했다.","expected":{"relevance":"exclude"},"notes":"업종 무관(파라메타 사업영역 아님)"}
+{"id":"rel-014","company":"KISA","title":"KISA, 디지털 신원지갑 표준 가이드 발표","description":"한국인터넷진흥원이 DID 기반 디지털 신원지갑 상호운용 표준 가이드를 발표했다.","expected":{"relevance":"high"},"notes":"규제기관 DID 표준"}
+{"id":"rel-015","company":"하나은행","title":"하나은행, 토큰증권 컨소시엄 기술 파트너 모집 공고","description":"하나은행이 STO 플랫폼 구축을 위한 기술 파트너 모집 공고를 냈다.","expected":{"relevance":"high"},"notes":"발주·파트너 모집 — 직접 영업 신호"}
+{"id":"rel-016","company":"네이버","title":"네이버웹툰, 신작 웹툰 흥행 기록","description":"네이버웹툰의 신작이 글로벌 조회수 기록을 세웠다.","expected":{"relevance":"low"},"notes":"콘텐츠 실적, 사업영역 무관"}
