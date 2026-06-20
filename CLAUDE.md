@@ -305,6 +305,15 @@ cd frontend && ./serve.sh           # http://localhost:3030 → config.js의 BAC
 
 **업체 리서치 시 내부 메모 보존:** `research_company()`는 `## 최근 동향`, `## 이메일 맥락`, `## 파라메타 서비스 연결점`, `## ParaScope` 섹션만 갱신하고, `## 내부 메모` 등 리서치 대상이 아닌 섹션은 그대로 유지합니다.
 
+### 업체 뉴스 관련성 판정
+
+업체 리서치의 `## 최근 동향`은 web_search 결과를 **사후 판정**해 관련 기사만 남깁니다.
+
+- `agents/news_relevance.py::judge_news()` — ① negative 정규식 fast-cut(시세/마케팅 무비용 제거) → ② Haiku가 high/mid/low/exclude 판정 → high·mid만 보존. **best-effort**: 판정 LLM 실패 시 fast-cut 결과만 통과(절대 '정보 없음' 강제 생성 안 함).
+- 관련성 정의: `prompts/templates/news_relevance.md`(positive/negative/high·low 신호, parameta_radar 발췌·핫리로드·관리자 편집 가능).
+- `research_company`가 오케스트레이터/단일 두 경로 공통으로 호출. 동명 타사는 검색 프롬프트(`company_news.md`/`trend_signals.md`)에서 배제.
+- 품질 평가: `tests/eval_news_relevance.py --mode {oracle|stub|haiku}` (라벨별 P/R/F1 + confusion matrix). 골든셋 `tests/golden/news_relevance.jsonl`.
+
 ### 제안서 워크플로우
 
 `agents/proposal.py`가 회의 기반 제안서 개요·초안을 생성합니다. 개요/초안 각각 Slack 스레드에서 수정 가능합니다. 프롬프트 템플릿: `prompts/templates/proposal_intake.md`, `proposal_generate.md`.
