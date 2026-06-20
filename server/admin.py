@@ -86,9 +86,13 @@ def _enrich_feedback(items: list[dict]) -> list[dict]:
 
 @router.get("/dashboard")
 def api_dashboard(_: str = Depends(_require_admin)):
+    today_start = datetime.now().replace(
+        hour=0, minute=0, second=0, microsecond=0
+    ).isoformat()
     return {
         "counts": user_store.admin_counts(),
         "recent_feedback": _enrich_feedback(user_store.list_all_feedback(limit=5)),
+        "message_stats": user_store.message_stats(date_from=today_start),
     }
 
 
