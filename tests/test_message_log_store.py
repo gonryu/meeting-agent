@@ -55,6 +55,13 @@ class TestListMessages:
         rows = user_store.list_messages(q="브리핑")
         assert len(rows) == 1 and "브리핑" in rows[0]["text"]
 
+    def test_search_matches_blocks_json(self):
+        """브리핑·회의록 본문은 주로 blocks에 담긴다 — text뿐 아니라 blocks_json도 검색돼야 함."""
+        _log(text="안내문", blocks_json='[{"type":"section","text":"카카오페이 미팅 브리핑"}]')
+        _log(text="다른 메시지", blocks_json=None)
+        rows = user_store.list_messages(q="카카오페이")
+        assert len(rows) == 1 and "카카오페이" in (rows[0]["blocks_json"] or "")
+
     def test_newest_first_and_pagination(self):
         for i in range(5):
             _log(text=f"m{i}")

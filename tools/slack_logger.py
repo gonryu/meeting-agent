@@ -76,6 +76,11 @@ def _record(method_label, kwargs, ok, error):
     try:
         channel = kwargs.get("channel")
         kind, uid = _recipient_kind(channel)
+        # ephemeral 발송은 수신자가 channel이 아니라 user kwarg에 담긴다 → 사용자 귀속 보정
+        if uid is None and kwargs.get("user"):
+            uid = kwargs.get("user")
+            if kind is None:
+                kind = "dm"
         text = kwargs.get("text")
         blocks = kwargs.get("blocks")
         user_store.log_message(

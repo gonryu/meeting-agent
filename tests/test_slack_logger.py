@@ -89,3 +89,14 @@ class TestInstallLogging:
         first = c.chat_postMessage
         slack_logger.install_logging(c)  # 두 번째 호출은 무시돼야 함
         assert c.chat_postMessage is first
+
+    def test_ephemeral_records_user_as_recipient(self):
+        """ephemeral 발송은 수신자가 channel이 아니라 user kwarg에 담긴다 →
+        recipient_user_id가 user로 기록돼 사용자별 조회에서 잡혀야 한다."""
+        c = _fake()
+        slack_logger.install_logging(c)
+        with patch.object(slack_logger.user_store, "log_message") as mock_log:
+            c.chat_postEphemeral(channel="C1", user="U9", text="권한이 없습니다")
+        kw = mock_log.call_args.kwargs
+        assert kw["method"] == "ephemeral"
+        assert kw["recipient_user_id"] == "U9"

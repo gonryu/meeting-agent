@@ -963,7 +963,10 @@ def list_messages(*, user_id: str = None, category: str = None, ok: int = None,
     if date_to:
         conditions.append("ts <= ?"); params.append(date_to)
     if q:
-        conditions.append("text LIKE ?"); params.append(f"%{q}%")
+        # 브리핑·회의록 본문은 주로 blocks에 담기므로 text·blocks_json 양쪽 검색
+        conditions.append("(text LIKE ? OR blocks_json LIKE ?)")
+        like = f"%{q}%"
+        params.append(like); params.append(like)
     if conditions:
         query += " WHERE " + " AND ".join(conditions)
     query += " ORDER BY id DESC LIMIT ? OFFSET ?"
