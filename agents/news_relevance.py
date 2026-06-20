@@ -1,6 +1,6 @@
 """업체 뉴스 관련성 판정 — web_search 결과를 사후 판정(생성기 불신).
 
-negative fast-cut(LLM 없음) → Haiku high/mid/low 판정 → high·mid만 보존.
+negative fast-cut(LLM 없음) → Sonnet high/mid/low 판정 → high·mid만 보존.
 best-effort: 판정 LLM 실패 시 fast-cut 결과만 통과(절대 '정보 없음' 강제 생성 안 함).
 정의: prompts/templates/news_relevance.md (핫리로드).
 """
@@ -15,7 +15,9 @@ import anthropic
 log = logging.getLogger(__name__)
 
 _claude = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
-_MODEL = "claude-haiku-4-5"
+# 관련성 판정은 등급(high/mid/low/exclude) 판단이라 Sonnet 사용(회의록·제안서와 동일 티어).
+# fast-cut이 명백한 노이즈를 먼저 제거하므로 LLM엔 애매한 경계 케이스만 도달.
+_MODEL = "claude-sonnet-4-5"
 _TEMPLATE = Path(__file__).parent.parent / "prompts" / "templates" / "news_relevance.md"
 _NO_INFO = "- 파라메타 사업 맥락의 최근 공개 정보 없음"
 

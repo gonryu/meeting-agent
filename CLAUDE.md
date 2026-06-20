@@ -95,7 +95,7 @@ _generate(prompt)  # Claude (검색 없음)
 generate_text()    # _generate의 public 래퍼 (main.py의 인텐트 분류에서 사용)
 ```
 
-전 모듈이 Claude `claude-haiku-4-5`를 사용합니다. 회의록 생성·수정(`_generate_minutes`)과 제안서는 Claude `claude-sonnet-4-5`를 직접 사용합니다 (고품질 요구). Gemini는 완전히 제거되었습니다.
+전 모듈이 Claude `claude-haiku-4-5`를 사용합니다. 회의록 생성·수정(`_generate_minutes`)·제안서·업체 뉴스 관련성 판정(`news_relevance.judge_news`)은 Claude `claude-sonnet-4-5`를 직접 사용합니다 (고품질 요구). Gemini는 완전히 제거되었습니다.
 
 ### 브리핑 비동기 흐름
 
@@ -309,10 +309,10 @@ cd frontend && ./serve.sh           # http://localhost:3030 → config.js의 BAC
 
 업체 리서치의 `## 최근 동향`은 web_search 결과를 **사후 판정**해 관련 기사만 남깁니다.
 
-- `agents/news_relevance.py::judge_news()` — ① negative 정규식 fast-cut(시세/마케팅 무비용 제거) → ② Haiku가 high/mid/low/exclude 판정 → high·mid만 보존. **best-effort**: 판정 LLM 실패 시 fast-cut 결과만 통과(절대 '정보 없음' 강제 생성 안 함).
+- `agents/news_relevance.py::judge_news()` — ① negative 정규식 fast-cut(시세/마케팅 무비용 제거) → ② Sonnet(`claude-sonnet-4-5`)이 high/mid/low/exclude 판정 → high·mid만 보존. 등급 판단이라 Sonnet 사용(fast-cut이 쉬운 노이즈를 먼저 거르고 애매한 경계 케이스만 LLM에 도달). **best-effort**: 판정 LLM 실패 시 fast-cut 결과만 통과(절대 '정보 없음' 강제 생성 안 함).
 - 관련성 정의: `prompts/templates/news_relevance.md`(positive/negative/high·low 신호, parameta_radar 발췌·핫리로드·관리자 편집 가능).
 - `research_company`가 오케스트레이터/단일 두 경로 공통으로 호출. 동명 타사는 검색 프롬프트(`company_news.md`/`trend_signals.md`)에서 배제.
-- 품질 평가: `tests/eval_news_relevance.py --mode {oracle|stub|haiku}` (라벨별 P/R/F1 + confusion matrix). 골든셋 `tests/golden/news_relevance.jsonl`.
+- 품질 평가: `tests/eval_news_relevance.py --mode {oracle|stub|haiku|sonnet}` (라벨별 P/R/F1 + confusion matrix). 골든셋 `tests/golden/news_relevance.jsonl`.
 
 ### 제안서 워크플로우
 
