@@ -963,9 +963,10 @@ def log_message(*, method: str, channel: str = None, recipient_user_id: str = No
 
 
 def list_messages(*, user_id: str = None, category: str = None, ok: int = None,
-                  date_from: str = None, date_to: str = None, q: str = None,
+                  direction: str = None, date_from: str = None, date_to: str = None,
+                  q: str = None, order: str = "desc",
                   limit: int = 100, offset: int = 0) -> list[dict]:
-    """메시지 로그 조회 (최신순). 인자 미지정 시 전체."""
+    """메시지 로그 조회. order='asc'면 시간 오름차순(대화 타임라인용). 인자 미지정 시 전체."""
     query = "SELECT * FROM message_log"
     conditions: list[str] = []
     params: list = []
@@ -975,6 +976,8 @@ def list_messages(*, user_id: str = None, category: str = None, ok: int = None,
         conditions.append("category = ?"); params.append(category)
     if ok is not None:
         conditions.append("ok = ?"); params.append(ok)
+    if direction:
+        conditions.append("direction = ?"); params.append(direction)
     if date_from:
         conditions.append("ts >= ?"); params.append(date_from)
     if date_to:
@@ -986,7 +989,8 @@ def list_messages(*, user_id: str = None, category: str = None, ok: int = None,
         params.append(like); params.append(like)
     if conditions:
         query += " WHERE " + " AND ".join(conditions)
-    query += " ORDER BY id DESC LIMIT ? OFFSET ?"
+    order_sql = "ASC" if str(order).lower() == "asc" else "DESC"
+    query += f" ORDER BY id {order_sql} LIMIT ? OFFSET ?"
     params.extend([limit, offset])
     with _conn() as conn:
         rows = conn.execute(query, params).fetchall()

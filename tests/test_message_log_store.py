@@ -118,3 +118,23 @@ def test_migration_adds_direction_to_old_db(tmp_path, monkeypatch):
     user_store.init_db()  # ALTER로 direction 추가
     rows = user_store.list_messages()
     assert rows[0]["direction"] == "outbound"
+
+
+class TestDirectionFilterAndOrder:
+    def test_filter_by_direction(self):
+        _log(text="나간거", direction="outbound")
+        _log(text="들어온거", direction="inbound", method="message")
+        rows = user_store.list_messages(direction="inbound")
+        assert len(rows) == 1 and rows[0]["text"] == "들어온거"
+
+    def test_order_asc_is_chronological(self):
+        _log(text="처음")
+        _log(text="나중")
+        rows = user_store.list_messages(order="asc")
+        assert [r["text"] for r in rows] == ["처음", "나중"]
+
+    def test_default_order_still_desc(self):
+        _log(text="처음")
+        _log(text="나중")
+        rows = user_store.list_messages()
+        assert [r["text"] for r in rows] == ["나중", "처음"]
