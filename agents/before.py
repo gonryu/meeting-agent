@@ -45,6 +45,7 @@ from prompts.briefing import (
     update_knowledge_prompt,
 )
 from store import user_store
+from agents import news_relevance
 
 load_dotenv(override=True)
 
@@ -61,14 +62,6 @@ def _internal_domains_set() -> set[str]:
     raw = os.getenv("INTERNAL_DOMAINS", "parametacorp.com,iconloop.com")
     return {d.strip().lower() for d in raw.split(",") if d.strip()}
 
-
-_PARAMETA_RELEVANCE_KEYWORDS = (
-    "스테이블코인", "stablecoin", "블록체인", "blockchain", "rwa",
-    "디지털자산", "digital asset", "토큰증권", "sto", "did", "신원인증",
-    "전자지갑", "wallet", "web3", "cbdc", "핀테크", "fintech", "결제",
-    "payment", "금융", "규제", "라이선스", "보안", "인증", "가상자산",
-    "토큰화", "tokenization",
-)
 
 # ParaScope 봇 채널 조회
 _PARASCOPE_BOT_ID = os.getenv("PARASCOPE_BOT_ID", "")
@@ -594,24 +587,6 @@ def _to_bullet_lines(text: str) -> str:
     return "\n".join(result)
 
 
-def _filter_parameta_relevant_news(news_text: str) -> str:
-    """웹 검색 결과에서 파라메타 사업 맥락과 무관한 단순 최신 기사 제거."""
-    kept = []
-    for line in news_text.splitlines():
-        stripped = line.strip()
-        if not stripped:
-            continue
-        lowered = stripped.lower()
-        if "공개 정보 없음" in stripped or "정보 없음" in stripped:
-            kept.append(stripped)
-            continue
-        if any(keyword.lower() in lowered for keyword in _PARAMETA_RELEVANCE_KEYWORDS):
-            kept.append(stripped)
-    if kept:
-        return "\n".join(kept)
-    return "- 파라메타 사업 맥락의 최근 공개 정보 없음"
-
-
 _LOW_VALUE_CONNECTION_PATTERNS = (
     "명확한 접점 없음",
     "서비스 영역 차이",
@@ -793,9 +768,10 @@ def research_company(user_id: str, company_name: str, force: bool = False) -> tu
         news_text = ""
 
     if not used_orchestrator:
-        news_text = _filter_parameta_relevant_news(
-            _to_bullet_lines(_search(company_news_prompt(company_name)))
-        )
+        news_text = _to_bullet_lines(_search(company_news_prompt(company_name)))
+
+    # 두 경로(오케스트레이터/단일) 공통: 관련성 사후 판정 (생성기 불신)
+    news_text = news_relevance.judge_news(company_name, news_text, today=today)
 
     # CM-09: 웹 검색 결과에 출처 태그 추가 (오케스트레이터 산출물에는 이미 출처 URL이 인라인됨)
     if not used_orchestrator and news_text.strip():

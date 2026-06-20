@@ -85,3 +85,25 @@ class TestJudgeNews:
     def test_empty_input(self):
         assert "정보 없음" in nr.judge_news("카카오", "")
         assert "정보 없음" in nr.judge_news("카카오", "   ")
+
+
+class TestWiringContract:
+    """research_company가 두 경로 모두 judge_news를 거치는지 (계약 회귀)."""
+
+    def test_judge_news_signature(self):
+        # before.py가 호출하는 시그니처: judge_news(company, text, today=...)
+        import inspect
+        sig = inspect.signature(nr.judge_news)
+        params = list(sig.parameters)
+        assert params[0] == "company_name"
+        assert params[1] == "news_text"
+        assert "today" in sig.parameters
+
+    def test_old_filter_removed(self):
+        with patch("anthropic.Anthropic"), \
+             patch("tools.calendar._service"), \
+             patch("tools.drive._service"), \
+             patch("tools.gmail._service"):
+            import agents.before as before
+        assert not hasattr(before, "_filter_parameta_relevant_news")
+        assert not hasattr(before, "_PARAMETA_RELEVANCE_KEYWORDS")
