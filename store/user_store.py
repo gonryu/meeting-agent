@@ -219,6 +219,28 @@ def init_db():
         conn.execute("CREATE INDEX IF NOT EXISTS idx_todo_history_todo ON todo_history(todo_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_todo_history_user ON todo_history(user_id)")
 
+        # 발송 메시지 로그 (관리자 관측)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS message_log (
+                id                INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts                TEXT NOT NULL,
+                method            TEXT NOT NULL,
+                channel           TEXT,
+                recipient_user_id TEXT,
+                recipient_kind    TEXT,
+                thread_ts         TEXT,
+                text              TEXT,
+                blocks_json       TEXT,
+                category          TEXT,
+                ok                INTEGER NOT NULL DEFAULT 1,
+                error             TEXT
+            )
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_msglog_ts ON message_log(ts)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_msglog_recipient ON message_log(recipient_user_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_msglog_category ON message_log(category)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_msglog_ok ON message_log(ok)")
+
 
 def is_registered(slack_user_id: str) -> bool:
     with _conn() as conn:
@@ -901,3 +923,92 @@ def get_todo_history(user_id: str, limit: int = 100) -> list[dict]:
             (user_id, limit),
         ).fetchall()
     return [dict(r) for r in rows]
+
+
+# ── 메시지 로그 (관리자 관측) ────────────────────────────────
+
+def log_message(*, method: str, channel: str = None, recipient_user_id: str = None,
+                recipient_kind: str = None, thread_ts: str = None, text: str = None,
+                blocks_json: str = None, category: str = None, ok: bool = True,
+                error: str = None) -> int:
+    """발송 메시지 1건 기록. Returns: message_log id"""
+    now = datetime.now().isoformat()
+    with _conn() as conn:
+        cur = conn.execute(
+            """INSERT INTO message_log
+               (ts, method, channel, recipient_user_id, recipient_kind, thread_ts,
+                text, blocks_json, category, ok, error)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (now, method, channel, recipient_user_id, recipient_kind, thread_ts,
+             text, blocks_json, category, 1 if ok else 0, error),
+        )
+        return cur.lastrowid
+
+
+def list_messages(*, user_id: str = None, category: str = None, ok: int = None,
+                  date_from: str = None, date_to: str = None, q: str = None,
+                  limit: int = 100, offset: int = 0) -> list[dict]:
+    """메시지 로그 조회 (최신순). 인자 미지정 시 전체."""
+    query = "SELECT * FROM message_log"
+    conditions: list[str] = []
+    params: list = []
+    if user_id:
+        conditions.append("recipient_user_id = ?"); params.append(user_id)
+    if category:
+        conditions.append("category = ?"); params.append(category)
+    if ok is not None:
+        conditions.append("ok = ?"); params.append(ok)
+    if date_from:
+        conditions.append("ts >= ?"); params.append(date_from)
+    if date_to:
+        conditions.append("ts <= ?"); params.append(date_to)
+    if q:
+        conditions.append("text LIKE ?"); params.append(f"%{q}%")
+    if conditions:
+        query += " WHERE " + " AND ".join(conditions)
+    query += " ORDER BY id DESC LIMIT ? OFFSET ?"
+    params.extend([limit, offset])
+    with _conn() as conn:
+        rows = conn.execute(query, params).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_message(message_id: int) -> dict | None:
+    with _conn() as conn:
+        row = conn.execute(
+            "SELECT * FROM message_log WHERE id = ?", (message_id,)
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def prune_messages(before_iso: str) -> int:
+    """before_iso(ISO8601) 이전 메시지 삭제. Returns: 삭제 건수."""
+    with _conn() as conn:
+        cur = conn.execute("DELETE FROM message_log WHERE ts < ?", (before_iso,))
+        return cur.rowcount
+
+
+def message_stats(*, date_from: str = None) -> dict:
+    """date_from 이후(없으면 전체) 발송 집계."""
+    cond = ""
+    params: list = []
+    if date_from:
+        cond = " WHERE ts >= ?"
+        params = [date_from]
+    fail_cond = (cond + " AND ok = 0") if cond else " WHERE ok = 0"
+    active_cond = (cond + " AND recipient_user_id IS NOT NULL") if cond else " WHERE recipient_user_id IS NOT NULL"
+    with _conn() as conn:
+        total = conn.execute(f"SELECT COUNT(*) FROM message_log{cond}", params).fetchone()[0]
+        failures = conn.execute(f"SELECT COUNT(*) FROM message_log{fail_cond}", params).fetchone()[0]
+        active = conn.execute(
+            f"SELECT COUNT(DISTINCT recipient_user_id) FROM message_log{active_cond}", params
+        ).fetchone()[0]
+        by_cat = conn.execute(
+            f"SELECT category, COUNT(*) AS c FROM message_log{cond} GROUP BY category", params
+        ).fetchall()
+    return {
+        "total": total,
+        "failures": failures,
+        "active_recipients": active,
+        "by_category": {(r["category"] or "other"): r["c"] for r in by_cat},
+    }
