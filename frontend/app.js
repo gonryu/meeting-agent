@@ -127,6 +127,7 @@
     const data = await api("/dashboard");
     const c = data.counts;
     const fb = data.recent_feedback || [];
+    const ms = data.message_stats || { total: 0, failures: 0, active_recipients: 0 };
 
     const stats = `
       <div class="stats">
@@ -140,6 +141,13 @@
         <div class="stat"><div class="label">오픈 액션아이템</div>
           <div class="value">${c.action_open}</div>
           <div class="sub">전체 ${c.action_total}건</div></div>
+        <div class="stat"><div class="label">오늘 발송</div>
+          <div class="value">${ms.total}</div></div>
+        <div class="stat"><div class="label">오늘 발송 실패</div>
+          <div class="value">${ms.failures}</div>
+          <div class="sub">${ms.failures > 0 ? '<a href="#/messages?ok=0">실패 보기 →</a>' : "정상"}</div></div>
+        <div class="stat"><div class="label">오늘 수신 사용자</div>
+          <div class="value">${ms.active_recipients}</div></div>
       </div>
     `;
 
@@ -170,6 +178,8 @@
   }
 
   async function renderUsers() {
+    const uidParam = new URLSearchParams(location.hash.split("?")[1] || "").get("uid");
+    if (uidParam) return renderUserDetail(uidParam);
     setLoading("사용자 목록 불러오는 중...");
     const users = await api("/users");
     if (users.length === 0) {
@@ -179,7 +189,7 @@
     const rows = users.map((u) => `
       <tr>
         <td>
-          <div>${escapeHtml(u.name || "—")}</div>
+          <div><a href="#/users?uid=${encodeURIComponent(u.slack_user_id)}">${escapeHtml(u.name || "—")}</a></div>
           <div class="muted small">${escapeHtml(u.email || "")}</div>
           <div class="muted small"><code>${escapeHtml(u.slack_user_id)}</code></div>
         </td>
@@ -201,6 +211,38 @@
           </tr></thead>
           <tbody>${rows}</tbody>
         </table>
+      </div>
+    `;
+  }
+
+  async function renderUserDetail(uid) {
+    setLoading("사용자 상세 불러오는 중...");
+    const [users, msgData] = await Promise.all([
+      api("/users"),
+      api("/users/" + encodeURIComponent(uid) + "/messages"),
+    ]);
+    const u = (users || []).find((x) => x.slack_user_id === uid) || { slack_user_id: uid };
+    const items = msgData.items || [];
+    const rows = items.map((m) => `
+      <tr class="msg-row" data-id="${m.id}" style="cursor:pointer">
+        <td class="nowrap">${escapeHtml(fmtDt(m.ts))}</td>
+        <td><span class="tag">${escapeHtml(MSG_CATEGORY_LABEL[m.category] || m.category || "기타")}</span></td>
+        <td>${m.ok ? '<span class="tag ok">성공</span>' : '<span class="tag warn">실패</span>'}</td>
+        <td>${escapeHtml((m.text || "").slice(0, 80))}${(m.text || "").length > 80 ? "…" : ""}</td>
+      </tr>`).join("");
+    main.innerHTML = `
+      <div class="card">
+        <h2><a href="#/users" class="small">← 사용자 목록</a>&nbsp;${escapeHtml(u.name || uid)}</h2>
+        <p class="muted small">
+          <code>${escapeHtml(uid)}</code> · ${escapeHtml(u.email || "")} ·
+          Drive ${u.has_drive ? "🟢" : "—"} / Trello ${u.has_trello ? "🟢" : "—"} / Dreamplus ${u.has_dreamplus ? "🟢" : "—"}
+        </p>
+      </div>
+      <div class="card">
+        <h2>받은 메시지 <span class="muted">(${items.length}건)</span></h2>
+        ${items.length === 0
+          ? '<div class="empty">기록된 메시지가 없습니다.</div>'
+          : `<table><thead><tr><th>시각</th><th>유형</th><th>발송</th><th>본문</th></tr></thead><tbody>${rows}</tbody></table>`}
       </div>
     `;
   }
