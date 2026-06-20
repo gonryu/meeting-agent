@@ -273,6 +273,18 @@ cd frontend && ./serve.sh           # http://localhost:3030 → config.js의 BAC
 - `ADMIN_PASSWORD` — Basic Auth 비밀번호 (`.env` + 라이브 서버 `.env` 양쪽 필요)
 - `ADMIN_FRONTEND_ORIGINS` — 추가 CORS 오리진 (선택, 쉼표 구분)
 
+### 메시지 관측(발송 로그)
+
+봇이 보내는 모든 Slack 메시지를 중앙에서 기록해 관리자가 사후 점검할 수 있습니다.
+
+**포착:** `tools/slack_logger.install_logging()`이 `app.client`의 `chat_postMessage`/`chat_update`/`chat_postEphemeral`를 in-place로 감싸고, Bolt 미들웨어가 리스너 주입 client도 감쌉니다(idempotent). 로깅 실패는 발송에 영향을 주지 않습니다(best-effort).
+
+**저장:** `message_log` 테이블(`store/user_store.py`) — `ts/method/channel/recipient_user_id/recipient_kind/thread_ts/text/blocks_json/category/ok/error`. 수신자 이름은 저장하지 않고 조회 시점에 `_lookup_profile`로 해석. `category`는 text/blocks 마커 기반 best-effort 추정.
+
+**조회:** 관리자 페이지 `메시지` 탭(글로벌 피드 + 필터 + 본문검색 + 상세), `사용자` 탭의 사용자 클릭 시 상세, 대시보드 오늘자 stats.
+
+**보존:** 기본 90일(`MESSAGE_LOG_RETENTION_DAYS`), 매일 03:00 KST `scheduled_message_log_prune` 잡이 정리.
+
 ### 회의록 검색
 
 `/회의록 [검색어]` 또는 자연어(`지난 목요일 회의록`, `카카오 회의록 찾아줘`)로 회의록을 검색합니다. Drive Minutes 폴더의 파일명(`{YYYY-MM-DD}_{제목}_내부용.md`)을 기반으로 필터링합니다.
