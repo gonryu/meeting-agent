@@ -185,6 +185,14 @@ def run_company_research(*, company_name: str, knowledge_md: str = "",
         f"trend_chars={len(trend_md)})"
     )
 
+    # raw 동향 불릿(flat 뉴스) 단계에서 관련성 판정 — judge_news가 기대하는 형식.
+    # 태그는 붙이지 않아(add_tags=False) 이후 구조화 synthesis를 오염시키지 않음.
+    try:
+        from agents import news_relevance
+        trend_md = news_relevance.judge_news(company_name, trend_md, add_tags=False)
+    except Exception as e:
+        log.warning(f"동향 관련성 판정 실패, 원본 사용 ({company_name}): {e}")
+
     final_md = _company_synthesis(
         company_name=company_name, today=today,
         industry=industry, competitor=competitor,

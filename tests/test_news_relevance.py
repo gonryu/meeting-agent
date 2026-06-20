@@ -46,6 +46,24 @@ class TestNegativeFastCut:
         assert "Hairdropper" in out         # 워드경계 — 오매칭 안 함
         assert "airdrop 이벤트" not in out   # 정확 단어 매칭 — 제거
 
+    def test_precision_first_keeps_percent_article(self):
+        # FIX2: \d+% 패턴 제거 — 정상 사업 기사를 컷하면 안 됨
+        out = nr._negative_fast_cut("- 카카오, 30% 비용 절감 블록체인 솔루션 공공기관 공급")
+        assert "비용 절감" in out
+
+    def test_precision_first_keeps_whale_lab(self):
+        # FIX2: bare '고래' 토큰 제거 — '고래연구소' 같은 정상 기업명 오컷 방지
+        out = nr._negative_fast_cut("- 고래연구소, 블록체인 플랫폼 출시")
+        assert "고래연구소" in out
+
+    def test_still_cuts_price_quote(self):
+        # 고신뢰 '시세' 패턴은 여전히 컷
+        assert nr._negative_fast_cut("- 비트코인 시세 급등").strip() == ""
+
+    def test_still_cuts_market_close_tag(self):
+        # 고신뢰 [마감시황] 태그는 여전히 컷
+        assert nr._negative_fast_cut("- [마감시황] 가상자산 급등").strip() == ""
+
 
 class TestJudgeNews:
     def _items(self, mapping):
@@ -85,6 +103,28 @@ class TestJudgeNews:
     def test_empty_input(self):
         assert "정보 없음" in nr.judge_news("카카오", "")
         assert "정보 없음" in nr.judge_news("카카오", "   ")
+
+    def test_add_tags_false_omits_relevance_suffix(self):
+        # FIX1: add_tags=False면 보존 불릿에 [관련도: x] 접미사를 붙이지 않음
+        news = (
+            "- 카카오, DID 신분증 공공 PoC 수주 (출처)\n"
+            "- 카카오, RWA 토큰화 파트너십 발표 (출처)"
+        )
+        with patch.object(nr, "_judge_with_llm", return_value={0: "high", 1: "mid"}):
+            out = nr.judge_news("카카오", news, add_tags=False)
+        assert "DID 신분증" in out and "RWA 토큰화" in out
+        assert "[관련도" not in out
+
+    def test_preserves_non_bullet_header_lines(self):
+        # 방어: ### 최근 동향 같은 비불릿 헤더가 섞여도 임의 삭제하지 않음
+        news = (
+            "### 최근 동향\n"
+            "- 카카오, DID 신분증 공공 PoC 수주 (출처)"
+        )
+        with patch.object(nr, "_judge_with_llm", return_value={0: "high"}):
+            out = nr.judge_news("카카오", news, add_tags=False)
+        assert "### 최근 동향" in out
+        assert "DID 신분증" in out
 
 
 class TestWiringContract:
@@ -126,6 +166,8 @@ class TestGoldenSet:
         for r in rows:
             assert r["expected"]["relevance"] in valid
             assert r["company"] and r["title"]
+            # eval 하네스가 description을 읽으므로(classify_stub/haiku) 필수
+            assert "description" in r, f"{r.get('id')} description 누락"
 
     def test_fastcut_removes_obvious_noise_in_golden(self):
         """expected=low 시세/시황 골든 항목은 fast-cut으로 제거돼야(결정적)."""

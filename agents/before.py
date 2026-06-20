@@ -769,9 +769,10 @@ def research_company(user_id: str, company_name: str, force: bool = False) -> tu
 
     if not used_orchestrator:
         news_text = _to_bullet_lines(_search(company_news_prompt(company_name)))
-
-    # 두 경로(오케스트레이터/단일) 공통: 관련성 사후 판정 (생성기 불신)
-    news_text = news_relevance.judge_news(company_name, news_text, today=today)
+        # 단일 호출 경로만: flat 뉴스 불릿 관련성 사후 판정 (생성기 불신).
+        # 오케스트레이터 산출물(구조화 synthesis)은 동향 불릿 단계에서 이미
+        # 판정되므로(research_orchestrator.run_company_research) 여기서 건드리지 않음.
+        news_text = news_relevance.judge_news(company_name, news_text, today=today)
 
     # CM-09: 웹 검색 결과에 출처 태그 추가 (오케스트레이터 산출물에는 이미 출처 URL이 인라인됨)
     if not used_orchestrator and news_text.strip():

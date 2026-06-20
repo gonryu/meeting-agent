@@ -20,10 +20,11 @@ _TEMPLATE = Path(__file__).parent.parent / "prompts" / "templates" / "news_relev
 _NO_INFO = "- 파라메타 사업 맥락의 최근 공개 정보 없음"
 
 # 가격/시세 노이즈 정규식 (LLM 없이 즉시 컷)
+# precision-first: 고신뢰 패턴만 컷. 모호한 bare 토큰(급등/청산/고래/호재 등)·
+# 퍼센트(\d+%)는 정상 기사를 영구 소실시킬 수 있어 제거 — LLM 판정에 위임.
 _PRICE_RE = re.compile(
-    r"시세|김프|급등|급락|폭락|호재|매수세|매도세|청산|"
-    r"\[(?:마감|개장|일일|주간)?시황\]|"
-    r"\d+\s*%"
+    r"시세|김프|김치프리미엄|"
+    r"\[(?:마감|개장|일일|주간)?시황\]"
 )
 
 
@@ -83,9 +84,11 @@ def _negative_fast_cut(news_text: str, negatives: list[str] = None) -> str:
     return "\n".join(kept)
 
 
-def _judge_with_llm(company_name: str, bullets: list[str]) -> dict:
+def _judge_with_llm(company_name: str, bullets: list[str], today: str = None) -> dict:
     """남은 불릿을 Haiku로 high/mid/low/exclude 판정. Returns: {index: relevance}."""
     relevance_def = _load_relevance_def()
+    from datetime import datetime
+    today = today or datetime.now().strftime("%Y-%m-%d")
     numbered = "\n".join(
         f"{i}. {b.lstrip('-').strip()}" for i, b in enumerate(bullets)
     )
@@ -93,6 +96,7 @@ def _judge_with_llm(company_name: str, bullets: list[str]) -> dict:
 
 ---
 대상 업체: {company_name}
+오늘({today}) 기준
 
 아래 뉴스 후보를 위 기준으로 각각 판정하라:
 - high: {company_name}와 직접 연결된 파라메타 사업영역 사업 신호
@@ -110,33 +114,60 @@ JSON만 출력(코드펜스·설명 없이):
         messages=[{"role": "user", "content": prompt}],
     )
     raw = resp.content[0].text.strip()
-    raw = raw.removeprefix("```json").removeprefix("```").rstrip("```").strip()
+    raw = raw.removeprefix("```json").removeprefix("```").removesuffix("```").strip()
     data = json.loads(raw)
     return {int(it["i"]): str(it.get("relevance", "mid")).lower()
             for it in data.get("items", [])}
 
 
-def judge_news(company_name: str, news_text: str, today: str = None) -> str:
-    """뉴스 텍스트를 관련성 판정해 high·mid만 보존한 마크다운 반환."""
+def judge_news(company_name: str, news_text: str, today: str = None,
+               add_tags: bool = True) -> str:
+    """뉴스 텍스트를 관련성 판정해 high·mid만 보존한 마크다운 반환.
+
+    add_tags=False면 보존된 불릿에 `[관련도: x]` 접미사를 붙이지 않는다
+    (오케스트레이터의 raw 동향 불릿 판정 등 구조화 산출물에 태그 오염을 막기 위함).
+    """
     if not news_text or not news_text.strip():
         return _NO_INFO
     negatives = _load_negatives()
     cut = _negative_fast_cut(news_text, negatives)
+    cut_lines = cut.splitlines()
     bullets = [
-        l for l in cut.splitlines()
+        l for l in cut_lines
         if l.strip().startswith("- ") and "정보 없음" not in l
     ]
     if not bullets:
         return _NO_INFO
     try:
-        verdicts = _judge_with_llm(company_name, bullets)
+        verdicts = _judge_with_llm(company_name, bullets, today=today)
     except Exception as e:
         log.warning(f"뉴스 관련성 판정 실패, fast-cut 결과 통과 ({company_name}): {e}")
-        cut_bullets = [l for l in cut.splitlines() if l.strip().startswith("- ")]
-        return "\n".join(cut_bullets) if cut_bullets else _NO_INFO
+        # 비불릿 줄(헤더 등)은 임의 삭제하지 않고 보존, 불릿은 fast-cut 결과 그대로 통과
+        kept = [l for l in cut_lines
+                if l.strip() and (not l.strip().startswith("- ")
+                                  or "정보 없음" not in l)]
+        # 보존 가치가 있는 불릿이 하나도 없으면 정보 없음
+        if not any(l.strip().startswith("- ") and "정보 없음" not in l for l in kept):
+            return _NO_INFO
+        return "\n".join(kept)
     kept = []
-    for i, line in enumerate(bullets):
-        rel = verdicts.get(i, "mid")  # 판정 누락 항목은 보존(mid)
+    bullet_idx = 0
+    for line in cut_lines:
+        s = line.strip()
+        if not s:
+            continue
+        # 비불릿 줄(### 헤더 등)·'정보 없음' 줄은 임의 삭제하지 않고 보존
+        if not s.startswith("- ") or "정보 없음" in s:
+            kept.append(line.rstrip())
+            continue
+        rel = verdicts.get(bullet_idx, "mid")  # 판정 누락 항목은 보존(mid)
+        bullet_idx += 1
         if rel in ("high", "mid"):
-            kept.append(f"{line.rstrip()} `[관련도: {rel}]`")
+            if add_tags:
+                kept.append(f"{line.rstrip()} `[관련도: {rel}]`")
+            else:
+                kept.append(line.rstrip())
+    # 보존된 불릿이 하나도 없으면(헤더만 남으면) 정보 없음
+    if not any(l.strip().startswith("- ") and "정보 없음" not in l for l in kept):
+        return _NO_INFO
     return "\n".join(kept) if kept else _NO_INFO
