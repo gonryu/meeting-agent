@@ -84,6 +84,16 @@ def _enrich_feedback(items: list[dict]) -> list[dict]:
     return enriched
 
 
+def _enrich_messages(items: list[dict]) -> list[dict]:
+    """메시지 항목에 수신자 Slack 프로필 이름 주입 (DM 한정)."""
+    out = []
+    for it in items:
+        uid = it.get("recipient_user_id")
+        name = _lookup_profile(uid)["name"] if uid else ""
+        out.append({**it, "recipient_name": name})
+    return out
+
+
 @router.get("/dashboard")
 def api_dashboard(_: str = Depends(_require_admin)):
     today_start = datetime.now().replace(
@@ -156,6 +166,48 @@ def api_feedback_resolution(
     if not ok:
         raise HTTPException(status_code=404, detail="피드백을 찾을 수 없습니다")
     return {"ok": True, "id": feedback_id, "status": payload.status}
+
+
+# ── 메시지 로그 (관리자 관측) ────────────────────────────────
+
+def _int_param(value, default):
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+@router.get("/messages")
+def api_messages(request: Request, _: str = Depends(_require_admin)):
+    qp = request.query_params
+    ok_val = None
+    if qp.get("ok") in ("0", "1"):
+        ok_val = int(qp.get("ok"))
+    items = user_store.list_messages(
+        user_id=qp.get("user") or None,
+        category=qp.get("category") or None,
+        ok=ok_val,
+        date_from=qp.get("date_from") or None,
+        date_to=qp.get("date_to") or None,
+        q=qp.get("q") or None,
+        limit=min(_int_param(qp.get("limit"), 100), 500),
+        offset=_int_param(qp.get("offset"), 0),
+    )
+    return {"items": _enrich_messages(items)}
+
+
+@router.get("/messages/{message_id}")
+def api_message_detail(message_id: int, _: str = Depends(_require_admin)):
+    msg = user_store.get_message(message_id)
+    if not msg:
+        raise HTTPException(status_code=404, detail="메시지를 찾을 수 없습니다")
+    return _enrich_messages([msg])[0]
+
+
+@router.get("/users/{uid}/messages")
+def api_user_messages(uid: str, _: str = Depends(_require_admin)):
+    items = user_store.list_messages(user_id=uid, limit=200)
+    return {"user_id": uid, "items": _enrich_messages(items)}
 
 
 # ── 프롬프트 템플릿 관리 ─────────────────────────────────────────
