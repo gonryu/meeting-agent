@@ -13,6 +13,17 @@
     improvement: "🔧 개선",
   };
 
+  const MSG_CATEGORY_LABEL = {
+    briefing: "📢 브리핑",
+    minutes: "📝 회의록",
+    action_item: "✅ 액션",
+    meeting_alarm: "⏰ 미팅알람",
+    room: "🏢 회의실",
+    proposal: "📄 제안서",
+    feedback: "💬 피드백",
+    other: "··· 기타",
+  };
+
   function escapeHtml(s) {
     if (s == null) return "";
     return String(s).replace(/[&<>"']/g, (c) => ({
@@ -270,6 +281,15 @@
     }
   });
 
+  // 메시지 행 클릭 → 상세
+  main.addEventListener("click", (e) => {
+    const row = e.target.closest(".msg-row");
+    if (!row) return;
+    const p = new URLSearchParams(msgFilterParams());
+    p.set("id", row.getAttribute("data-id"));
+    location.hash = "#/messages?" + p.toString();
+  });
+
   // ── 프롬프트 템플릿 ─────────────────────────────────────
   function fmtBytes(n) {
     if (n < 1024) return n + " B";
@@ -373,11 +393,129 @@
     });
   }
 
+  // ── 메시지 로그 ─────────────────────────────────────────
+  function msgFilterParams() {
+    const qs = location.hash.split("?")[1] || "";
+    return new URLSearchParams(qs);
+  }
+
+  async function renderMessages() {
+    const params = msgFilterParams();
+    if (params.get("id")) return renderMessageDetail(params.get("id"));
+
+    setLoading("메시지 불러오는 중...");
+    const data = await api("/messages?" + params.toString());
+    const items = data.items || [];
+
+    const cat = params.get("category") || "";
+    const okv = params.get("ok");
+    const userv = params.get("user") || "";
+    const qv = params.get("q") || "";
+
+    const catLink = (name, label) => {
+      const p = new URLSearchParams(params);
+      if (name) p.set("category", name); else p.delete("category");
+      p.delete("id");
+      return `<a href="#/messages?${p.toString()}" class="${cat === name ? "active" : ""}">${label}</a>`;
+    };
+    const okLink = (val, label) => {
+      const p = new URLSearchParams(params);
+      if (val === null) p.delete("ok"); else p.set("ok", val);
+      p.delete("id");
+      const cur = okv == null ? "" : okv;
+      return `<a href="#/messages?${p.toString()}" class="${String(cur) === String(val ?? "") ? "active" : ""}">${label}</a>`;
+    };
+
+    const filters = `
+      <div class="filters">
+        <div class="filter-group">
+          <span class="filter-label">유형</span>
+          ${catLink("", "전체")}${catLink("briefing", "브리핑")}${catLink("minutes", "회의록")}${catLink("action_item", "액션")}${catLink("meeting_alarm", "미팅알람")}${catLink("other", "기타")}
+        </div>
+        <div class="filter-group">
+          <span class="filter-label">발송</span>
+          ${okLink(null, "전체")}${okLink("1", "성공")}${okLink("0", "실패")}
+        </div>
+        <div class="filter-group">
+          <input id="msg-search" class="msg-search" placeholder="본문 검색…" value="${escapeHtml(qv)}">
+          <button id="msg-search-btn" class="act-btn">검색</button>
+          ${userv ? `<span class="muted small">수신자 필터: <code>${escapeHtml(userv)}</code></span>` : ""}
+        </div>
+      </div>
+    `;
+
+    let body;
+    if (items.length === 0) {
+      body = '<div class="card"><div class="empty">메시지가 없습니다.</div></div>';
+    } else {
+      const rows = items.map((m) => `
+        <tr class="msg-row" data-id="${m.id}" style="cursor:pointer">
+          <td class="nowrap">${escapeHtml(fmtDt(m.ts))}</td>
+          <td>
+            <div>${escapeHtml(m.recipient_name || "—")}</div>
+            <div class="muted small"><code>${escapeHtml(m.recipient_user_id || m.channel || "")}</code></div>
+          </td>
+          <td><span class="tag">${escapeHtml(MSG_CATEGORY_LABEL[m.category] || m.category || "기타")}</span></td>
+          <td>${m.ok ? '<span class="tag ok">성공</span>' : '<span class="tag warn">실패</span>'}</td>
+          <td>${escapeHtml((m.text || "").slice(0, 80))}${(m.text || "").length > 80 ? "…" : ""}</td>
+        </tr>`).join("");
+      body = `
+        <div class="card">
+          <h2>메시지 로그 <span class="muted">(${items.length}건)</span></h2>
+          <table>
+            <thead><tr><th>시각</th><th>수신자</th><th>유형</th><th>발송</th><th>본문</th></tr></thead>
+            <tbody>${rows}</tbody>
+          </table>
+        </div>
+      `;
+    }
+    main.innerHTML = filters + body;
+
+    const searchBtn = document.getElementById("msg-search-btn");
+    const searchInput = document.getElementById("msg-search");
+    const doSearch = () => {
+      const p = new URLSearchParams(params);
+      const v = searchInput.value.trim();
+      if (v) p.set("q", v); else p.delete("q");
+      p.delete("id");
+      location.hash = "#/messages?" + p.toString();
+    };
+    searchBtn.addEventListener("click", doSearch);
+    searchInput.addEventListener("keydown", (e) => { if (e.key === "Enter") doSearch(); });
+  }
+
+  async function renderMessageDetail(id) {
+    setLoading("메시지 불러오는 중...");
+    const m = await api("/messages/" + encodeURIComponent(id));
+    const back = new URLSearchParams(msgFilterParams());
+    back.delete("id");
+    let blocks = "";
+    if (m.blocks_json) {
+      let pretty = m.blocks_json;
+      try { pretty = JSON.stringify(JSON.parse(m.blocks_json), null, 2); } catch (_) {}
+      blocks = `<h3>blocks</h3><pre class="content">${escapeHtml(pretty)}</pre>`;
+    }
+    main.innerHTML = `
+      <div class="card">
+        <h2><a href="#/messages?${back.toString()}" class="small">← 목록</a>&nbsp;메시지 #${escapeHtml(String(m.id))}</h2>
+        <p class="muted small">
+          ${escapeHtml(fmtDt(m.ts))} · ${escapeHtml(m.method)} ·
+          수신자 ${escapeHtml(m.recipient_name || m.recipient_user_id || m.channel || "—")} ·
+          ${m.ok ? "성공" : "실패: " + escapeHtml(m.error || "")}
+        </p>
+        <h3>text</h3>
+        <pre class="content">${escapeHtml(m.text || "(없음)")}</pre>
+        ${blocks}
+      </div>
+    `;
+  }
+
   // ── 라우터 ──────────────────────────────────────────────
   const routes = {
     "#/dashboard": renderDashboard,
     "#/users": renderUsers,
     "#/feedback": renderFeedback,
+    "#/messages": renderMessages,
     "#/prompts": renderPrompts,
   };
 
