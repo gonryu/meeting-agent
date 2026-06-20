@@ -81,3 +81,62 @@ def _negative_fast_cut(news_text: str, negatives: list[str] = None) -> str:
             continue
         kept.append(line)
     return "\n".join(kept)
+
+
+def _judge_with_llm(company_name: str, bullets: list[str]) -> dict:
+    """남은 불릿을 Haiku로 high/mid/low/exclude 판정. Returns: {index: relevance}."""
+    relevance_def = _load_relevance_def()
+    numbered = "\n".join(
+        f"{i}. {b.lstrip('-').strip()}" for i, b in enumerate(bullets)
+    )
+    prompt = f"""{relevance_def}
+
+---
+대상 업체: {company_name}
+
+아래 뉴스 후보를 위 기준으로 각각 판정하라:
+- high: {company_name}와 직접 연결된 파라메타 사업영역 사업 신호
+- mid: 파라메타 사업영역의 관련 동향(직접 액션은 약함)
+- low: 키워드만 맞는 단신·시세·마케팅
+- exclude: {company_name}와 무관하거나 이름만 같은 다른 회사(동명 타사) 기사
+
+JSON만 출력(코드펜스·설명 없이):
+{{"items":[{{"i":0,"relevance":"high"}}]}}
+
+후보:
+{numbered}"""
+    resp = _claude.messages.create(
+        model=_MODEL, max_tokens=1024,
+        messages=[{"role": "user", "content": prompt}],
+    )
+    raw = resp.content[0].text.strip()
+    raw = raw.removeprefix("```json").removeprefix("```").rstrip("```").strip()
+    data = json.loads(raw)
+    return {int(it["i"]): str(it.get("relevance", "mid")).lower()
+            for it in data.get("items", [])}
+
+
+def judge_news(company_name: str, news_text: str, today: str = None) -> str:
+    """뉴스 텍스트를 관련성 판정해 high·mid만 보존한 마크다운 반환."""
+    if not news_text or not news_text.strip():
+        return _NO_INFO
+    negatives = _load_negatives()
+    cut = _negative_fast_cut(news_text, negatives)
+    bullets = [
+        l for l in cut.splitlines()
+        if l.strip().startswith("- ") and "정보 없음" not in l
+    ]
+    if not bullets:
+        return _NO_INFO
+    try:
+        verdicts = _judge_with_llm(company_name, bullets)
+    except Exception as e:
+        log.warning(f"뉴스 관련성 판정 실패, fast-cut 결과 통과 ({company_name}): {e}")
+        cut_bullets = [l for l in cut.splitlines() if l.strip().startswith("- ")]
+        return "\n".join(cut_bullets) if cut_bullets else _NO_INFO
+    kept = []
+    for i, line in enumerate(bullets):
+        rel = verdicts.get(i, "mid")  # 판정 누락 항목은 보존(mid)
+        if rel in ("high", "mid"):
+            kept.append(f"{line.rstrip()} `[관련도: {rel}]`")
+    return "\n".join(kept) if kept else _NO_INFO
