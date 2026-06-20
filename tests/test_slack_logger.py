@@ -122,3 +122,66 @@ class TestRedactHelper:
         assert slack_logger._redact_secrets("일반 회의록 내용") == "일반 회의록 내용"
         out = slack_logger._redact_secrets("a?token=xyz&state=qqq&foo=bar")
         assert "xyz" not in out and "qqq" not in out and "foo=bar" in out
+
+
+class TestRecordInbound:
+    def test_dm_message(self):
+        with patch.object(slack_logger.user_store, "log_message") as m:
+            slack_logger.record_inbound({"event": {
+                "type": "message", "user": "U7", "channel": "U7", "text": "브리핑 해줘"}})
+        kw = m.call_args.kwargs
+        assert kw["direction"] == "inbound" and kw["method"] == "message"
+        assert kw["recipient_user_id"] == "U7" and kw["text"] == "브리핑 해줘"
+        assert kw["category"] == "briefing"
+
+    def test_app_mention_strips_token(self):
+        with patch.object(slack_logger.user_store, "log_message") as m:
+            slack_logger.record_inbound({"event": {
+                "type": "app_mention", "user": "U7", "channel": "C1",
+                "text": "<@U0BOT> 회의록 찾아줘"}})
+        kw = m.call_args.kwargs
+        assert kw["text"] == "회의록 찾아줘" and kw["method"] == "app_mention"
+
+    def test_slash_command(self):
+        with patch.object(slack_logger.user_store, "log_message") as m:
+            slack_logger.record_inbound({
+                "command": "/브리핑", "text": "다음주", "user_id": "U7", "channel_id": "D1"})
+        kw = m.call_args.kwargs
+        assert kw["method"] == "command" and kw["text"] == "/브리핑 다음주"
+        assert kw["recipient_user_id"] == "U7" and kw["direction"] == "inbound"
+
+    def test_file_share(self):
+        with patch.object(slack_logger.user_store, "log_message") as m:
+            slack_logger.record_inbound({"event": {
+                "type": "message", "subtype": "file_share", "user": "U7", "channel": "U7",
+                "files": [{"name": "녹음.m4a", "mimetype": "audio/m4a"}]}})
+        assert m.call_args.kwargs["text"] == "[파일 업로드: 녹음.m4a (audio/m4a)]"
+
+    def test_skip_bot_message(self):
+        with patch.object(slack_logger.user_store, "log_message") as m:
+            slack_logger.record_inbound({"event": {"type": "message", "bot_id": "B1", "text": "x"}})
+        m.assert_not_called()
+
+    def test_skip_message_changed(self):
+        with patch.object(slack_logger.user_store, "log_message") as m:
+            slack_logger.record_inbound({"event": {"type": "message", "subtype": "message_changed"}})
+        m.assert_not_called()
+
+    def test_skip_button_action(self):
+        with patch.object(slack_logger.user_store, "log_message") as m:
+            slack_logger.record_inbound({"actions": [{"action_id": "trello_register"}]})
+        m.assert_not_called()
+
+    def test_redacts_secrets(self):
+        with patch.object(slack_logger.user_store, "log_message") as m:
+            slack_logger.record_inbound({"event": {
+                "type": "message", "user": "U7", "channel": "U7",
+                "text": "내 토큰 token=SECRETXYZ 임"}})
+        assert "SECRETXYZ" not in m.call_args.kwargs["text"]
+
+    def test_best_effort_never_raises(self):
+        with patch.object(slack_logger.user_store, "log_message",
+                          side_effect=RuntimeError("db down")):
+            slack_logger.record_inbound({"event": {
+                "type": "message", "user": "U7", "channel": "U7", "text": "x"}})
+        # 예외 없이 반환하면 통과 (best-effort)

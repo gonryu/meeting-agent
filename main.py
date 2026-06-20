@@ -111,6 +111,16 @@ def _install_message_logging(context, next):
     next()
 
 
+@app.middleware
+def _log_inbound(body, next):
+    """사용자 인바운드(메시지·멘션·슬래시)를 message_log에 기록 — best-effort."""
+    try:
+        slack_logger.record_inbound(body)
+    except Exception:
+        pass
+    next()
+
+
 @app.error
 def global_error_handler(error, body, logger):
     logger.exception(f"에러 발생: {error}")

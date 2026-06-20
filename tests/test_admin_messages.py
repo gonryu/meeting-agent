@@ -86,6 +86,20 @@ class TestUserMessages:
         assert len(body["items"]) == 1
 
 
+class TestUserTimeline:
+    def test_timeline_asc_and_has_direction(self, client):
+        # 기존 fixture가 U1에 "아침 브리핑"(outbound) 1건 시드 → 인바운드·아웃바운드 추가
+        user_store.log_message(method="message", channel="U1", recipient_user_id="U1",
+                               recipient_kind="dm", text="질문1", category="other",
+                               ok=True, direction="inbound")
+        user_store.log_message(method="post", channel="U1", recipient_user_id="U1",
+                               recipient_kind="dm", text="답변1", category="other", ok=True)
+        items = client.get("/admin/api/users/U1/messages", headers=_AUTH).json()["items"]
+        texts = [it["text"] for it in items]
+        assert texts.index("질문1") < texts.index("답변1")   # 시간 오름차순
+        assert all("direction" in it for it in items)        # 방향 정보 포함
+
+
 class TestDashboardStats:
     def test_dashboard_includes_message_stats(self, client):
         r = client.get("/admin/api/dashboard", headers=_AUTH)

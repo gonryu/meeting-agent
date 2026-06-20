@@ -223,26 +223,33 @@
     ]);
     const u = (users || []).find((x) => x.slack_user_id === uid) || { slack_user_id: uid };
     const items = msgData.items || [];
-    const rows = items.map((m) => `
-      <tr class="msg-row" data-id="${m.id}" style="cursor:pointer">
-        <td class="nowrap">${escapeHtml(fmtDt(m.ts))}</td>
-        <td><span class="tag">${escapeHtml(MSG_CATEGORY_LABEL[m.category] || m.category || "기타")}</span></td>
-        <td>${m.ok ? '<span class="tag ok">성공</span>' : '<span class="tag warn">실패</span>'}</td>
-        <td>${escapeHtml((m.text || "").slice(0, 80))}${(m.text || "").length > 80 ? "…" : ""}</td>
-      </tr>`).join("");
+    const uname = escapeHtml(u.name || uid);
+    const bubbles = items.map((m) => {
+      const inbound = m.direction === "inbound";
+      const who = inbound ? `👤 ${uname}` : "🤖 봇";
+      const cat = inbound ? "" : `<span class="tag">${escapeHtml(MSG_CATEGORY_LABEL[m.category] || m.category || "기타")}</span>`;
+      const fail = (!inbound && !m.ok) ? ' <span class="tag warn">실패</span>' : "";
+      const raw = m.text || "";
+      const txt = escapeHtml(raw.slice(0, 500)) + (raw.length > 500 ? "…" : "");
+      return `
+        <div class="chat-row ${inbound ? "chat-in" : "chat-out"}">
+          <div class="chat-meta">${who} · ${escapeHtml(fmtDt(m.ts))} ${cat}${fail}</div>
+          <div class="chat-bubble">${txt || "(본문 없음)"}</div>
+        </div>`;
+    }).join("");
     main.innerHTML = `
       <div class="card">
-        <h2><a href="#/users" class="small">← 사용자 목록</a>&nbsp;${escapeHtml(u.name || uid)}</h2>
+        <h2><a href="#/users" class="small">← 사용자 목록</a>&nbsp;${uname}</h2>
         <p class="muted small">
           <code>${escapeHtml(uid)}</code> · ${escapeHtml(u.email || "")} ·
           Drive ${u.has_drive ? "🟢" : "—"} / Trello ${u.has_trello ? "🟢" : "—"} / Dreamplus ${u.has_dreamplus ? "🟢" : "—"}
         </p>
       </div>
       <div class="card">
-        <h2>받은 메시지 <span class="muted">(${items.length}건)</span></h2>
+        <h2>대화 타임라인 <span class="muted">(${items.length}건)</span></h2>
         ${items.length === 0
-          ? '<div class="empty">기록된 메시지가 없습니다.</div>'
-          : `<table><thead><tr><th>시각</th><th>유형</th><th>발송</th><th>본문</th></tr></thead><tbody>${rows}</tbody></table>`}
+          ? '<div class="empty">기록된 대화가 없습니다.</div>'
+          : `<div class="chat">${bubbles}</div>`}
       </div>
     `;
   }

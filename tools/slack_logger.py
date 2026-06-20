@@ -130,6 +130,68 @@ def _make_wrapper(original, method_label):
     return wrapped
 
 
+def _inbound_text_from_event(event):
+    """message/app_mention 이벤트에서 기록할 텍스트 추출."""
+    if event.get("subtype") == "file_share":
+        files = event.get("files") or []
+        if not files:
+            return "[파일 업로드]"
+        f0 = files[0]
+        more = f" 외 {len(files) - 1}건" if len(files) > 1 else ""
+        return f"[파일 업로드: {f0.get('name', '')} ({f0.get('mimetype', '')})]{more}"
+    text = event.get("text", "") or ""
+    # @멘션 토큰(<@U…>) 제거 — handle_mention과 동일 정리
+    return " ".join(w for w in text.split() if not w.startswith("<@")).strip()
+
+
+def record_inbound(body):
+    """사용자 인바운드(DM·@멘션·슬래시) 1건을 message_log에 적재 — best-effort.
+
+    버튼 action·봇 메시지·메시지 수정/삭제는 기록하지 않는다.
+    인바운드 행은 recipient_user_id에 '발신자'를 담아 per-user 타임라인에 잡히게 한다.
+    예외는 삼킨다(이벤트 처리를 절대 막지 않음)."""
+    try:
+        if not isinstance(body, dict):
+            return
+        event = body.get("event")
+        if isinstance(event, dict):
+            etype = event.get("type")
+            if etype not in ("message", "app_mention"):
+                return
+            if event.get("bot_id"):
+                return
+            if event.get("subtype") not in (None, "file_share"):
+                return  # message_changed/deleted 등 skip
+            channel = event.get("channel")
+            kind, _ = _recipient_kind(channel)
+            text = _inbound_text_from_event(event)
+            user_store.log_message(
+                method=etype, channel=channel,
+                recipient_user_id=event.get("user"),
+                recipient_kind=kind or "dm", thread_ts=event.get("thread_ts"),
+                text=_redact_secrets(text), blocks_json=None,
+                category=_infer_category(text, None), ok=True,
+                error=None, direction="inbound",
+            )
+            return
+        if body.get("command"):  # 슬래시 커맨드
+            channel = body.get("channel_id")
+            kind, _ = _recipient_kind(channel)
+            text = f"{body.get('command', '')} {body.get('text', '') or ''}".strip()
+            user_store.log_message(
+                method="command", channel=channel,
+                recipient_user_id=body.get("user_id"),
+                recipient_kind=kind or "dm", thread_ts=None,
+                text=_redact_secrets(text), blocks_json=None,
+                category=_infer_category(text, None), ok=True,
+                error=None, direction="inbound",
+            )
+            return
+        # actions(버튼) 및 그 외 → skip
+    except Exception as e:
+        log.warning(f"인바운드 로깅 실패(이벤트 처리에는 영향 없음): {e}")
+
+
 def install_logging(client):
     """WebClient 인스턴스의 send 3종을 in-place로 감싼다 (idempotent).
 

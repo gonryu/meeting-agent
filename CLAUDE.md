@@ -277,9 +277,9 @@ cd frontend && ./serve.sh           # http://localhost:3030 → config.js의 BAC
 
 봇이 보내는 모든 Slack 메시지를 중앙에서 기록해 관리자가 사후 점검할 수 있습니다.
 
-**포착:** `tools/slack_logger.install_logging()`이 `app.client`의 `chat_postMessage`/`chat_update`/`chat_postEphemeral`를 in-place로 감싸고, Bolt 미들웨어가 리스너 주입 client도 감쌉니다(idempotent). 로깅 실패는 발송에 영향을 주지 않습니다(best-effort).
+**포착:** `tools/slack_logger.install_logging()`이 `app.client`의 `chat_postMessage`/`chat_update`/`chat_postEphemeral`를 in-place로 감싸고, Bolt 미들웨어가 리스너 주입 client도 감쌉니다(idempotent). 로깅 실패는 발송에 영향을 주지 않습니다(best-effort). 사용자 인바운드(DM·@멘션·슬래시 커맨드)는 `tools/slack_logger.install_logging`과 별개로 `main.py`의 `_log_inbound` Bolt 미들웨어가 `slack_logger.record_inbound(body)`로 포착한다(버튼 action·봇 메시지·메시지 수정/삭제는 제외). 인바운드 행은 `direction='inbound'`이며 `recipient_user_id`에 **발신자**를 담아(컬럼 의미를 "이 로그가 관계된 사용자"로 확장) 관리자 "사용자" 탭의 대화 타임라인이 인바운드·아웃바운드를 한 사람 기준으로 시간순 인터리브한다. 인바운드 본문도 `_redact_secrets`로 비밀 파라미터를 마스킹하지만 자유 텍스트의 임의 비밀까지 전부 거르지는 못한다.
 
-**저장:** `message_log` 테이블(`store/user_store.py`) — `ts/method/channel/recipient_user_id/recipient_kind/thread_ts/text/blocks_json/category/ok/error`. 수신자 이름은 저장하지 않고 조회 시점에 `_lookup_profile`로 해석. `category`는 text/blocks 마커 기반 best-effort 추정.
+**저장:** `message_log` 테이블(`store/user_store.py`) — `ts/method/channel/recipient_user_id/recipient_kind/thread_ts/text/blocks_json/category/ok/error/direction`. 수신자 이름은 저장하지 않고 조회 시점에 `_lookup_profile`로 해석. `category`는 text/blocks 마커 기반 best-effort 추정.
 
 **조회:** 관리자 페이지 `메시지` 탭(글로벌 피드 + 유형/발송/기간 필터 + 본문검색 + 페이지네이션 + 상세), `사용자` 탭의 사용자 클릭 시 상세, 대시보드 오늘자 stats. 본문검색은 `text`·`blocks_json` 양쪽을 대상으로 합니다.
 

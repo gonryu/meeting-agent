@@ -233,13 +233,27 @@ def init_db():
                 blocks_json       TEXT,
                 category          TEXT,
                 ok                INTEGER NOT NULL DEFAULT 1,
-                error             TEXT
+                error             TEXT,
+                direction         TEXT NOT NULL DEFAULT 'outbound'
             )
         """)
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_msglog_ts ON message_log(ts)")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_msglog_recipient ON message_log(recipient_user_id)")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_msglog_category ON message_log(category)")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_msglog_ok ON message_log(ok)")
+        # 기존 DB에 direction 컬럼이 없으면 추가 (기존 행은 전부 발송 → outbound)
+        try:
+            conn.execute("ALTER TABLE message_log ADD COLUMN direction TEXT NOT NULL DEFAULT 'outbound'")
+        except Exception:
+            pass
+        # 구버전 최소 스키마 DB에는 일부 컬럼이 없을 수 있으므로 인덱스 생성은 best-effort
+        for _idx_sql in (
+            "CREATE INDEX IF NOT EXISTS idx_msglog_ts ON message_log(ts)",
+            "CREATE INDEX IF NOT EXISTS idx_msglog_recipient ON message_log(recipient_user_id)",
+            "CREATE INDEX IF NOT EXISTS idx_msglog_category ON message_log(category)",
+            "CREATE INDEX IF NOT EXISTS idx_msglog_ok ON message_log(ok)",
+            "CREATE INDEX IF NOT EXISTS idx_msglog_direction ON message_log(direction)",
+        ):
+            try:
+                conn.execute(_idx_sql)
+            except Exception:
+                pass
 
 
 def is_registered(slack_user_id: str) -> bool:
@@ -930,25 +944,29 @@ def get_todo_history(user_id: str, limit: int = 100) -> list[dict]:
 def log_message(*, method: str, channel: str = None, recipient_user_id: str = None,
                 recipient_kind: str = None, thread_ts: str = None, text: str = None,
                 blocks_json: str = None, category: str = None, ok: bool = True,
-                error: str = None) -> int:
-    """발송 메시지 1건 기록. Returns: message_log id"""
+                error: str = None, direction: str = "outbound") -> int:
+    """메시지 1건 기록(발송=outbound 기본, 사용자 입력은 direction='inbound').
+
+    인바운드 행은 recipient_user_id에 '발신자' id를 담는다(= 대화의 사람 쪽).
+    Returns: message_log id"""
     now = datetime.now().isoformat()
     with _conn() as conn:
         cur = conn.execute(
             """INSERT INTO message_log
                (ts, method, channel, recipient_user_id, recipient_kind, thread_ts,
-                text, blocks_json, category, ok, error)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                text, blocks_json, category, ok, error, direction)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (now, method, channel, recipient_user_id, recipient_kind, thread_ts,
-             text, blocks_json, category, 1 if ok else 0, error),
+             text, blocks_json, category, 1 if ok else 0, error, direction),
         )
         return cur.lastrowid
 
 
 def list_messages(*, user_id: str = None, category: str = None, ok: int = None,
-                  date_from: str = None, date_to: str = None, q: str = None,
+                  direction: str = None, date_from: str = None, date_to: str = None,
+                  q: str = None, order: str = "desc",
                   limit: int = 100, offset: int = 0) -> list[dict]:
-    """메시지 로그 조회 (최신순). 인자 미지정 시 전체."""
+    """메시지 로그 조회. order='asc'면 시간 오름차순(대화 타임라인용). 인자 미지정 시 전체."""
     query = "SELECT * FROM message_log"
     conditions: list[str] = []
     params: list = []
@@ -958,6 +976,8 @@ def list_messages(*, user_id: str = None, category: str = None, ok: int = None,
         conditions.append("category = ?"); params.append(category)
     if ok is not None:
         conditions.append("ok = ?"); params.append(ok)
+    if direction:
+        conditions.append("direction = ?"); params.append(direction)
     if date_from:
         conditions.append("ts >= ?"); params.append(date_from)
     if date_to:
@@ -969,7 +989,8 @@ def list_messages(*, user_id: str = None, category: str = None, ok: int = None,
         params.append(like); params.append(like)
     if conditions:
         query += " WHERE " + " AND ".join(conditions)
-    query += " ORDER BY id DESC LIMIT ? OFFSET ?"
+    order_sql = "ASC" if str(order).lower() == "asc" else "DESC"
+    query += f" ORDER BY id {order_sql} LIMIT ? OFFSET ?"
     params.extend([limit, offset])
     with _conn() as conn:
         rows = conn.execute(query, params).fetchall()
@@ -992,26 +1013,32 @@ def prune_messages(before_iso: str) -> int:
 
 
 def message_stats(*, date_from: str = None) -> dict:
-    """date_from 이후(없으면 전체) 발송 집계."""
-    cond = ""
+    """date_from 이후(없으면 전체) 발송(outbound) 집계 + inbound 건수."""
+    conds = ["direction = 'outbound'"]
     params: list = []
     if date_from:
-        cond = " WHERE ts >= ?"
-        params = [date_from]
-    fail_cond = (cond + " AND ok = 0") if cond else " WHERE ok = 0"
-    active_cond = (cond + " AND recipient_user_id IS NOT NULL") if cond else " WHERE recipient_user_id IS NOT NULL"
+        conds.append("ts >= ?"); params.append(date_from)
+    where = " WHERE " + " AND ".join(conds)
+    fail_where = where + " AND ok = 0"
+    active_where = where + " AND recipient_user_id IS NOT NULL"
+    in_where = " WHERE direction = 'inbound'" + (" AND ts >= ?" if date_from else "")
+    in_params = [date_from] if date_from else []
     with _conn() as conn:
-        total = conn.execute(f"SELECT COUNT(*) FROM message_log{cond}", params).fetchone()[0]
-        failures = conn.execute(f"SELECT COUNT(*) FROM message_log{fail_cond}", params).fetchone()[0]
+        total = conn.execute(f"SELECT COUNT(*) FROM message_log{where}", params).fetchone()[0]
+        failures = conn.execute(f"SELECT COUNT(*) FROM message_log{fail_where}", params).fetchone()[0]
         active = conn.execute(
-            f"SELECT COUNT(DISTINCT recipient_user_id) FROM message_log{active_cond}", params
+            f"SELECT COUNT(DISTINCT recipient_user_id) FROM message_log{active_where}", params
         ).fetchone()[0]
         by_cat = conn.execute(
-            f"SELECT category, COUNT(*) AS c FROM message_log{cond} GROUP BY category", params
+            f"SELECT category, COUNT(*) AS c FROM message_log{where} GROUP BY category", params
         ).fetchall()
+        inbound = conn.execute(
+            f"SELECT COUNT(*) FROM message_log{in_where}", in_params
+        ).fetchone()[0]
     return {
         "total": total,
         "failures": failures,
         "active_recipients": active,
         "by_category": {(r["category"] or "other"): r["c"] for r in by_cat},
+        "inbound": inbound,
     }
