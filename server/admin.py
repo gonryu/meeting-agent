@@ -206,7 +206,8 @@ def api_message_detail(message_id: int, _: str = Depends(_require_admin)):
 
 @router.get("/users/{uid}/messages")
 def api_user_messages(uid: str, _: str = Depends(_require_admin)):
-    items = user_store.list_messages(user_id=uid, limit=200)
+    # 대화 타임라인: 시간 오름차순(인바운드+아웃바운드 인터리브)
+    items = user_store.list_messages(user_id=uid, order="asc", limit=200)
     return {"user_id": uid, "items": _enrich_messages(items)}
 
 
