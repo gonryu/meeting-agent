@@ -107,3 +107,30 @@ class TestWiringContract:
             import agents.before as before
         assert not hasattr(before, "_filter_parameta_relevant_news")
         assert not hasattr(before, "_PARAMETA_RELEVANCE_KEYWORDS")
+
+
+import json
+from pathlib import Path
+
+_GOLDEN = Path(__file__).parent / "golden" / "news_relevance.jsonl"
+
+
+class TestGoldenSet:
+    def _load(self):
+        return [json.loads(l) for l in _GOLDEN.read_text(encoding="utf-8").splitlines() if l.strip()]
+
+    def test_golden_schema(self):
+        rows = self._load()
+        assert len(rows) >= 16
+        valid = {"high", "mid", "low", "exclude"}
+        for r in rows:
+            assert r["expected"]["relevance"] in valid
+            assert r["company"] and r["title"]
+
+    def test_fastcut_removes_obvious_noise_in_golden(self):
+        """expected=low 시세/시황 골든 항목은 fast-cut으로 제거돼야(결정적)."""
+        rows = self._load()
+        noisy = [r for r in rows if r["id"] in ("rel-009", "rel-010")]
+        for r in noisy:
+            line = f"- {r['title']} ({r['company']})"
+            assert nr._negative_fast_cut(line).strip() == "", f"{r['id']} fast-cut 미제거"
