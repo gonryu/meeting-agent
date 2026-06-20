@@ -93,6 +93,13 @@ class TestPruneAndStats:
         assert stats["active_recipients"] == 2
         assert stats["by_category"]["briefing"] == 2
 
+    def test_stats_count_outbound_only(self):
+        _log(category="briefing", ok=True)               # outbound
+        _log(text="질문", direction="inbound", method="message")  # inbound
+        stats = user_store.message_stats()
+        assert stats["total"] == 1          # 발송만 카운트
+        assert stats["inbound"] == 1
+
 
 class TestDirection:
     def test_default_is_outbound(self):

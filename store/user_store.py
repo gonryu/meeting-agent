@@ -1013,26 +1013,32 @@ def prune_messages(before_iso: str) -> int:
 
 
 def message_stats(*, date_from: str = None) -> dict:
-    """date_from 이후(없으면 전체) 발송 집계."""
-    cond = ""
+    """date_from 이후(없으면 전체) 발송(outbound) 집계 + inbound 건수."""
+    conds = ["direction = 'outbound'"]
     params: list = []
     if date_from:
-        cond = " WHERE ts >= ?"
-        params = [date_from]
-    fail_cond = (cond + " AND ok = 0") if cond else " WHERE ok = 0"
-    active_cond = (cond + " AND recipient_user_id IS NOT NULL") if cond else " WHERE recipient_user_id IS NOT NULL"
+        conds.append("ts >= ?"); params.append(date_from)
+    where = " WHERE " + " AND ".join(conds)
+    fail_where = where + " AND ok = 0"
+    active_where = where + " AND recipient_user_id IS NOT NULL"
+    in_where = " WHERE direction = 'inbound'" + (" AND ts >= ?" if date_from else "")
+    in_params = [date_from] if date_from else []
     with _conn() as conn:
-        total = conn.execute(f"SELECT COUNT(*) FROM message_log{cond}", params).fetchone()[0]
-        failures = conn.execute(f"SELECT COUNT(*) FROM message_log{fail_cond}", params).fetchone()[0]
+        total = conn.execute(f"SELECT COUNT(*) FROM message_log{where}", params).fetchone()[0]
+        failures = conn.execute(f"SELECT COUNT(*) FROM message_log{fail_where}", params).fetchone()[0]
         active = conn.execute(
-            f"SELECT COUNT(DISTINCT recipient_user_id) FROM message_log{active_cond}", params
+            f"SELECT COUNT(DISTINCT recipient_user_id) FROM message_log{active_where}", params
         ).fetchone()[0]
         by_cat = conn.execute(
-            f"SELECT category, COUNT(*) AS c FROM message_log{cond} GROUP BY category", params
+            f"SELECT category, COUNT(*) AS c FROM message_log{where} GROUP BY category", params
         ).fetchall()
+        inbound = conn.execute(
+            f"SELECT COUNT(*) FROM message_log{in_where}", in_params
+        ).fetchone()[0]
     return {
         "total": total,
         "failures": failures,
         "active_recipients": active,
         "by_category": {(r["category"] or "other"): r["c"] for r in by_cat},
+        "inbound": inbound,
     }
