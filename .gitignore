@@ -17,8 +17,9 @@ __pycache__/
 data/
 logs/
 
-# 서버 로그
+# 서버 로그 / 런타임
 server.log
+server.pid
 nohup.out
 
 # DB (사용자 토큰 포함)
@@ -35,3 +36,4 @@ nohup.out
 
 # Claude Code 로컬 워크트리·세션 상태
 .claude/
+.gstack/
