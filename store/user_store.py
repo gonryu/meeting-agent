@@ -233,13 +233,27 @@ def init_db():
                 blocks_json       TEXT,
                 category          TEXT,
                 ok                INTEGER NOT NULL DEFAULT 1,
-                error             TEXT
+                error             TEXT,
+                direction         TEXT NOT NULL DEFAULT 'outbound'
             )
         """)
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_msglog_ts ON message_log(ts)")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_msglog_recipient ON message_log(recipient_user_id)")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_msglog_category ON message_log(category)")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_msglog_ok ON message_log(ok)")
+        # 기존 DB에 direction 컬럼이 없으면 추가 (기존 행은 전부 발송 → outbound)
+        try:
+            conn.execute("ALTER TABLE message_log ADD COLUMN direction TEXT NOT NULL DEFAULT 'outbound'")
+        except Exception:
+            pass
+        # 구버전 최소 스키마 DB에는 일부 컬럼이 없을 수 있으므로 인덱스 생성은 best-effort
+        for _idx_sql in (
+            "CREATE INDEX IF NOT EXISTS idx_msglog_ts ON message_log(ts)",
+            "CREATE INDEX IF NOT EXISTS idx_msglog_recipient ON message_log(recipient_user_id)",
+            "CREATE INDEX IF NOT EXISTS idx_msglog_category ON message_log(category)",
+            "CREATE INDEX IF NOT EXISTS idx_msglog_ok ON message_log(ok)",
+            "CREATE INDEX IF NOT EXISTS idx_msglog_direction ON message_log(direction)",
+        ):
+            try:
+                conn.execute(_idx_sql)
+            except Exception:
+                pass
 
 
 def is_registered(slack_user_id: str) -> bool:
@@ -930,17 +944,20 @@ def get_todo_history(user_id: str, limit: int = 100) -> list[dict]:
 def log_message(*, method: str, channel: str = None, recipient_user_id: str = None,
                 recipient_kind: str = None, thread_ts: str = None, text: str = None,
                 blocks_json: str = None, category: str = None, ok: bool = True,
-                error: str = None) -> int:
-    """발송 메시지 1건 기록. Returns: message_log id"""
+                error: str = None, direction: str = "outbound") -> int:
+    """메시지 1건 기록(발송=outbound 기본, 사용자 입력은 direction='inbound').
+
+    인바운드 행은 recipient_user_id에 '발신자' id를 담는다(= 대화의 사람 쪽).
+    Returns: message_log id"""
     now = datetime.now().isoformat()
     with _conn() as conn:
         cur = conn.execute(
             """INSERT INTO message_log
                (ts, method, channel, recipient_user_id, recipient_kind, thread_ts,
-                text, blocks_json, category, ok, error)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                text, blocks_json, category, ok, error, direction)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (now, method, channel, recipient_user_id, recipient_kind, thread_ts,
-             text, blocks_json, category, 1 if ok else 0, error),
+             text, blocks_json, category, 1 if ok else 0, error, direction),
         )
         return cur.lastrowid
 

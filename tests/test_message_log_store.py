@@ -92,3 +92,29 @@ class TestPruneAndStats:
         assert stats["failures"] == 1
         assert stats["active_recipients"] == 2
         assert stats["by_category"]["briefing"] == 2
+
+
+class TestDirection:
+    def test_default_is_outbound(self):
+        mid = _log(text="발송 기본값")
+        assert user_store.get_message(mid)["direction"] == "outbound"
+
+    def test_inbound_persists(self):
+        mid = _log(text="질문", direction="inbound", method="message")
+        row = user_store.get_message(mid)
+        assert row["direction"] == "inbound" and row["text"] == "질문"
+
+
+def test_migration_adds_direction_to_old_db(tmp_path, monkeypatch):
+    """구버전(직접 만든 message_log, direction 없음) DB도 init_db가 컬럼 추가."""
+    db_path = str(tmp_path / "old.db")
+    monkeypatch.setattr(user_store, "_DB_PATH", db_path)
+    with user_store._conn() as conn:
+        conn.execute("CREATE TABLE message_log "
+                     "(id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT NOT NULL, "
+                     " method TEXT NOT NULL, ok INTEGER NOT NULL DEFAULT 1)")
+        conn.execute("INSERT INTO message_log (ts, method, ok) "
+                     "VALUES ('2020-01-01T00:00:00','post',1)")
+    user_store.init_db()  # ALTER로 direction 추가
+    rows = user_store.list_messages()
+    assert rows[0]["direction"] == "outbound"
