@@ -3,7 +3,8 @@ import os
 import tempfile
 import pytest
 
-os.environ.setdefault("ENCRYPTION_KEY", "dGVzdC1rZXktMzItYnl0ZXMtZm9yLWZlcm5ldC0h")
+# 유효한 32바이트 Fernet 키 (base64.urlsafe_b64encode(b"0"*32)). 단독 실행 시에도 register() 통과
+os.environ.setdefault("ENCRYPTION_KEY", "MDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDA=")
 
 import store.user_store as user_store
 

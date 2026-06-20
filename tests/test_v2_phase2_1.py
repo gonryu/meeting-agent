@@ -256,7 +256,8 @@ class TestMinutesValidation:
             "## 회의 요약\n요약 내용\n\n"
             "## 주요 논의 내용\n논의 사항\n\n"
             "## 주요 결정 사항\n결정 사항\n\n"
-            "## 액션 아이템\n| 담당자 | 내용 | 기한 |\n|---|---|---|\n| 홍길동 | 검토 | 4/20 |"
+            "## 액션 아이템\n| 담당자 | 내용 | 기한 |\n|---|---|---|\n| 홍길동 | 검토 | 4/20 |\n\n"
+            "## 내부 메모\n신뢰도 및 검토 메모"
         )
         result = during.validate_minutes(body, "internal")
         assert result["valid"] is True

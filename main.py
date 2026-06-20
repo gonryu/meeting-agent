@@ -877,7 +877,7 @@ def _classify_intent(text: str) -> dict:
             weekday=_weekday_names[_now.weekday()],
         ))
         # JSON 파싱 — 마크다운 코드블록 제거
-        cleaned = result.strip().lstrip("```json").lstrip("```").rstrip("```").strip()
+        cleaned = result.strip().removeprefix("```json").removeprefix("```").rstrip("```").strip()
         return json.loads(cleaned)
     except Exception as e:
         log.warning(f"인텐트 분류 실패: {e} / 원문: {result if 'result' in dir() else '?'}")

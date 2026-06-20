@@ -34,7 +34,7 @@ def handle_feedback(slack_client, user_id: str, text: str,
     """사용자 피드백을 분류·저장하고 접수 확인 메시지 전송"""
     try:
         result = generate_text(_CLASSIFY_PROMPT.format(text=text.replace('"', "'")))
-        cleaned = result.strip().lstrip("```json").lstrip("```").rstrip("```").strip()
+        cleaned = result.strip().removeprefix("```json").removeprefix("```").rstrip("```").strip()
         parsed = json.loads(cleaned)
         category = parsed.get("category", "feature_request")
         summary = parsed.get("summary", text[:50])
