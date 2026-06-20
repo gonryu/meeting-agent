@@ -92,8 +92,23 @@ from server import oauth as oauth_server
 from tools import stt
 from tools import text_extract
 from tools import calendar as cal_tools
+from tools import slack_logger
 
 app = App(token=os.getenv("SLACK_BOT_TOKEN"))
+
+# 발송 메시지 로깅 설치 — 스케줄러가 쓰는 app.client(직접) + 리스너 주입 client(미들웨어)
+slack_logger.install_logging(app.client)
+
+
+@app.middleware
+def _install_message_logging(context, next):
+    """리스너 주입 client도 감싼다 (app.client와 동일 인스턴스면 idempotent로 무시)."""
+    try:
+        if getattr(context, "client", None) is not None:
+            slack_logger.install_logging(context.client)
+    except Exception:
+        pass
+    next()
 
 
 @app.error
@@ -167,6 +182,18 @@ def scheduled_action_item_reminder():
 def scheduled_feedback_digest():
     log.info("피드백 다이제스트 실행")
     feedback_agent.send_feedback_digest(app.client)
+
+
+def scheduled_message_log_prune():
+    """메시지 로그 보존기간(기본 90일) 초과분 정리 — 매일 03:00 KST."""
+    try:
+        from datetime import timedelta
+        days = int(os.getenv("MESSAGE_LOG_RETENTION_DAYS", "90"))
+        cutoff = (datetime.now() - timedelta(days=days)).isoformat()
+        deleted = user_store.prune_messages(cutoff)
+        log.info(f"메시지 로그 prune: {deleted}건 삭제 (cutoff={cutoff})")
+    except Exception:
+        log.exception("메시지 로그 prune 실패")
 
 
 def scheduled_trello_weekly():
@@ -361,6 +388,8 @@ scheduler.add_job(scheduled_trello_weekly, "cron",
 scheduler.add_job(scheduled_meeting_alarm, "interval", minutes=1)
 # 캘린더 종료 후 빠른 회의록 생성 — 2분 주기로 종료된 세션만 탐색
 scheduler.add_job(scheduled_fast_transcript_check, "interval", minutes=2)
+# 메시지 로그 보존기간 초과분 정리 — 매일 03:00 KST
+scheduler.add_job(scheduled_message_log_prune, "cron", hour=3, minute=0)
 
 
 def _extract_text_from_blocks(blocks: list) -> str:
