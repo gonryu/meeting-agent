@@ -101,7 +101,7 @@ def ocr_business_card(image_bytes: bytes) -> dict:
 
     raw = resp.content[0].text.strip()
     # 마크다운 코드블록 제거
-    raw = raw.lstrip("```json").lstrip("```").rstrip("```").strip()
+    raw = raw.strip().removeprefix("```json").removeprefix("```").rstrip("```").strip()
     return json.loads(raw)
 
 

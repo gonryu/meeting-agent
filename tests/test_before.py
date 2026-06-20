@@ -283,3 +283,25 @@ class TestRunBriefing:
         block_calls = [c for c in post_calls if c[1].get("blocks")]
         assert len(block_calls) >= 1
         assert len(result) == 1
+
+
+class TestInferCompanyFromAttendees:
+    """_infer_company_from_attendees — 무료/개인 메일 오인 방지 (감사 발견 버그)"""
+
+    def test_personal_naver_not_inferred_as_company(self):
+        """개인 naver.com 메일은 '네이버' 업체로 오인되면 안 됨"""
+        result = before._infer_company_from_attendees([{"email": "someone@naver.com"}])
+        assert result == ""
+
+    def test_navercorp_is_company(self):
+        """navercorp.com(실제 회사 도메인)은 '네이버'로 추론"""
+        result = before._infer_company_from_attendees([{"email": "hong@navercorp.com"}])
+        assert result == "네이버"
+
+    def test_known_domain_hint(self):
+        """알려진 회사 도메인은 정상 추론"""
+        assert before._infer_company_from_attendees([{"email": "a@kakao.com"}]) == "카카오"
+
+    def test_gmail_not_inferred(self):
+        """gmail 등 무료 메일은 업체로 추론하지 않음"""
+        assert before._infer_company_from_attendees([{"email": "a@gmail.com"}]) == ""

@@ -72,7 +72,7 @@ def _parse_todo_text(raw_text: str) -> dict:
     llm_failed = False
     try:
         result = generate_text(prompt)
-        cleaned = result.strip().lstrip("```json").lstrip("```").rstrip("```").strip()
+        cleaned = result.strip().removeprefix("```json").removeprefix("```").rstrip("```").strip()
         parsed = json.loads(cleaned)
     except Exception as e:
         log.warning(f"Todo 파싱 실패, 폴백 사용: {e}")

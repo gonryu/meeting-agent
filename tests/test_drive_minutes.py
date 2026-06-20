@@ -56,7 +56,8 @@ class TestFindMeetTranscript:
         svc.files().list().execute.side_effect = [
             {"files": [{"id": "recordings_id"}]},
             {"files": [{"id": "meeting_folder_id"}]},
-            {"files": []},  # Transcript 없음
+            {"files": []},  # 원문 Transcript 없음
+            {"files": []},  # Gemini 폴백 회의록도 없음 (2-tier 탐색)
         ]
 
         with self._patch(svc):

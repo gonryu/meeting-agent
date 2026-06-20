@@ -199,7 +199,8 @@ def _infer_company_from_attendees(
         "samsung.com": "삼성전자", "samsungsds.com": "삼성SDS",
         "lgcns.com": "LGCNS", "lg.com": "LG",
         "sk.com": "SK", "sktelecom.com": "SK텔레콤",
-        "naver.com": "네이버", "navercorp.com": "네이버",
+        # naver.com은 개인용 무료 메일(아래 _free_email에서 배제) — 회사 도메인은 navercorp.com만
+        "navercorp.com": "네이버",
         "kisa.or.kr": "KISA", "bok.or.kr": "한국은행",
     }
     for domain in external_domains:
