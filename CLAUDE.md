@@ -281,7 +281,9 @@ cd frontend && ./serve.sh           # http://localhost:3030 → config.js의 BAC
 
 **저장:** `message_log` 테이블(`store/user_store.py`) — `ts/method/channel/recipient_user_id/recipient_kind/thread_ts/text/blocks_json/category/ok/error`. 수신자 이름은 저장하지 않고 조회 시점에 `_lookup_profile`로 해석. `category`는 text/blocks 마커 기반 best-effort 추정.
 
-**조회:** 관리자 페이지 `메시지` 탭(글로벌 피드 + 필터 + 본문검색 + 상세), `사용자` 탭의 사용자 클릭 시 상세, 대시보드 오늘자 stats.
+**조회:** 관리자 페이지 `메시지` 탭(글로벌 피드 + 유형/발송/기간 필터 + 본문검색 + 페이지네이션 + 상세), `사용자` 탭의 사용자 클릭 시 상세, 대시보드 오늘자 stats. 본문검색은 `text`·`blocks_json` 양쪽을 대상으로 합니다.
+
+**보안:** OAuth 인증 안내 DM 등에 박히는 비밀 파라미터(`state`/`code`/`token`) 값은 `slack_logger._redact_secrets()`가 저장 전에 마스킹합니다. 그 외 회의록·브리핑 본문은 평문 저장되며 **관리자 페이지에서 그대로 노출**되는 민감 화면이므로 접근(Basic Auth)을 엄격히 관리하세요.
 
 **보존:** 기본 90일(`MESSAGE_LOG_RETENTION_DAYS`), 매일 03:00 KST `scheduled_message_log_prune` 잡이 정리.
 

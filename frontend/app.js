@@ -445,25 +445,34 @@
     const params = msgFilterParams();
     if (params.get("id")) return renderMessageDetail(params.get("id"));
 
+    const LIMIT = 100;
+    const offset = parseInt(params.get("offset") || "0", 10) || 0;
+
     setLoading("메시지 불러오는 중...");
-    const data = await api("/messages?" + params.toString());
+    const apiParams = new URLSearchParams(params);
+    apiParams.delete("id");
+    apiParams.set("limit", LIMIT);
+    apiParams.set("offset", offset);
+    const data = await api("/messages?" + apiParams.toString());
     const items = data.items || [];
 
     const cat = params.get("category") || "";
     const okv = params.get("ok");
     const userv = params.get("user") || "";
     const qv = params.get("q") || "";
+    const dfrom = (params.get("date_from") || "").slice(0, 10);
+    const dto = (params.get("date_to") || "").slice(0, 10);
 
     const catLink = (name, label) => {
       const p = new URLSearchParams(params);
       if (name) p.set("category", name); else p.delete("category");
-      p.delete("id");
+      p.delete("id"); p.delete("offset");
       return `<a href="#/messages?${p.toString()}" class="${cat === name ? "active" : ""}">${label}</a>`;
     };
     const okLink = (val, label) => {
       const p = new URLSearchParams(params);
       if (val === null) p.delete("ok"); else p.set("ok", val);
-      p.delete("id");
+      p.delete("id"); p.delete("offset");
       const cur = okv == null ? "" : okv;
       return `<a href="#/messages?${p.toString()}" class="${String(cur) === String(val ?? "") ? "active" : ""}">${label}</a>`;
     };
@@ -479,6 +488,12 @@
           ${okLink(null, "전체")}${okLink("1", "성공")}${okLink("0", "실패")}
         </div>
         <div class="filter-group">
+          <span class="filter-label">기간</span>
+          <input id="msg-date-from" class="msg-search" type="date" value="${escapeHtml(dfrom)}" style="min-width:140px">
+          <span class="muted">~</span>
+          <input id="msg-date-to" class="msg-search" type="date" value="${escapeHtml(dto)}" style="min-width:140px">
+        </div>
+        <div class="filter-group">
           <input id="msg-search" class="msg-search" placeholder="본문 검색…" value="${escapeHtml(qv)}">
           <button id="msg-search-btn" class="act-btn">검색</button>
           ${userv ? `<span class="muted small">수신자 필터: <code>${escapeHtml(userv)}</code></span>` : ""}
@@ -486,11 +501,23 @@
       </div>
     `;
 
-    let body;
-    if (items.length === 0) {
-      body = '<div class="card"><div class="empty">메시지가 없습니다.</div></div>';
-    } else {
-      const rows = items.map((m) => `
+    const navParams = (off) => {
+      const p = new URLSearchParams(params);
+      p.delete("id");
+      if (off > 0) p.set("offset", off); else p.delete("offset");
+      return p.toString();
+    };
+    const prevCtl = offset > 0
+      ? `<a href="#/messages?${navParams(Math.max(0, offset - LIMIT))}">← 이전</a>`
+      : '<span class="muted">← 이전</span>';
+    const nextCtl = items.length === LIMIT
+      ? `<a href="#/messages?${navParams(offset + LIMIT)}">다음 →</a>`
+      : '<span class="muted">다음 →</span>';
+    const pager = (items.length === 0 && offset === 0)
+      ? ""
+      : `<div class="filter-group" style="margin-top:10px">${prevCtl}<span class="muted small">${items.length ? `${offset + 1}–${offset + items.length}` : "0"}</span>${nextCtl}</div>`;
+
+    const rows = items.map((m) => `
         <tr class="msg-row" data-id="${m.id}" style="cursor:pointer">
           <td class="nowrap">${escapeHtml(fmtDt(m.ts))}</td>
           <td>
@@ -501,16 +528,17 @@
           <td>${m.ok ? '<span class="tag ok">성공</span>' : '<span class="tag warn">실패</span>'}</td>
           <td>${escapeHtml((m.text || "").slice(0, 80))}${(m.text || "").length > 80 ? "…" : ""}</td>
         </tr>`).join("");
-      body = `
-        <div class="card">
-          <h2>메시지 로그 <span class="muted">(${items.length}건)</span></h2>
-          <table>
+    const inner = items.length === 0
+      ? '<div class="empty">메시지가 없습니다.</div>'
+      : `<table>
             <thead><tr><th>시각</th><th>수신자</th><th>유형</th><th>발송</th><th>본문</th></tr></thead>
             <tbody>${rows}</tbody>
-          </table>
-        </div>
-      `;
-    }
+          </table>`;
+    const body = `<div class="card">
+          <h2>메시지 로그 <span class="muted">(${items.length}건${offset > 0 ? `, offset ${offset}` : ""})</span></h2>
+          ${inner}
+          ${pager}
+        </div>`;
     main.innerHTML = filters + body;
 
     const searchBtn = document.getElementById("msg-search-btn");
@@ -519,11 +547,23 @@
       const p = new URLSearchParams(params);
       const v = searchInput.value.trim();
       if (v) p.set("q", v); else p.delete("q");
-      p.delete("id");
+      p.delete("id"); p.delete("offset");
       location.hash = "#/messages?" + p.toString();
     };
     searchBtn.addEventListener("click", doSearch);
     searchInput.addEventListener("keydown", (e) => { if (e.key === "Enter") doSearch(); });
+
+    const applyDates = () => {
+      const p = new URLSearchParams(params);
+      p.delete("id"); p.delete("offset");
+      const f = document.getElementById("msg-date-from").value;
+      const t = document.getElementById("msg-date-to").value;
+      if (f) p.set("date_from", f); else p.delete("date_from");
+      if (t) p.set("date_to", t + "T23:59:59"); else p.delete("date_to");
+      location.hash = "#/messages?" + p.toString();
+    };
+    document.getElementById("msg-date-from").addEventListener("change", applyDates);
+    document.getElementById("msg-date-to").addEventListener("change", applyDates);
   }
 
   async function renderMessageDetail(id) {

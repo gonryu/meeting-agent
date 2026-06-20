@@ -100,3 +100,25 @@ class TestInstallLogging:
         kw = mock_log.call_args.kwargs
         assert kw["method"] == "ephemeral"
         assert kw["recipient_user_id"] == "U9"
+
+    def test_redacts_oauth_secrets_but_keeps_content(self):
+        """OAuth 인증 안내 DM의 state/code/token 값은 마스킹하되 일반 본문은 보존."""
+        c = _fake()
+        slack_logger.install_logging(c)
+        with patch.object(slack_logger.user_store, "log_message") as mock_log:
+            c.chat_postMessage(
+                channel="U1",
+                text="등록: https://x.com/auth?state=SECRET123&code=ABC456 — 카카오 미팅 브리핑",
+            )
+        logged = mock_log.call_args.kwargs["text"]
+        assert "SECRET123" not in logged and "ABC456" not in logged
+        assert "state=" in logged              # 파라미터 키는 유지, 값만 마스킹
+        assert "카카오 미팅 브리핑" in logged   # 일반 본문은 그대로
+
+
+class TestRedactHelper:
+    def test_redact_secrets(self):
+        assert slack_logger._redact_secrets(None) is None
+        assert slack_logger._redact_secrets("일반 회의록 내용") == "일반 회의록 내용"
+        out = slack_logger._redact_secrets("a?token=xyz&state=qqq&foo=bar")
+        assert "xyz" not in out and "qqq" not in out and "foo=bar" in out
