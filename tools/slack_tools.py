@@ -352,6 +352,15 @@ def build_context_block(context: dict) -> list[dict]:
     else:
         lines.append("• 이메일 기록 없음")
 
+    onto = context.get("ontology")
+    if onto and (onto.get("relations") or onto.get("documents")):
+        lines.append("")
+        lines.append("🔗  *온톨로지(사내 지식)*")
+        for r in (onto.get("relations") or [])[:6]:
+            lines.append(f"   • {r.get('relation')}: {r.get('title')}")
+        for d in (onto.get("documents") or [])[:5]:
+            lines.append(f"   • 문서: {d.get('title')}")
+
     return [{"type": "section", "text": {"type": "mrkdwn", "text": "\n".join(lines)}}]
 
 
