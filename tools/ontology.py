@@ -224,3 +224,38 @@ def company_context(user_id: str, company_name: str, recent: bool = False) -> di
             args["time_range"] = _recent_range()
         cluster = oc.call_tool("entity_cluster", args)
         return _normalize_cluster(cluster, slug)
+
+
+_MEETING_RE = re.compile(r"(회의|미팅|interview|회의록|월간업무보고|간담회|워크숍|workshop)", re.I)
+_MEETING_DATE_RE = re.compile(r"\d{4}[-.\s]?\d{1,2}")
+
+
+def _is_meeting_title(title: str) -> bool:
+    """엔티티 제목이 '미팅/회의'성인지 — 키워드 또는 날짜 패턴."""
+    t = title or ""
+    return bool(_MEETING_RE.search(t) or _MEETING_DATE_RE.search(t))
+
+
+def person_context(user_id: str, person_name: str) -> dict | None:
+    """인물명 → entity_find → entity_cluster → 미팅이력 추출.
+    토큰 없으면 None. OntologyAuthError는 호출부로 올림. seed 없으면 빈 구조.
+    Returns: {seed, meetings[], sources_count}"""
+    token = user_store.get_ontology_token(user_id)
+    if not token:
+        return None
+    with OntologyClient(token) as oc:
+        find = oc.call_tool("entity_find", {"name": person_name, "limit": 3})
+        slug = _best_slug(find)
+        if not slug:
+            return {"seed": None, "meetings": [], "sources_count": 0}
+        sources = 0
+        for m in (find or {}).get("matches", []):
+            if m.get("slug") == slug:
+                sources = m.get("sources_count", 0)
+                break
+        cluster = oc.call_tool("entity_cluster", {
+            "seed": slug, "depth": 1, "include_documents": False, "limit_entities": 60})
+        ents = cluster.get("entities", []) if isinstance(cluster, dict) else []
+        meetings = [e.get("title") for e in ents
+                    if e.get("via") and _is_meeting_title(e.get("title", ""))]
+        return {"seed": slug, "meetings": meetings[:6], "sources_count": sources}
