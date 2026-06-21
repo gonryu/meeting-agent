@@ -538,6 +538,81 @@ async def trello_save(req: _TrelloSaveRequest):
         return {"ok": False, "error": str(e)}
 
 
+# ── 온톨로지(lib-mesh) 토큰 등록 (PAT 붙여넣기) ──────────────────
+_pending_ontology_states: dict[str, str] = {}
+
+
+def build_ontology_register_url(slack_user_id: str) -> str:
+    """온톨로지 등록 랜딩 URL. Slack에서 클릭 → /ontology/register 폼."""
+    state = f"{slack_user_id}-{uuid.uuid4().hex[:12]}"
+    _pending_ontology_states[state] = slack_user_id
+    base_url = os.getenv("OAUTH_CALLBACK_URL", "").rsplit("/oauth/callback", 1)[0]
+    return f"{base_url}/ontology/register?state={state}"
+
+
+@app.get("/ontology/register")
+async def ontology_register_form(request: Request):
+    state = request.query_params.get("state", "")
+    if not state or state not in _pending_ontology_states:
+        return HTMLResponse(
+            "<h2>❌ 세션이 만료되었습니다.</h2>"
+            "<p>Slack에서 <b>/온톨로지</b> 를 다시 입력해주세요.</p>", status_code=400)
+    return HTMLResponse(f"""
+    <html><body style="font-family:sans-serif;max-width:640px;margin:40px auto;padding:0 16px">
+      <h2>🔗 온톨로지(lib-mesh) 연결</h2>
+      <p>ont에서 <b>MCP 설정 복사</b> 후 아래 칸에 붙여넣고 저장하세요. (토큰은 서버로만 전송됩니다.)</p>
+      <textarea id="cfg" style="width:100%;height:200px;font-family:monospace"></textarea><br><br>
+      <button onclick="save()" style="padding:8px 16px">저장</button>
+      <p id="status"></p>
+      <script>
+        function save() {{
+          fetch('/ontology/save', {{
+            method:'POST', headers:{{'Content-Type':'application/json'}},
+            body: JSON.stringify({{state:'{state}', config: document.getElementById('cfg').value}})
+          }}).then(function(r){{return r.json();}}).then(function(d){{
+            document.getElementById('status').innerHTML = d.ok
+              ? '<span style="color:green">✅ 연결 완료! Slack으로 돌아가세요.</span>'
+              : '❌ ' + (d.error || '실패');
+          }}).catch(function(e){{ document.getElementById('status').textContent = '❌ ' + e; }});
+        }}
+      </script>
+    </body></html>""")
+
+
+class _OntologySaveRequest(BaseModel):
+    state: str
+    config: str
+
+
+@app.post("/ontology/save")
+async def ontology_save(req: _OntologySaveRequest):
+    """붙여넣은 MCP 설정에서 토큰 추출 → 유효성 검증 → 암호화 저장."""
+    slack_user_id = _pending_ontology_states.pop(req.state, None)
+    if not slack_user_id:
+        return {"ok": False, "error": "세션 만료"}
+    from tools import ontology
+    token = ontology.extract_bearer_token(req.config)
+    if not token:
+        return {"ok": False, "error": "설정에서 토큰을 찾지 못했습니다 (MCP 설정 전체를 붙여넣어 주세요)"}
+    try:
+        with ontology.OntologyClient(token) as oc:
+            oc.validate()
+    except ontology.OntologyAuthError:
+        return {"ok": False, "error": "토큰이 유효하지 않습니다 (401). ont에서 새로 복사해 주세요."}
+    except Exception as e:
+        return {"ok": False, "error": f"검증 실패: {e}"}
+    try:
+        user_store.save_ontology_token(slack_user_id, token)
+        log.info(f"온톨로지 토큰 저장 완료: {slack_user_id}")
+        if _slack_client:
+            _slack_client.chat_postMessage(
+                channel=slack_user_id,
+                text="✅ 온톨로지 연결 완료! 브리핑에서 사내 지식 맥락(관계·문서)을 볼 수 있습니다.")
+        return {"ok": True}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
 # ── 드림플러스 계정 설정 (웹 폼) ─────────────────────────────────
 
 _pending_dp_states: dict[str, str] = {}   # state → slack_user_id
