@@ -107,3 +107,101 @@ def _normalize_cluster(cluster, slug) -> dict:
         "entity_count": len(ents),
         "document_count": len(docs),
     }
+
+
+class OntologyClient:
+    """초기화 1회 후 tools/call 재사용. `with` 블록 권장. /mcp/ 직타(리다이렉트 미추종)."""
+
+    def __init__(self, token: str, url: str = None, timeout: float = _TIMEOUT):
+        self.url = _endpoint(url)
+        self.token = token
+        self._http = httpx.Client(timeout=timeout, follow_redirects=False)
+        self._sid = None
+        self._inited = False
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        self.close()
+
+    def close(self):
+        try:
+            self._http.close()
+        except Exception:
+            pass
+
+    def _headers(self) -> dict:
+        tok = self.token if self.token.lower().startswith("bearer ") else f"Bearer {self.token}"
+        h = {
+            "Authorization": tok,
+            "Content-Type": "application/json",
+            "Accept": "application/json, text/event-stream",
+            "MCP-Protocol-Version": _PROTOCOL,
+        }
+        if self._sid:
+            h["Mcp-Session-Id"] = self._sid
+        return h
+
+    def _post(self, payload: dict):
+        r = self._http.post(self.url, json=payload, headers=self._headers())
+        sid = r.headers.get("mcp-session-id")
+        if sid:
+            self._sid = sid
+        if r.status_code == 401:
+            raise OntologyAuthError("ontology 401 unauthorized")
+        return r
+
+    @staticmethod
+    def _parse(r):
+        ct = r.headers.get("content-type", "") or ""
+        if "event-stream" in ct:
+            for line in r.text.splitlines():
+                if line.startswith("data:"):
+                    try:
+                        m = json.loads(line[5:].strip())
+                        if "result" in m or "error" in m:
+                            return m
+                    except Exception:
+                        pass
+            return None
+        try:
+            return r.json()
+        except Exception:
+            return None
+
+    def _ensure_init(self):
+        if self._inited:
+            return
+        r = self._post({"jsonrpc": "2.0", "id": 1, "method": "initialize",
+                        "params": {"protocolVersion": _PROTOCOL, "capabilities": {},
+                                   "clientInfo": {"name": "meeting-agent", "version": "1.0"}}})
+        if r.status_code != 200:
+            raise RuntimeError(f"ontology initialize 실패: HTTP {r.status_code}")
+        self._post({"jsonrpc": "2.0", "method": "notifications/initialized"})
+        self._inited = True
+
+    def call_tool(self, name: str, arguments: dict):
+        """tools/call → result.content[].text의 `data` 봉투(JSON 파싱) 반환."""
+        self._ensure_init()
+        r = self._post({"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                        "params": {"name": name, "arguments": arguments}})
+        msg = self._parse(r)
+        if not msg or "result" not in msg:
+            raise RuntimeError(f"ontology {name} 실패: "
+                               f"{json.dumps(msg, ensure_ascii=False)[:200] if msg else 'no result'}")
+        blocks = msg["result"].get("content", []) or []
+        text = "\n".join(b.get("text", "") for b in blocks if b.get("type") == "text")
+        sc = msg["result"].get("structuredContent")
+        if sc is not None:
+            return sc
+        try:
+            parsed = json.loads(text)
+            return parsed.get("data", parsed) if isinstance(parsed, dict) else parsed
+        except Exception:
+            return text
+
+    def validate(self) -> bool:
+        """등록 시 토큰 유효성: initialize 성공이면 True, 401이면 OntologyAuthError."""
+        self._ensure_init()
+        return True
