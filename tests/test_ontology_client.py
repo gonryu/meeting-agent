@@ -95,3 +95,44 @@ class TestOntologyClient:
     def test_validate_ok(self):
         with _client() as oc:
             assert oc.validate() is True
+
+
+class TestCompanyContext:
+    def test_returns_normalized_cluster(self, monkeypatch):
+        monkeypatch.setattr(ont.user_store, "get_ontology_token", lambda uid: "eyJa.b.c")
+        calls = []
+
+        class FakeClient:
+            def __init__(self, token, **kw): pass
+            def __enter__(self): return self
+            def __exit__(self, *a): pass
+            def call_tool(self, name, args):
+                calls.append((name, args))
+                if name == "entity_find":
+                    return {"matches": [{"slug": "entity/komsa", "match_kind": "exact", "confidence": 0.95}]}
+                return {"seed": "entity/komsa", "entities": [
+                    {"slug": "entity/kca", "title": "KCA", "via": "related-to"}], "documents": []}
+
+        monkeypatch.setattr(ont, "OntologyClient", FakeClient)
+        out = ont.company_context("U1", "KOMSA", recent=True)
+        assert out["seed"] == "entity/komsa"
+        assert out["relations"][0]["relation"] == "related-to"
+        assert calls[0][0] == "entity_find"
+        assert calls[1][0] == "entity_cluster" and "time_range" in calls[1][1]
+
+    def test_no_token_returns_none(self, monkeypatch):
+        monkeypatch.setattr(ont.user_store, "get_ontology_token", lambda uid: None)
+        assert ont.company_context("U1", "KOMSA") is None
+
+    def test_no_match_returns_empty(self, monkeypatch):
+        monkeypatch.setattr(ont.user_store, "get_ontology_token", lambda uid: "eyJa.b.c")
+
+        class FakeClient:
+            def __init__(self, *a, **k): pass
+            def __enter__(self): return self
+            def __exit__(self, *a): pass
+            def call_tool(self, name, args): return {"matches": []}
+
+        monkeypatch.setattr(ont, "OntologyClient", FakeClient)
+        out = ont.company_context("U1", "없는업체")
+        assert out["seed"] is None and out["relations"] == []
