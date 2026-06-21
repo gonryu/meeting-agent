@@ -75,6 +75,19 @@ def _ontology_enabled(user_id: str) -> bool:
         return False
 
 
+def _person_meetings(user_id: str, person_name: str) -> list:
+    """게이팅된 사용자에 한해 온톨로지에서 인물 미팅이력 반환. 실패/비활성 시 []."""
+    if not _ontology_enabled(user_id):
+        return []
+    try:
+        from tools import ontology
+        pc = ontology.person_context(user_id, person_name)
+        return (pc or {}).get("meetings", []) or []
+    except Exception as pe:
+        log.warning(f"온톨로지 인물 조회 실패({person_name}): {pe}")
+        return []
+
+
 # ParaScope 봇 채널 조회
 _PARASCOPE_BOT_ID = os.getenv("PARASCOPE_BOT_ID", "")
 _PARASCOPE_BOT_APP_ID = os.getenv("PARASCOPE_BOT_APP_ID", "")
@@ -1484,7 +1497,8 @@ def _run_briefing_research(
                 info, _ = research_person(user_id, name, company_name)
             except Exception:
                 info = ""
-            persons_info.append({"name": name, "raw": info})
+            persons_info.append({"name": name, "raw": info,
+                                 "meetings": _person_meetings(user_id, name)})
             # 진행 메시지 삭제
             if progress_ts:
                 try:
@@ -1493,7 +1507,8 @@ def _run_briefing_research(
                     pass
 
         if persons_info:
-            person_blocks = build_persons_block([{"name": p["name"]} for p in persons_info])
+            person_blocks = build_persons_block(
+                [{"name": p["name"], "meetings": p.get("meetings", [])} for p in persons_info])
             if person_blocks:
                 _post(slack_client, user_id=user_id, channel=channel, thread_ts=thread_ts,
                       blocks=person_blocks, text="👤 담당자 정보")
