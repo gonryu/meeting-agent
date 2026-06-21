@@ -305,6 +305,11 @@ def build_persons_block(persons_info: list[dict]) -> list[dict]:
         lines.append(line)
         if memo:
             lines.append(f"  └ 메모: {memo}")
+        meetings = p.get("meetings") or []
+        if meetings:
+            lines.append("  └ 함께한 미팅:")
+            for mt in meetings[:5]:
+                lines.append(f"      • {mt}")
     return [{"type": "section", "text": {"type": "mrkdwn", "text": "\n".join(lines)}}]
 
 
