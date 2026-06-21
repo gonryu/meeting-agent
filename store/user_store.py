@@ -88,6 +88,7 @@ def init_db():
                     "dreamplus_jwt TEXT",
                     "dreamplus_jwt_exp TEXT",
                     "trello_token_enc TEXT",
+                    "ontology_token_enc TEXT",
                     "briefing_enabled INTEGER DEFAULT 1",
                     "meeting_start_alarm_enabled INTEGER DEFAULT 1"):
             try:
@@ -548,6 +549,37 @@ def clear_trello_token(slack_user_id: str) -> None:
     with _conn() as conn:
         conn.execute(
             "UPDATE users SET trello_token_enc = NULL WHERE slack_user_id = ?",
+            (slack_user_id,),
+        )
+
+
+def save_ontology_token(slack_user_id: str, token: str) -> None:
+    """온톨로지(lib-mesh) 사용자 토큰을 Fernet 암호화하여 저장"""
+    enc = _fernet().encrypt(token.encode()).decode()
+    with _conn() as conn:
+        conn.execute(
+            "UPDATE users SET ontology_token_enc = ? WHERE slack_user_id = ?",
+            (enc, slack_user_id),
+        )
+
+
+def get_ontology_token(slack_user_id: str) -> str | None:
+    """온톨로지 토큰 복호화 반환. 미설정 시 None."""
+    with _conn() as conn:
+        row = conn.execute(
+            "SELECT ontology_token_enc FROM users WHERE slack_user_id = ?",
+            (slack_user_id,),
+        ).fetchone()
+    if not row or not row["ontology_token_enc"]:
+        return None
+    return _fernet().decrypt(row["ontology_token_enc"].encode()).decode()
+
+
+def clear_ontology_token(slack_user_id: str) -> None:
+    """온톨로지 연결 해제 (토큰 삭제)"""
+    with _conn() as conn:
+        conn.execute(
+            "UPDATE users SET ontology_token_enc = NULL WHERE slack_user_id = ?",
             (slack_user_id,),
         )
 

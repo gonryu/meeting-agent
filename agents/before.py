@@ -63,6 +63,18 @@ def _internal_domains_set() -> set[str]:
     return {d.strip().lower() for d in raw.split(",") if d.strip()}
 
 
+def _ontology_enabled(user_id: str) -> bool:
+    """ONTOLOGY_BETA_USERS allowlist에 있고 토큰이 등록된 사용자만 온톨로지 경로."""
+    import os
+    beta = {u.strip() for u in os.getenv("ONTOLOGY_BETA_USERS", "").split(",") if u.strip()}
+    if user_id not in beta:
+        return False
+    try:
+        return user_store.get_ontology_token(user_id) is not None
+    except Exception:
+        return False
+
+
 # ParaScope 봇 채널 조회
 _PARASCOPE_BOT_ID = os.getenv("PARASCOPE_BOT_ID", "")
 _PARASCOPE_BOT_APP_ID = os.getenv("PARASCOPE_BOT_APP_ID", "")
@@ -1494,6 +1506,21 @@ def _run_briefing_research(
 
         if not context.get("emails") and drive_emails:
             context = {**context, "emails": drive_emails}
+
+        # 온톨로지(사내 지식) 주입 — 게이팅. 실패/만료는 섹션 생략(브리핑 안 깨짐)
+        if _ontology_enabled(user_id):
+            try:
+                from tools import ontology
+                onto = ontology.company_context(user_id, company_name, recent=True)
+                if onto and (onto.get("relations") or onto.get("documents")):
+                    context["ontology"] = onto
+            except Exception as oe:
+                from tools import ontology as _ot
+                if isinstance(oe, _ot.OntologyAuthError):
+                    _post(slack_client, user_id=user_id, channel=channel, thread_ts=thread_ts,
+                          text="🔑 온톨로지 토큰이 만료된 것 같아요. `/온톨로지` 로 재등록해 주세요.")
+                else:
+                    log.warning(f"온톨로지 조회 실패({company_name}): {oe}")
 
         if progress_ts:
             try:

@@ -3044,6 +3044,35 @@ def _trello_setup_handler(ack, body, client):
 app.command("/trello")(_trello_setup_handler)
 
 
+# ── 온톨로지(lib-mesh) 설정 ─────────────────────────────────────
+
+def _send_ontology_setup_link(client, user_id: str) -> None:
+    """온톨로지 등록 랜딩 링크를 DM으로 발송."""
+    try:
+        url = oauth_server.build_ontology_register_url(user_id)
+    except Exception as e:
+        client.chat_postMessage(channel=user_id, text=f"⚠️ 등록 링크 생성 실패: {e}")
+        return
+    client.chat_postMessage(
+        channel=user_id,
+        text=("🔗 *온톨로지(lib-mesh) 연결*\n"
+              f"1) ont에서 *MCP 설정 복사*\n"
+              f"2) <{url}|여기를 눌러> 붙여넣고 저장\n"
+              "_토큰은 Slack을 거치지 않고 서버로만 전송됩니다._"),
+    )
+
+
+def _ontology_setup_handler(ack, body, client):
+    ack()
+    user_id = body["user_id"]
+    if not _check_registered(client, user_id):
+        return
+    _send_ontology_setup_link(client, user_id)
+
+app.command("/온톨로지")(_ontology_setup_handler)
+app.command("/ontology")(_ontology_setup_handler)
+
+
 def _trello_disconnect_handler(ack, body, client):
     ack()
     user_id = body["user_id"]
