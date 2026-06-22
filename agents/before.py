@@ -88,6 +88,23 @@ def _person_meetings(user_id: str, person_name: str) -> list:
         return []
 
 
+def _company_ontology(user_id: str, company_name: str) -> dict | None:
+    """게이팅된 사용자에 한해 업체 온톨로지 맥락(관계·문서) 반환. 비활성/실패/빈결과 시 None.
+
+    렌더 전용 — 호출부가 Slack 블록에만 표시하고 위키엔 저장하지 않는다(재색인 오염 방지)."""
+    if not _ontology_enabled(user_id):
+        return None
+    try:
+        from tools import ontology
+        onto = ontology.company_context(user_id, company_name, recent=True)
+        if onto and (onto.get("relations") or onto.get("documents")):
+            return onto
+        return None
+    except Exception as oe:
+        log.warning(f"온톨로지 업체 조회 실패({company_name}): {oe}")
+        return None
+
+
 # ParaScope 봇 채널 조회
 _PARASCOPE_BOT_ID = os.getenv("PARASCOPE_BOT_ID", "")
 _PARASCOPE_BOT_APP_ID = os.getenv("PARASCOPE_BOT_APP_ID", "")
