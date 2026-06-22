@@ -1197,8 +1197,9 @@ def _post_company_research_result(client, *, user_id: str, company: str,
         log.warning(f"Trello 기업정보 컨텍스트 조회 실패 ({company}): {e}")
         trello_summary = [f"조회 실패: {str(e)[:120]}"]
 
-    # 온톨로지(사내 지식) — 렌더 시점에만 주입(위키 미저장, 게이팅·best-effort)
-    onto = before_agent._company_ontology(user_id, company)
+    # 온톨로지 — 게이팅 사용자는 딥 리서치 브리핑(합성), 실패 시 라이트 cluster 폴백
+    onto_brief = before_agent.deep_company_ontology(user_id, company)
+    onto = None if onto_brief else before_agent._company_ontology(user_id, company)
 
     blocks = before_agent.build_company_research_block(
         company,
@@ -1210,6 +1211,7 @@ def _post_company_research_result(client, *, user_id: str, company: str,
         trello_card_name,
         trello_url,
         ontology=onto,
+        ontology_brief=onto_brief,
     )
     client.chat_postMessage(
         channel=channel or user_id,
