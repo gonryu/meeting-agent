@@ -283,3 +283,56 @@ def person_context(user_id: str, person_name: str) -> dict | None:
         meetings = [e.get("title") for e in ents
                     if e.get("via") and _is_meeting_title(e.get("title", ""))]
         return {"seed": slug, "meetings": meetings[:6], "sources_count": sources}
+
+
+# 문서 우선순위: 제안서·계약·회의록 > 발표 > 주간보고 (낮을수록 우선)
+def _doc_priority(title: str) -> int:
+    t = (title or "")
+    if any(k in t for k in ("제안서", "계약", "회의록", "RFP")):
+        return 0
+    if any(k in t for k in ("발표", "Proposal", "구성도", "설계")):
+        return 1
+    return 2
+
+
+def company_research_sources(user_id: str, company_name: str, max_docs: int = 6) -> dict | None:
+    """딥 리서치 입력 — entity_find→cluster→R1 필터→상위문서 document_fetch.
+    토큰 없으면 None. Returns: {seed, relations[], docs:[{title,summary,uri,space,ym,id}]}.
+    R1: 업체 엔티티에 직접 연결된 문서(matched_via_entities에 seed 포함)만."""
+    token = user_store.get_ontology_token(user_id)
+    if not token:
+        return None
+    with OntologyClient(token) as oc:
+        find = oc.call_tool("entity_find", {"name": company_name, "limit": 5})
+        slug = _best_slug(find)
+        if not slug:
+            return {"seed": None, "relations": [], "docs": []}
+        cluster = oc.call_tool("entity_cluster", {
+            "seed": slug, "depth": 2, "include_documents": True,
+            "limit_entities": 40, "limit_documents": 30, "time_range": _recent_range(12)})
+    norm = _normalize_cluster(cluster, slug)
+    # R1: 업체 직접 연결 문서만 (matched에 seed 포함)
+    connected = [d for d in norm["documents"] if slug in (d.get("matched") or [])]
+    pool = connected or norm["documents"]  # 연결문서 0이면 전체에서라도
+    pool = sorted(pool, key=lambda d: (_doc_priority(d.get("title", "")),
+                                       -_ym_key(d.get("ym", ""))))[:max_docs]
+    docs = []
+    for d in pool:
+        if not d.get("id"):
+            continue
+        fetched = None
+        try:
+            fetched = document_fetch(user_id, d["id"])
+        except Exception as fe:
+            log.warning(f"document_fetch 실패({d.get('title')}): {fe}")
+        docs.append({**d, "summary": (fetched or {}).get("summary", ""),
+                     "uri": d.get("uri") or (fetched or {}).get("uri", "")})
+    return {"seed": slug, "relations": norm["relations"], "docs": docs}
+
+
+def _ym_key(ym: str) -> int:
+    """'2026-05' → 202605 (정렬용). 빈값 0."""
+    try:
+        return int((ym or "").replace("-", "")[:6] or 0)
+    except Exception:
+        return 0
