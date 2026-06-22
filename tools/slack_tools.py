@@ -220,8 +220,13 @@ def build_company_research_block(
     trello_summary: list[str] | None = None,
     trello_card_name: str = "",
     trello_url: str = "",
+    ontology: dict | None = None,
 ) -> list[dict]:
-    """업체 뉴스 + ParaScope + 서비스 연결점 블록 (리서치 완료 후 발송)."""
+    """업체 뉴스 + ParaScope + 서비스 연결점 블록 (리서치 완료 후 발송).
+
+    ontology: {relations:[{relation,title}], documents:[{title}]} 형태가 주어지면
+    🧠 온톨로지(사내 지식) 섹션을 렌더. 브리핑 경로는 이 인자를 넘기지 않아(④이전맥락에서
+    별도 표시) 중복되지 않는다. 렌더 전용 — 위키 파일엔 저장하지 않는다(온톨로지 재색인 오염 방지)."""
     lines = [        
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
         f"*🏢 {company_name} 리서치 결과*",
@@ -260,6 +265,14 @@ def build_company_research_block(
             lines.append(f"• {conn}")
     else:
         lines.append("• 분석 정보 없음")
+
+    if ontology and (ontology.get("relations") or ontology.get("documents")):
+        lines.append("")
+        lines.append("🧠  *온톨로지(사내 지식)*")
+        for r in (ontology.get("relations") or [])[:6]:
+            lines.append(f"• {r.get('relation')}: {r.get('title')}")
+        for d in (ontology.get("documents") or [])[:5]:
+            lines.append(f"• 문서: {d.get('title')}")
 
     if trello_summary or trello_url or trello_card_name:
         lines.append("")
