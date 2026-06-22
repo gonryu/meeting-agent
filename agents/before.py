@@ -64,15 +64,21 @@ def _internal_domains_set() -> set[str]:
 
 
 def _ontology_enabled(user_id: str) -> bool:
-    """ONTOLOGY_BETA_USERS allowlist에 있고 토큰이 등록된 사용자만 온톨로지 경로."""
+    """온톨로지 경로 게이팅. 토큰 보유는 항상 필수.
+
+    `ONTOLOGY_BETA_USERS`가 비어있으면 GA 모드 — 토큰을 등록한 사용자 누구나 ON.
+    값이 있으면 그 allowlist로 제한(베타/킬스위치). 즉 등록(토큰) 자체가 옵트인이 되고,
+    env에 명단을 넣으면 다시 좁힐 수 있다."""
     import os
-    beta = {u.strip() for u in os.getenv("ONTOLOGY_BETA_USERS", "").split(",") if u.strip()}
-    if user_id not in beta:
-        return False
     try:
-        return user_store.get_ontology_token(user_id) is not None
+        if user_store.get_ontology_token(user_id) is None:
+            return False
     except Exception:
         return False
+    beta = {u.strip() for u in os.getenv("ONTOLOGY_BETA_USERS", "").split(",") if u.strip()}
+    if beta:
+        return user_id in beta
+    return True
 
 
 def _person_meetings(user_id: str, person_name: str) -> list:
