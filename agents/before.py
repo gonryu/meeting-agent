@@ -111,6 +111,23 @@ def _company_ontology(user_id: str, company_name: str) -> dict | None:
         return None
 
 
+def deep_company_ontology(user_id: str, company_name: str) -> str | None:
+    """게이팅된 사용자 대상 딥 리서치 — 출처기반 합성 브리핑(마크다운) 반환.
+    비활성/토큰없음/출처없음/실패 시 None(호출부가 라이트로 폴백). 렌더 전용(위키 미저장)."""
+    if not _ontology_enabled(user_id):
+        return None
+    try:
+        from tools import ontology
+        from agents import ontology_synth
+        sources = ontology.company_research_sources(user_id, company_name)
+        if not sources or not sources.get("docs"):
+            return None
+        return ontology_synth.synthesize_company_brief(company_name, sources)
+    except Exception as oe:
+        log.warning(f"딥 온톨로지 리서치 실패({company_name}): {oe}")
+        return None
+
+
 # ParaScope 봇 채널 조회
 _PARASCOPE_BOT_ID = os.getenv("PARASCOPE_BOT_ID", "")
 _PARASCOPE_BOT_APP_ID = os.getenv("PARASCOPE_BOT_APP_ID", "")

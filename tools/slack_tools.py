@@ -221,6 +221,7 @@ def build_company_research_block(
     trello_card_name: str = "",
     trello_url: str = "",
     ontology: dict | None = None,
+    ontology_brief: str | None = None,
 ) -> list[dict]:
     """업체 뉴스 + ParaScope + 서비스 연결점 블록 (리서치 완료 후 발송).
 
@@ -266,7 +267,13 @@ def build_company_research_block(
     else:
         lines.append("• 분석 정보 없음")
 
-    if ontology and (ontology.get("relations") or ontology.get("documents")):
+    if ontology_brief:
+        lines.append("")
+        lines.append("🧠  *온톨로지(사내 지식)*")
+        for bl in ontology_brief.splitlines():
+            if bl.strip():
+                lines.append(bl.rstrip())
+    elif ontology and (ontology.get("relations") or ontology.get("documents")):
         lines.append("")
         lines.append("🧠  *온톨로지(사내 지식)*")
         for r in (ontology.get("relations") or [])[:6]:

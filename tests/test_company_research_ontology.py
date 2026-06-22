@@ -56,3 +56,13 @@ class TestCompanyOntologyHelper:
                             lambda uid, c, recent=False: {
                                 "seed": None, "relations": [], "documents": []})
         assert before._company_ontology("U1", "KOMSA") is None
+
+
+class TestDeepBriefRender:
+    def test_block_renders_deep_brief_text(self):
+        from tools.slack_tools import build_company_research_block
+        blocks = build_company_research_block(
+            "KOMSA", [], [], [], None, None, "", "",
+            ontology_brief="KOMSA 요약\n\n• 총 266억 `[출처: 제안서]`")
+        text = blocks[0]["text"]["text"]
+        assert "온톨로지(사내 지식)" in text and "266억" in text
