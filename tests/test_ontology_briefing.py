@@ -23,6 +23,18 @@ class TestGating:
         monkeypatch.setattr(before.user_store, "get_ontology_token", lambda uid: "tok")
         assert before._ontology_enabled("U1") is True
 
+    def test_ga_mode_empty_env_allows_any_token_holder(self, monkeypatch):
+        """ONTOLOGY_BETA_USERS 미설정/빈값 = GA 모드 → 토큰 보유자 누구나 ON."""
+        monkeypatch.delenv("ONTOLOGY_BETA_USERS", raising=False)
+        monkeypatch.setattr(before.user_store, "get_ontology_token", lambda uid: "tok")
+        assert before._ontology_enabled("U_any") is True
+
+    def test_ga_mode_still_requires_token(self, monkeypatch):
+        """GA 모드라도 토큰 없으면 OFF(기존 경로 폴백)."""
+        monkeypatch.delenv("ONTOLOGY_BETA_USERS", raising=False)
+        monkeypatch.setattr(before.user_store, "get_ontology_token", lambda uid: None)
+        assert before._ontology_enabled("U_any") is False
+
 
 class TestContextRender:
     def test_ontology_section_rendered(self):
