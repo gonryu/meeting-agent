@@ -1,0 +1,2 @@
+{"id": "komsa-grounded", "company": "KOMSA", "sources": ["KOMSA 제안서(2026-05): 총 266억 규모 DID/VC 검증체계, 파라메타·아일리스프런티어·이웃 컨소시엄"], "brief": "KOMSA는 KISA 공공과제 수요기관입니다.\n\n• 총 266억 규모 DID/VC 검증체계 [출처: KOMSA 제안서]", "expected_grounded": true}
+{"id": "komsa-hallucinated", "company": "KOMSA", "sources": ["KOMSA 제안서(2026-05): 총 266억 규모 DID/VC 검증체계"], "brief": "KOMSA는 2024년 매출 5조원의 대기업입니다.\n\n• 직원 1만명 [출처: 없음]", "expected_grounded": false}
