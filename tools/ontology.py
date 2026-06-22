@@ -97,7 +97,11 @@ def _normalize_cluster(cluster, slug) -> dict:
             relations.append({"relation": via, "title": e.get("title") or e.get("slug")})
     doclist = [
         {"title": d.get("title") or d.get("name") or d.get("id"),
-         "id": d.get("id") or d.get("document_id")}
+         "id": d.get("document_id") or d.get("id"),
+         "uri": d.get("source_uri") or d.get("sourceUrl") or "",
+         "space": d.get("space_display") or d.get("space") or "",
+         "ym": d.get("ym") or "",
+         "matched": d.get("matched_via_entities") or []}
         for d in docs
     ]
     return {
@@ -224,6 +228,26 @@ def company_context(user_id: str, company_name: str, recent: bool = False) -> di
             args["time_range"] = _recent_range()
         cluster = oc.call_tool("entity_cluster", args)
         return _normalize_cluster(cluster, slug)
+
+
+def document_fetch(user_id: str, document_id: str, level: str = "summary",
+                   max_chars: int = 3000) -> dict | None:
+    """문서 요약/본문 가져오기. {title, summary, uri, space}. 토큰 없으면 None."""
+    token = user_store.get_ontology_token(user_id)
+    if not token:
+        return None
+    with OntologyClient(token) as oc:
+        data = oc.call_tool("document_fetch", {
+            "document_id": document_id, "level": level, "max_chars": max_chars})
+    if not isinstance(data, dict):
+        return {"title": "", "summary": str(data or ""), "uri": "", "space": ""}
+    fm = data.get("frontmatter") or {}
+    return {
+        "title": data.get("title") or fm.get("title") or "",
+        "summary": (data.get("body_markdown") or "").strip(),
+        "uri": data.get("source_uri") or fm.get("sourceUrl") or "",
+        "space": fm.get("space_display") or fm.get("space") or "",
+    }
 
 
 _MEETING_RE = re.compile(r"(회의|미팅|interview|회의록|월간업무보고|간담회|워크숍|workshop)", re.I)
