@@ -152,6 +152,37 @@ def _strip_display_markdown(text: str) -> str:
     return text
 
 
+_KO_RELATION = {
+    "part-of": "소속", "related-to": "관련", "uses": "활용",
+    "depends-on": "의존", "implements": "구현", "instance-of": "유형",
+    "alias-of": "별칭", "mentioned": "언급", "supersedes": "대체",
+}
+_NOISE_RE = re.compile(r"^\s*\d{1,4}[.\s]")
+_DOC_EXT_RE = re.compile(r"\.(pdf|pptx?|xlsx?|docx?|md|csv|txt)$", re.IGNORECASE)
+
+
+def _relation_label(rel: str) -> str:
+    """온톨로지 관계타입 영어→한국어. 미매핑은 원문 유지."""
+    return _KO_RELATION.get((rel or "").strip().lower(), rel or "")
+
+
+def _is_noise_relation(title: str) -> bool:
+    """번호섹션 제목(01. …, 0102. …)은 그래프 노이즈로 렌더 제외."""
+    return bool(_NOISE_RE.match(title or ""))
+
+
+def _doc_label(title: str) -> str:
+    """문서 제목 표시용 — 끝 확장자만 제거(과한 정리 금지)."""
+    return _DOC_EXT_RE.sub("", (title or "").strip())
+
+
+def to_slack_mrkdwn(text):
+    """Markdown 볼드(**x**)를 Slack mrkdwn(*x*)로. None/빈값 안전, 단일 *는 보존."""
+    if not text:
+        return text
+    return re.sub(r"\*\*(.+?)\*\*", r"*\1*", text)
+
+
 def _format_news_line_for_slack(news: str) -> str:
     news = _strip_display_markdown(news)
     if not news:
