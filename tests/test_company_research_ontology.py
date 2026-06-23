@@ -15,7 +15,7 @@ class TestRenderOntology:
             "KOMSA", [], [], [], None, None, "", "", ontology=onto)
         text = blocks[0]["text"]["text"]
         assert "온톨로지(사내 지식)" in text
-        assert "related-to: KCA" in text
+        assert "관련: KCA" in text
         assert "문서: KOMSA 제안서" in text
 
     def test_no_section_when_none(self):
