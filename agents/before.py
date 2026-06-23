@@ -1289,6 +1289,17 @@ def run_briefing(slack_client, user_id: str, event: dict = None,
                     company_names = [inferred]
                     log.info(f"업체명 추론 성공 (참석자): '{meeting.get('summary')}' → {company_names}")
 
+        # FR-B17: 온톨로지 엔티티 감지 (게이팅) — 위 추론 모두 실패 시 사실 기반 폴백
+        if not company_names and _ontology_enabled(user_id):
+            try:
+                from tools import ontology
+                detected = ontology.detect_company_in_title(user_id, meeting.get("summary", ""))
+                if detected:
+                    company_names = [detected]
+                    log.info(f"업체명 추론 성공 (온톨로지): '{meeting.get('summary')}' → {detected}")
+            except Exception as oe:
+                log.warning(f"온톨로지 제목 감지 실패: {oe}")
+
         # FR-B15: 추론 결과를 extendedProperties에 저장 (다음 조회 시 재사용)
         if company_names and not company_raw:
             try:
