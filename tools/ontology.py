@@ -346,3 +346,34 @@ def _ym_key(ym: str) -> int:
         return int((ym or "").replace("-", "")[:6] or 0)
     except Exception:
         return 0
+
+
+def recent_company_docs(user_id: str, company_name: str, focus_query: str,
+                        max_docs: int = 4) -> dict | None:
+    """브리핑용 — 제목 목적에 맞춘 최근 문서 스니펫. 토큰 없으면 None.
+    document_search(업체명 prepend 질의·score순) + R1 필터(업체 직접연결).
+    Returns: {slug, docs:[{title, snippet, uri, ym}]} (snippet 있는 것만)."""
+    token = user_store.get_ontology_token(user_id)
+    if not token:
+        return None
+    with OntologyClient(token) as oc:
+        find = oc.call_tool("entity_find", {"name": company_name, "limit": 5})
+        slug = _best_slug(find)
+        if not slug:
+            return {"slug": None, "docs": []}
+        query = f"{company_name} {focus_query}".strip()
+        res = oc.call_tool("document_search", {
+            "query": query, "seed_entity": slug, "mode": "hybrid",
+            "sort_by": "score", "top_k": 8})
+    results = res.get("results", []) if isinstance(res, dict) else []
+    docs = []
+    for r in results:
+        connected = r.get("min_hop") == 0 or slug in (r.get("matched_via_entities") or [])
+        snippet = (r.get("snippet") or "").strip()
+        if not connected or not snippet:
+            continue
+        docs.append({"title": r.get("title", ""), "snippet": snippet,
+                     "uri": r.get("source_uri") or "", "ym": r.get("ym") or ""})
+        if len(docs) >= max_docs:
+            break
+    return {"slug": slug, "docs": docs}
