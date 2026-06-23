@@ -61,6 +61,14 @@ def _endpoint(url: str = None) -> str:
     return u if u.endswith("/") else u + "/"
 
 
+_NOISE_TITLE_RE = re.compile(r"^\s*\d{1,4}[.\s]")
+
+
+def _is_noise_entity(title: str) -> bool:
+    """번호섹션 엔티티(01. …)는 그래프 노이즈."""
+    return bool(_NOISE_TITLE_RE.match(title or ""))
+
+
 def _recent_range(months: int = 6) -> list[str]:
     """['YYYY-MM','YYYY-MM'] — 현재월 기준 과거 N개월(변동층 time_range용)."""
     now = datetime.now()
@@ -93,8 +101,10 @@ def _normalize_cluster(cluster, slug) -> dict:
     relations = []
     for e in ents:
         via = e.get("via")
-        if via and e.get("slug") != slug:
-            relations.append({"relation": via, "title": e.get("title") or e.get("slug")})
+        title = e.get("title") or e.get("slug")
+        if via and e.get("slug") != slug and not _is_noise_entity(title):
+            relations.append({"relation": via, "title": title, "hop": e.get("hop", 1)})
+    relations.sort(key=lambda r: r.get("hop", 1))  # 가까운 관계 우선
     doclist = [
         {"title": d.get("title") or d.get("name") or d.get("id"),
          "id": d.get("document_id") or d.get("id"),
