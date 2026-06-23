@@ -73,3 +73,35 @@ def synthesize_company_brief(company: str, sources: dict) -> str | None:
     except Exception as e:
         log.warning(f"grounding critic 실패({company}), 합성 결과 통과: {e}")
         return brief
+
+
+def _fmt_snippets(docs: list) -> str:
+    out = []
+    for d in (docs or []):
+        ym = f" ({d['ym']})" if d.get("ym") else ""
+        out.append(f"- {d.get('title','')}{ym}: {d.get('snippet','')}")
+    return "\n".join(out)
+
+
+def synthesize_recent_situation(company: str, recent: dict) -> dict | None:
+    """브리핑 라이트 합성 — Haiku로 스니펫→최근상황 2~3문장 + 문서 링크.
+    docs 없으면 None. critic 없음(표면 작음). best-effort → 실패 시 None.
+    Returns: {summary: str, docs: [{title, uri}]}"""
+    docs = (recent or {}).get("docs") or []
+    if not docs:
+        return None
+    prompt = (_load("ontology_recent.md")
+              .replace("{{company}}", company)
+              .replace("{{snippets}}", _fmt_snippets(docs)))
+    try:
+        resp = _claude.messages.create(model=_CRITIC_MODEL, max_tokens=600,
+                                       messages=[{"role": "user", "content": prompt}])
+        summary = resp.content[0].text.strip()
+    except Exception as e:
+        log.warning(f"브리핑 온톨로지 라이트 합성 실패({company}): {e}")
+        return None
+    if not summary:
+        return None
+    links = [{"title": d.get("title", ""), "uri": d.get("uri", "")}
+             for d in docs[:3] if d.get("uri")]
+    return {"summary": summary, "docs": links}

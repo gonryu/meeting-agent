@@ -46,3 +46,27 @@ def test_critic_failure_falls_back_to_raw_synthesis(monkeypatch):
     monkeypatch.setattr(synth._claude.messages, "create", fake_create)
     out = synth.synthesize_company_brief("KOMSA", _sources())
     assert out == "원본 합성 [출처: KOMSA 제안서]"   # critic 실패 → 합성 결과 그대로
+
+
+class TestRecentSituation:
+    def test_haiku_synth_returns_summary_and_links(self, monkeypatch):
+        from unittest.mock import MagicMock
+        resp = MagicMock(); resp.content = [MagicMock(text="KOMSA는 2026-06 수주 확정. 홍보예산 턴키 협의 중.")]
+        calls = []
+        def fake(**kw): calls.append(kw["model"]); return resp
+        monkeypatch.setattr(synth._claude.messages, "create", fake)
+        out = synth.synthesize_recent_situation("KOMSA", {"slug": "entity/komsa", "docs": [
+            {"title": "KISA KOMSA", "snippet": "우선협상 선정", "uri": "u1", "ym": "2026-06"}]})
+        assert "수주 확정" in out["summary"]
+        assert out["docs"][0]["uri"] == "u1"
+        assert calls[0].startswith("claude-haiku")   # 라이트=Haiku
+
+    def test_no_docs_returns_none(self):
+        assert synth.synthesize_recent_situation("KOMSA", {"slug": "entity/komsa", "docs": []}) is None
+
+    def test_failure_returns_none(self, monkeypatch):
+        def boom(**kw): raise RuntimeError("api down")
+        monkeypatch.setattr(synth._claude.messages, "create", boom)
+        out = synth.synthesize_recent_situation("KOMSA", {"slug": "x", "docs": [
+            {"title": "t", "snippet": "s", "uri": "u", "ym": "2026-06"}]})
+        assert out is None
