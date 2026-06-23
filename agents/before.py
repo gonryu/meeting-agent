@@ -128,6 +128,27 @@ def deep_company_ontology(user_id: str, company_name: str) -> str | None:
         return None
 
 
+def briefing_ontology_summary(user_id: str, company_name: str, title: str) -> dict | None:
+    """브리핑용 라이트 온톨로지 — 제목 목적 기반 최근상황 프로즈+링크.
+    게이팅·실패·미등록 시 None(호출부가 구조화 cluster로 폴백)."""
+    if not _ontology_enabled(user_id):
+        return None
+    try:
+        from tools import ontology
+        from agents import ontology_synth
+        focus = (title or "").split("_")[0].strip()  # "제목_담당자" → "제목"
+        recent = ontology.recent_company_docs(user_id, company_name, focus)
+        if not recent or not recent.get("docs"):
+            return None
+        return ontology_synth.synthesize_recent_situation(company_name, recent)
+    except Exception as oe:
+        from tools import ontology as _ot
+        if isinstance(oe, _ot.OntologyAuthError):
+            raise  # 만료는 호출부가 재등록 DM 처리
+        log.warning(f"브리핑 온톨로지 요약 실패({company_name}): {oe}")
+        return None
+
+
 # ParaScope 봇 채널 조회
 _PARASCOPE_BOT_ID = os.getenv("PARASCOPE_BOT_ID", "")
 _PARASCOPE_BOT_APP_ID = os.getenv("PARASCOPE_BOT_APP_ID", "")
