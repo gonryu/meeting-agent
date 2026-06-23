@@ -1597,13 +1597,18 @@ def _run_briefing_research(
         if not context.get("emails") and drive_emails:
             context = {**context, "emails": drive_emails}
 
-        # 온톨로지(사내 지식) 주입 — 게이팅. 실패/만료는 섹션 생략(브리핑 안 깨짐)
+        # 온톨로지(사내 지식) 주입 — 게이팅. 프로즈(최근상황) 우선, 실패 시 구조화 cluster 폴백.
+        # 만료/실패는 섹션 생략(브리핑 안 깨짐).
         if _ontology_enabled(user_id):
             try:
                 from tools import ontology
-                onto = ontology.company_context(user_id, company_name, recent=True)
-                if onto and (onto.get("relations") or onto.get("documents")):
-                    context["ontology"] = onto
+                recent = briefing_ontology_summary(user_id, company_name, meeting.get("summary", ""))
+                if recent and recent.get("summary"):
+                    context["ontology_recent"] = recent
+                else:
+                    onto = ontology.company_context(user_id, company_name, recent=True)
+                    if onto and (onto.get("relations") or onto.get("documents")):
+                        context["ontology"] = onto
             except Exception as oe:
                 from tools import ontology as _ot
                 if isinstance(oe, _ot.OntologyAuthError):
