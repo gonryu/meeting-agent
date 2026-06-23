@@ -417,8 +417,17 @@ def build_context_block(context: dict) -> list[dict]:
     else:
         lines.append("• 이메일 기록 없음")
 
+    recent = context.get("ontology_recent")
     onto = context.get("ontology")
-    if onto and (onto.get("relations") or onto.get("documents")):
+    if recent and recent.get("summary"):
+        lines.append("")
+        lines.append("🔗  *온톨로지(사내 지식)*")
+        lines.append(f"   {recent['summary']}")
+        for d in (recent.get("docs") or [])[:3]:
+            label = _doc_label(d.get("title", ""))
+            uri = d.get("uri")
+            lines.append(f"   • 문서: <{uri}|{label}>" if uri else f"   • 문서: {label}")
+    elif onto and (onto.get("relations") or onto.get("documents")):
         lines.append("")
         lines.append("🔗  *온톨로지(사내 지식)*")
         _shown = 0
