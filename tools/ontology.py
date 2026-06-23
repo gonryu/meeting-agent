@@ -377,3 +377,67 @@ def recent_company_docs(user_id: str, company_name: str, focus_query: str,
         if len(docs) >= max_docs:
             break
     return {"slug": slug, "docs": docs}
+
+
+_ORG_ETYPES = {"organization", "company"}
+_STOPWORDS = {
+    "간담회", "미팅", "회의", "촬영", "제작", "협의", "진행", "후속", "논의",
+    "주간", "정기", "mou", "poc", "킥오프", "킥오프미팅", "백이미지", "기자님",
+    "대리", "차장", "부장", "팀장", "이사", "대표", "관련", "건", "그룹",
+}
+_OWN_ORG_DENYLIST = {
+    "parametacorp", "parameta", "파라메타", "iconloop", "아이콘루프",
+    "infrateam", "enterprise", "icon",
+}
+_TOKEN_SPLIT_RE = re.compile(r"[\s,/·\-_()\[\]:|]+")
+
+
+def _title_tokens(title: str) -> list[str]:
+    """제목을 후보 토큰으로 분해 — 구두점 분리, 길이<2·스톱워드 제거, 최대 5개."""
+    out = []
+    for raw in _TOKEN_SPLIT_RE.split(title or ""):
+        t = raw.strip()
+        if len(t) < 2 or t.lower() in _STOPWORDS:
+            continue
+        out.append(t)
+        if len(out) >= 5:
+            break
+    return out
+
+
+def detect_company_in_title(user_id: str, title: str) -> str | None:
+    """제목 토큰을 entity_find로 검증해 알려진 조직 엔티티면 그 title 반환.
+    채택: match_kind=exact & etype∈조직 & importance>=0.5 & 자사 denylist 아님.
+    토큰/매칭 없으면 None. best-effort(예외 시 None)."""
+    token = user_store.get_ontology_token(user_id)
+    if not token:
+        return None
+    tokens = _title_tokens(title)
+    if not tokens:
+        return None
+    best = None  # (importance, sources, title)
+    try:
+        with OntologyClient(token) as oc:
+            for tok in tokens:
+                res = oc.call_tool("entity_find", {"name": tok, "limit": 2})
+                for m in (res or {}).get("matches", []) if isinstance(res, dict) else []:
+                    if not isinstance(m, dict):
+                        continue
+                    if m.get("match_kind") != "exact":
+                        continue
+                    if (m.get("etype") or "").lower() not in _ORG_ETYPES:
+                        continue
+                    if (m.get("importance") or 0) < 0.5:
+                        continue
+                    name = (m.get("title") or "").strip()
+                    if not name or name.lower() in _OWN_ORG_DENYLIST:
+                        continue
+                    key = (m.get("importance") or 0, m.get("sources_count") or 0)
+                    if best is None or key > best[0]:
+                        best = (key, name)
+    except OntologyAuthError:
+        return None
+    except Exception as e:
+        log.warning(f"detect_company_in_title 실패: {e}")
+        return None
+    return best[1] if best else None
