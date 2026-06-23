@@ -17,6 +17,7 @@ import json
 import re
 
 from store import user_store
+from tools.slack_tools import to_slack_mrkdwn
 
 log = logging.getLogger(__name__)
 
@@ -644,7 +645,8 @@ def add_checklist_items_by_id(user_id: str, card_id: str,
     card = _find_card_by_id(user_id, card_id)
     if card is None:
         log.warning(f"Trello 카드 없음 (id={card_id})")
-        return 0, f"카드를 찾을 수 없어요 (card_id={card_id[:8]}...)"
+        # Slack mrkdwn 정규화(** → *) — 이 에러 문자열은 Slack 메시지로 노출됨
+        return 0, to_slack_mrkdwn(f"카드를 찾을 수 없어요 (card_id={card_id[:8]}...)")
 
     try:
         # 주의: client.get_card()가 이미 카드 JSON을 fetch해서 Card 객체를 만들어주므로
@@ -660,7 +662,8 @@ def add_checklist_items_by_id(user_id: str, card_id: str,
         return count, ""
     except Exception as e:
         log.exception(f"체크리스트 항목 추가 실패 (card_id={card_id}): {e}")
-        return 0, f"{type(e).__name__}: {e}"
+        # Slack mrkdwn 정규화(** → *) — 이 에러 문자열은 Slack 메시지로 노출됨
+        return 0, to_slack_mrkdwn(f"{type(e).__name__}: {e}")
 
 
 def add_comment_by_id(user_id: str, card_id: str, comment: str) -> bool:

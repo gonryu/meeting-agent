@@ -20,6 +20,7 @@ import anthropic
 
 from store import user_store
 from tools import calendar as cal, drive, gmail, trello
+from tools.slack_tools import to_slack_mrkdwn
 from prompts.briefing import extract_action_items_prompt
 from agents import action_items_orchestrator
 
@@ -635,6 +636,9 @@ def _notify_action_items(
         if extra_note:
             text += extra_note
 
+        # Slack mrkdwn 정규화(** → *) — LLM 개인화 DM 본문이 **볼드**를 낼 수 있음
+        text = to_slack_mrkdwn(text)
+
         try:
             slack_client.chat_postMessage(channel=target_uid, text=text)
         except Exception as e:
@@ -689,8 +693,10 @@ def action_item_reminder(slack_client) -> None:
                 emoji = _SEVERITY_EMOJI.get(sev, "•")
                 assignee = f"[{it['assignee']}] " if it.get("assignee") else ""
                 lines.append(f"{emoji} {assignee}{it['content']}")
+            # Slack mrkdwn 정규화(** → *) — 액션아이템 content가 **볼드**를 낼 수 있음
+            reminder_text = to_slack_mrkdwn("\n".join(lines))
             try:
-                slack_client.chat_postMessage(channel=uid, text="\n".join(lines))
+                slack_client.chat_postMessage(channel=uid, text=reminder_text)
             except Exception as e:
                 log.warning(f"리마인더 DM 실패 ({uid}): {e}")
 

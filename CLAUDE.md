@@ -394,4 +394,5 @@ cd frontend && ./serve.sh           # http://localhost:3030 → config.js의 BAC
 - 명시적인 커밋과 푸시 명령이 있을때에만 커밋과 푸시를 수행함
 - `tools/calendar.py`의 `create_event()`는 `location` 파라미터를 지원함 (자연어 미팅 생성 시 장소 설정)
 - 일정 드래프트 스레드에서 업체명은 참석자와 동일한 누적 패턴: "업체 추가해줘 X" → 기존 유지 + 추가, "업체는 X야" → 대체. `draft["company"]`는 쉼표 구분 문자열, LLM 호출 전 `company_candidates` 배열로 동기화됨
+- Slack 발송 텍스트는 `tools/slack_tools.to_slack_mrkdwn()`로 `**볼드**`→`*볼드*` 정규화. 온톨로지 관계타입은 `_relation_label()`(한국어), 번호섹션 엔티티는 `_is_noise_relation()`로 렌더 제외, 문서는 uri 있으면 `<uri|제목>` 링크. 담당자/참석자 이름은 `_resolve_attendee_names` 리졸버 통일(폴백=전체 이메일, localpart 금지).
 

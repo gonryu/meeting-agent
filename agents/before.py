@@ -503,6 +503,22 @@ def _resolve_attendee_names(attendees: list[dict], user_id: str, slack_client) -
     return names
 
 
+def _build_person_targets(attendees: list[dict], user_id: str, slack_client) -> list[dict]:
+    """외부 참석자(사내 도메인 제외)의 표시명/검색키 분리.
+    표시명: 헤더와 동일 리졸버(displayName→Slack→Contacts→전체이메일).
+    검색키: research_person 인자용(이름 또는 이메일 localpart)."""
+    internal = _internal_domains_set() if "_internal_domains_set" in globals() else set(
+        os.getenv("INTERNAL_DOMAINS", "parametacorp.com,iconloop.com").split(","))
+    external = [a for a in attendees
+                if a.get("email", "").split("@")[-1] not in internal]
+    display_names = _resolve_attendee_names(external, user_id, slack_client)
+    targets = []
+    for a, disp in zip(external, display_names):
+        search = a.get("name") or a.get("email", "").split("@")[0]
+        targets.append({"name": disp, "search": search})
+    return targets
+
+
 def _find_name_in_contacts(creds, email: str) -> str | None:
     """Google 주소록(People API)에서 이메일로 이름 검색"""
     try:
@@ -1523,22 +1539,19 @@ def _run_briefing_research(
               blocks=company_blocks, text=f"🏢 {company_name} 업체 정보")
 
         # 2. 인물 리서치 (순차적으로 각 인물 완료 시 발송) — 내부 도메인 제외
-        _internal_domains = set(
-            os.getenv("INTERNAL_DOMAINS", "parametacorp.com,iconloop.com").split(","))
-        person_names = [a.get("name") or a.get("email", "").split("@")[0]
-                        for a in meeting.get("attendees", [])
-                        if a.get("email", "").split("@")[-1] not in _internal_domains]
+        targets = _build_person_targets(meeting.get("attendees", []), user_id, slack_client)
         persons_info: list[dict] = []
-        for name in person_names[:3]:
+        for t in targets[:3]:
+            disp, search = t["name"], t["search"]
             progress_resp = _post(slack_client, user_id=user_id, channel=channel, thread_ts=thread_ts,
-                  text=f"👤 *{name}* 인물 리서치 중...")
+                  text=f"👤 *{disp}* 인물 리서치 중...")
             progress_ts = progress_resp.get("ts") if progress_resp else None
             try:
-                info, _ = research_person(user_id, name, company_name)
+                info, _ = research_person(user_id, search, company_name)
             except Exception:
                 info = ""
-            persons_info.append({"name": name, "raw": info,
-                                 "meetings": _person_meetings(user_id, name)})
+            persons_info.append({"name": disp, "raw": info,
+                                 "meetings": _person_meetings(user_id, search)})
             # 진행 메시지 삭제
             if progress_ts:
                 try:
@@ -1557,6 +1570,7 @@ def _run_briefing_research(
         progress_resp = _post(slack_client, user_id=user_id, channel=channel, thread_ts=thread_ts,
               text="📨 이전 커뮤니케이션 맥락 조회 중...")
         progress_ts = progress_resp.get("ts") if progress_resp else None
+        person_names = [t["search"] for t in targets]
         context = get_previous_context(user_id, company_name, person_names)
 
         if not context.get("emails") and drive_emails:

@@ -42,8 +42,21 @@ class TestPureHelpers:
         ], "documents": [{"id": "doc/1", "title": "KOMSA 마케팅 계획"}]}
         out = ont._normalize_cluster(cluster, "entity/komsa")
         assert out["entity_count"] == 2
-        assert {"relation": "related-to", "title": "KCA"} in out["relations"]
+        assert {"relation": "related-to", "title": "KCA", "hop": 1} in out["relations"]
         assert out["documents"][0]["title"] == "KOMSA 마케팅 계획"
+
+
+class TestNormalizeNoiseFilter:
+    def test_drops_numbered_section_and_keeps_hop(self):
+        cluster = {"seed": "entity/komsa", "entities": [
+            {"slug": "entity/kca", "via": "related-to", "title": "KISA 공공과제", "hop": 1},
+            {"slug": "entity/n", "via": "instance-of", "title": "01. Cluster 구성하기", "hop": 2},
+        ], "documents": []}
+        out = ont._normalize_cluster(cluster, "entity/komsa")
+        titles = [r["title"] for r in out["relations"]]
+        assert "KISA 공공과제" in titles
+        assert "01. Cluster 구성하기" not in titles   # 번호섹션 노이즈 제거
+        assert out["relations"][0]["hop"] == 1         # hop 보존
 
 
 def _mock_transport():

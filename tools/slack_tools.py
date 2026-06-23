@@ -152,6 +152,37 @@ def _strip_display_markdown(text: str) -> str:
     return text
 
 
+_KO_RELATION = {
+    "part-of": "소속", "related-to": "관련", "uses": "활용",
+    "depends-on": "의존", "implements": "구현", "instance-of": "유형",
+    "alias-of": "별칭", "mentioned": "언급", "supersedes": "대체",
+}
+_NOISE_RE = re.compile(r"^\s*\d{1,4}[.\s]")
+_DOC_EXT_RE = re.compile(r"\.(pdf|pptx?|xlsx?|docx?|md|csv|txt)$", re.IGNORECASE)
+
+
+def _relation_label(rel: str) -> str:
+    """온톨로지 관계타입 영어→한국어. 미매핑은 원문 유지."""
+    return _KO_RELATION.get((rel or "").strip().lower(), rel or "")
+
+
+def _is_noise_relation(title: str) -> bool:
+    """번호섹션 제목(01. …, 0102. …)은 그래프 노이즈로 렌더 제외."""
+    return bool(_NOISE_RE.match(title or ""))
+
+
+def _doc_label(title: str) -> str:
+    """문서 제목 표시용 — 끝 확장자만 제거(과한 정리 금지)."""
+    return _DOC_EXT_RE.sub("", (title or "").strip())
+
+
+def to_slack_mrkdwn(text):
+    """Markdown 볼드(**x**)를 Slack mrkdwn(*x*)로. None/빈값 안전, 단일 *는 보존."""
+    if not text:
+        return text
+    return re.sub(r"\*\*(.+?)\*\*", r"*\1*", text)
+
+
 def _format_news_line_for_slack(news: str) -> str:
     news = _strip_display_markdown(news)
     if not news:
@@ -276,10 +307,19 @@ def build_company_research_block(
     elif ontology and (ontology.get("relations") or ontology.get("documents")):
         lines.append("")
         lines.append("🧠  *온톨로지(사내 지식)*")
-        for r in (ontology.get("relations") or [])[:6]:
-            lines.append(f"• {r.get('relation')}: {r.get('title')}")
+        _shown = 0
+        for r in (ontology.get("relations") or []):
+            title = r.get("title", "")
+            if _is_noise_relation(title):
+                continue
+            lines.append(f"• {_relation_label(r.get('relation'))}: {title}")
+            _shown += 1
+            if _shown >= 6:
+                break
         for d in (ontology.get("documents") or [])[:5]:
-            lines.append(f"• 문서: {d.get('title')}")
+            label = _doc_label(d.get("title", ""))
+            uri = d.get("uri")
+            lines.append(f"• 문서: <{uri}|{label}>" if uri else f"• 문서: {label}")
 
     if trello_summary or trello_url or trello_card_name:
         lines.append("")
@@ -381,10 +421,19 @@ def build_context_block(context: dict) -> list[dict]:
     if onto and (onto.get("relations") or onto.get("documents")):
         lines.append("")
         lines.append("🔗  *온톨로지(사내 지식)*")
-        for r in (onto.get("relations") or [])[:6]:
-            lines.append(f"   • {r.get('relation')}: {r.get('title')}")
+        _shown = 0
+        for r in (onto.get("relations") or []):
+            title = r.get("title", "")
+            if _is_noise_relation(title):
+                continue
+            lines.append(f"   • {_relation_label(r.get('relation'))}: {title}")
+            _shown += 1
+            if _shown >= 6:
+                break
         for d in (onto.get("documents") or [])[:5]:
-            lines.append(f"   • 문서: {d.get('title')}")
+            label = _doc_label(d.get("title", ""))
+            uri = d.get("uri")
+            lines.append(f"   • 문서: <{uri}|{label}>" if uri else f"   • 문서: {label}")
 
     return [{"type": "section", "text": {"type": "mrkdwn", "text": "\n".join(lines)}}]
 
