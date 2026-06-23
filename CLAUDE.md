@@ -341,6 +341,8 @@ cd frontend && ./serve.sh           # http://localhost:3030 → config.js의 BAC
 
 `_infer_company_from_title()`은 LLM에 업체명 추론을 요청할 때, 추론 불가 시 `NONE`만 반환하도록 프롬프트에 명시. 설명문 반환 방지.
 
+**업체 추론 폴백 (온톨로지)**: extendedProperties→LLM 제목추론→참석자 역추론이 모두 실패하면, 게이팅 사용자에 한해 `tools/ontology.detect_company_in_title`이 제목 토큰을 `entity_find`로 검증해 **exact + organization** 엔티티(예: KISA·이데일리·과기부)면 관련 업체로 태깅. 6ixgo(내부작업)·기술·인물·자사팀(denylist)은 배제. 결과는 extendedProperties에 캐시되어 다음 조회 시 재사용.
+
 ### 회의록 생성 — 소스 & 플로우
 
 **입력 소스 (4가지):**
