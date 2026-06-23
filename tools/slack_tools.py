@@ -307,10 +307,19 @@ def build_company_research_block(
     elif ontology and (ontology.get("relations") or ontology.get("documents")):
         lines.append("")
         lines.append("🧠  *온톨로지(사내 지식)*")
-        for r in (ontology.get("relations") or [])[:6]:
-            lines.append(f"• {r.get('relation')}: {r.get('title')}")
+        _shown = 0
+        for r in (ontology.get("relations") or []):
+            title = r.get("title", "")
+            if _is_noise_relation(title):
+                continue
+            lines.append(f"• {_relation_label(r.get('relation'))}: {title}")
+            _shown += 1
+            if _shown >= 6:
+                break
         for d in (ontology.get("documents") or [])[:5]:
-            lines.append(f"• 문서: {d.get('title')}")
+            label = _doc_label(d.get("title", ""))
+            uri = d.get("uri")
+            lines.append(f"• 문서: <{uri}|{label}>" if uri else f"• 문서: {label}")
 
     if trello_summary or trello_url or trello_card_name:
         lines.append("")
@@ -412,10 +421,19 @@ def build_context_block(context: dict) -> list[dict]:
     if onto and (onto.get("relations") or onto.get("documents")):
         lines.append("")
         lines.append("🔗  *온톨로지(사내 지식)*")
-        for r in (onto.get("relations") or [])[:6]:
-            lines.append(f"   • {r.get('relation')}: {r.get('title')}")
+        _shown = 0
+        for r in (onto.get("relations") or []):
+            title = r.get("title", "")
+            if _is_noise_relation(title):
+                continue
+            lines.append(f"   • {_relation_label(r.get('relation'))}: {title}")
+            _shown += 1
+            if _shown >= 6:
+                break
         for d in (onto.get("documents") or [])[:5]:
-            lines.append(f"   • 문서: {d.get('title')}")
+            label = _doc_label(d.get("title", ""))
+            uri = d.get("uri")
+            lines.append(f"   • 문서: <{uri}|{label}>" if uri else f"   • 문서: {label}")
 
     return [{"type": "section", "text": {"type": "mrkdwn", "text": "\n".join(lines)}}]
 
