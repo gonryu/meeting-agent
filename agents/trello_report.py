@@ -25,6 +25,7 @@ import urllib3
 from agents import weekly_report_orchestrator
 from store import user_store
 from tools import drive
+from tools.slack_tools import to_slack_mrkdwn
 
 log = logging.getLogger(__name__)
 
@@ -899,6 +900,9 @@ def send_weekly_report(slack_client, user_id: str | None = None,
             data["since"], data["until"], data["next_start"], data["next_end"],
             doc_url=doc_url,
         )
+
+    # Slack mrkdwn 정규화(** → *) — Docs 상세본(docs_md)은 정식 Markdown이라 제외
+    slack_text = to_slack_mrkdwn(slack_text)
 
     target = channel or _REPORT_CHANNEL
     posted = False
