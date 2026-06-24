@@ -5,6 +5,7 @@ news_relevance.py 패턴: 자체 anthropic 클라이언트 + 템플릿 핫리로
 """
 import logging
 import os
+import re
 from pathlib import Path
 
 import anthropic
@@ -75,11 +76,25 @@ def synthesize_company_brief(company: str, sources: dict) -> str | None:
         return brief
 
 
+# 온톨로지 스니펫 앞의 출처 신뢰도 마커(> ⚠️ UNCERTAIN — confidence: 0.55 등)는
+# LLM을 "내용 불확실"로 오해시켜 메타-코멘트를 유발 → 합성 전 제거.
+_PROVENANCE_RE = re.compile(r"^\s*>.*confidence.*$", re.IGNORECASE | re.MULTILINE)
+# 합성 결과가 요약 대신 메타-코멘트(미래 약속)로 도망간 경우 감지 → 폐기.
+_META_KEYWORDS = ("스니펫", "완성 후", "정리하겠", "향후", "확보하면", "불완전", "제공하겠")
+
+
+def _clean_snippet(text: str) -> str:
+    """스니펫에서 출처 신뢰도 마커·선두 인용부호 제거."""
+    t = _PROVENANCE_RE.sub("", text or "")
+    t = re.sub(r"^\s*>\s?", "", t, flags=re.MULTILINE)  # 남은 인용 '> ' 제거
+    return t.strip()
+
+
 def _fmt_snippets(docs: list) -> str:
     out = []
     for d in (docs or []):
         ym = f" ({d['ym']})" if d.get("ym") else ""
-        out.append(f"- {d.get('title','')}{ym}: {d.get('snippet','')}")
+        out.append(f"- {d.get('title','')}{ym}: {_clean_snippet(d.get('snippet',''))}")
     return "\n".join(out)
 
 
@@ -101,6 +116,10 @@ def synthesize_recent_situation(company: str, recent: dict) -> dict | None:
         log.warning(f"브리핑 온톨로지 라이트 합성 실패({company}): {e}")
         return None
     if not summary:
+        return None
+    # 메타-코멘트(요약 대신 "스니펫 불완전/완성 후 제공" 류)면 폐기 → 호출부가 폴백/생략
+    if any(kw in summary for kw in _META_KEYWORDS):
+        log.warning(f"브리핑 온톨로지 합성이 메타-코멘트 반환({company}), 폐기")
         return None
     links = [{"title": d.get("title", ""), "uri": d.get("uri", "")}
              for d in docs[:3] if d.get("uri")]

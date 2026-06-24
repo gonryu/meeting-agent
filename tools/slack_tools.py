@@ -334,13 +334,8 @@ def build_company_research_block(
             if cleaned:
                 lines.append(f"• {cleaned}")
 
-    if update_lines:
-        lines.append("")
-        lines.append("🧭  *업데이트 체크*")
-        for item in update_lines[:3]:
-            cleaned = _strip_display_markdown(item)
-            if cleaned:
-                lines.append(f"• {cleaned}")
+    # 🧭 업데이트 체크: 리서치 워크플로우 상태(언제 갱신했나)는 내부 부기라 사용자
+    # 브리핑에 노출하지 않는다. update_lines 인자는 하위호환 위해 유지(wiki 저장은 별도).
 
     return [{"type": "section", "text": {"type": "mrkdwn", "text": "\n".join(lines)}}]
 
