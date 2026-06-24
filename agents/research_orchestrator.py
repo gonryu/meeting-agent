@@ -188,15 +188,17 @@ def run_company_research(*, company_name: str, knowledge_md: str = "",
     # NEWS-DIAG: trend 원본 미리보기 (동향 공백 원인 추적용)
     log.info(f"NEWS-DIAG trend_md({company_name}) {len(trend_md)}자: {trend_md[:300]!r}")
 
-    # raw 동향 불릿(flat 뉴스) 단계에서 관련성 판정 — judge_news가 기대하는 형식.
-    # 태그는 붙이지 않아(add_tags=False) 이후 구조화 synthesis를 오염시키지 않음.
+    # 동향 = '이 회사의 최근 활동' 섹션 → 시세/김프/광고 등 명백한 노이즈만 컷.
+    # 파라메타 사업 관련성 강제는 하지 않는다(그건 '서비스 연결점' 섹션이 담당).
+    # 동명타사는 검색 프롬프트(trend_signals)가 이미 배제. judge_news의 strict LLM
+    # 등급판정을 동향에 걸면 회사 본업 뉴스(예: KISA 보안)가 전부 탈락하므로 제외.
     try:
         from agents import news_relevance
-        trend_md = news_relevance.judge_news(company_name, trend_md, add_tags=False)
+        trend_md = news_relevance._negative_fast_cut(trend_md)
     except Exception as e:
-        log.warning(f"동향 관련성 판정 실패, 원본 사용 ({company_name}): {e}")
+        log.warning(f"동향 fast-cut 실패, 원본 사용 ({company_name}): {e}")
 
-    # NEWS-DIAG: judge_news 후 미리보기 (다 걸렀으면 _NO_INFO만 남음)
+    # NEWS-DIAG: fast-cut 후 미리보기
     log.info(f"NEWS-DIAG post-judge({company_name}) {len(trend_md)}자: {trend_md[:300]!r}")
 
     overview_md = _company_synthesis(
