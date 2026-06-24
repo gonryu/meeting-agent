@@ -129,8 +129,10 @@ def deep_company_ontology(user_id: str, company_name: str) -> str | None:
 
 
 def briefing_ontology_summary(user_id: str, company_name: str, title: str) -> dict | None:
-    """브리핑용 라이트 온톨로지 — 제목 목적 기반 최근상황 프로즈+링크.
-    게이팅·실패·미등록 시 None(호출부가 구조화 cluster로 폴백)."""
+    """브리핑용 라이트 온톨로지 — 제목 목적 기반 최근상황 프로즈+링크 + 미팅 문서.
+    게이팅·실패·미등록 시 None(호출부가 구조화 cluster로 폴백).
+    Returns: {summary: str|None, docs: [{title,uri}], meetings: [{title,uri,ym}]}.
+    summary는 합성 실패/메타-코멘트 시 None이지만 meetings는 그대로 제공(이전맥락용)."""
     if not _ontology_enabled(user_id):
         return None
     try:
@@ -140,7 +142,15 @@ def briefing_ontology_summary(user_id: str, company_name: str, title: str) -> di
         recent = ontology.recent_company_docs(user_id, company_name, focus)
         if not recent or not recent.get("docs"):
             return None
-        return ontology_synth.synthesize_recent_situation(company_name, recent)
+        synth = ontology_synth.synthesize_recent_situation(company_name, recent) or {}
+        # 미팅성 문서(회의/미팅/인터뷰/간담회·날짜)만 이전맥락용으로 추림
+        meetings = [
+            {"title": d.get("title", ""), "uri": d.get("uri", ""), "ym": d.get("ym", "")}
+            for d in recent["docs"]
+            if d.get("uri") and ontology._is_meeting_title(d.get("title", ""))
+        ][:3]
+        return {"summary": synth.get("summary"), "docs": synth.get("docs", []),
+                "meetings": meetings}
     except Exception as oe:
         from tools import ontology as _ot
         if isinstance(oe, _ot.OntologyAuthError):
@@ -1615,11 +1625,15 @@ def _run_briefing_research(
                 from tools import ontology
                 recent = briefing_ontology_summary(user_id, company_name, meeting.get("summary", ""))
                 if recent and recent.get("summary"):
-                    context["ontology_recent"] = recent
+                    context["ontology_recent"] = {"summary": recent["summary"],
+                                                  "docs": recent.get("docs", [])}
                 else:
                     onto = ontology.company_context(user_id, company_name, recent=True)
                     if onto and (onto.get("relations") or onto.get("documents")):
                         context["ontology"] = onto
+                # 이전 미팅 맥락에 온톨로지 미팅 문서 주입(프로즈 성공 여부와 무관)
+                if recent and recent.get("meetings"):
+                    context["ontology_meetings"] = recent["meetings"]
             except Exception as oe:
                 from tools import ontology as _ot
                 if isinstance(oe, _ot.OntologyAuthError):

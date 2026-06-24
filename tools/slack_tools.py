@@ -398,7 +398,14 @@ def build_context_block(context: dict) -> list[dict]:
         link = f"https://drive.google.com/file/d/{file_id}/view" if file_id else ""
         link_str = f" <{link}|열기>" if link else ""
         lines.append(f"• 회의록: {name} ({modified}){link_str}")
-    if not trello_items and not trello_summary and not minutes:
+    ontology_meetings = context.get("ontology_meetings", [])
+    for mt in ontology_meetings[:3]:
+        title = _doc_label(mt.get("title", ""))
+        uri = mt.get("uri", "")
+        ym = f" ({mt['ym']})" if mt.get("ym") else ""
+        label = f"<{uri}|{title}>" if uri else title
+        lines.append(f"• 미팅 기록: {label}{ym}")
+    if not trello_items and not trello_summary and not minutes and not ontology_meetings:
         lines.append("• 이전 미팅 기록 없음")
 
     lines.append("")
