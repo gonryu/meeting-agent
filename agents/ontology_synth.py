@@ -78,7 +78,9 @@ def synthesize_company_brief(company: str, sources: dict) -> str | None:
 
 # 온톨로지 스니펫 앞의 출처 신뢰도 마커(> ⚠️ UNCERTAIN — confidence: 0.55 등)는
 # LLM을 "내용 불확실"로 오해시켜 메타-코멘트를 유발 → 합성 전 제거.
-_PROVENANCE_RE = re.compile(r"^\s*>.*confidence.*$", re.IGNORECASE | re.MULTILINE)
+# 출처 신뢰도 마커 접두부만 제거(">"~"confidence: 0.55"). 같은 줄 뒤 본문은 보존.
+# (document_search 스니펫은 마커와 본문이 한 줄이라, 줄 끝까지 지우면 본문이 날아감.)
+_PROVENANCE_RE = re.compile(r">[^\n]*?confidence:\s*[0-9.]+", re.IGNORECASE)
 # 합성 결과가 요약 대신 메타-코멘트(미래 약속)로 도망간 경우 감지 → 폐기.
 _META_KEYWORDS = ("스니펫", "완성 후", "정리하겠", "향후", "확보하면", "불완전", "제공하겠")
 
