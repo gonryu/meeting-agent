@@ -111,14 +111,22 @@ def _company_ontology(user_id: str, company_name: str) -> dict | None:
         return None
 
 
-def deep_company_ontology(user_id: str, company_name: str) -> str | None:
-    """게이팅된 사용자 대상 딥 리서치 — 출처기반 합성 브리핑(마크다운) 반환.
-    비활성/토큰없음/출처없음/실패 시 None(호출부가 라이트로 폴백). 렌더 전용(위키 미저장)."""
+def deep_company_ontology(user_id: str, company_name: str, is_media: bool = False) -> str | None:
+    """게이팅된 사용자 대상 온톨로지 합성(마크다운). 렌더 전용(위키 미저장).
+    is_media(언론사)면 사업 딥 리서치 대신 **우리 미팅 로그**만 라이트 합성(클리핑 배제).
+    비활성/토큰없음/출처없음/실패 시 None(호출부가 라이트로 폴백)."""
     if not _ontology_enabled(user_id):
         return None
     try:
         from tools import ontology
         from agents import ontology_synth
+        if is_media:
+            # 언론사: 사업 리서치 무의미 → 우리가 한 미팅 로그(인터뷰)만 라이트 합성
+            meetings = ontology.company_meeting_docs(user_id, company_name)
+            if not meetings or not meetings.get("docs"):
+                return None
+            res = ontology_synth.synthesize_recent_situation(company_name, meetings)
+            return (res or {}).get("summary")
         sources = ontology.company_research_sources(user_id, company_name)
         if not sources or not sources.get("docs"):
             return None
