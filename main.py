@@ -1197,8 +1197,15 @@ def _post_company_research_result(client, *, user_id: str, company: str,
         log.warning(f"Trello 기업정보 컨텍스트 조회 실패 ({company}): {e}")
         trello_summary = [f"조회 실패: {str(e)[:120]}"]
 
-    # 온톨로지 — 게이팅 사용자는 딥 리서치 브리핑(합성), 실패 시 라이트 cluster 폴백
-    onto_brief = before_agent.deep_company_ontology(user_id, company)
+    # 온톨로지 — 게이팅 사용자는 딥 리서치 브리핑(합성), 실패 시 라이트 cluster 폴백.
+    # 언론사(media)면 사업 리서치 대신 우리 미팅 로그만(클리핑 배제).
+    _is_media = False
+    try:
+        _fm, _ = before_agent._drive_parse_frontmatter(content or "")
+        _is_media = (_fm.get("company_type") == "media")
+    except Exception:
+        _is_media = False
+    onto_brief = before_agent.deep_company_ontology(user_id, company, is_media=_is_media)
     onto = None if onto_brief else before_agent._company_ontology(user_id, company)
 
     blocks = before_agent.build_company_research_block(

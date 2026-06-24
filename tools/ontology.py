@@ -270,6 +270,16 @@ def _is_meeting_title(title: str) -> bool:
     return bool(_MEETING_RE.search(t) or _MEETING_DATE_RE.search(t))
 
 
+# 미팅 '로그' 엄격 판정 — 미팅 키워드 필수(날짜만으론 안 됨).
+# "20260213_파라메타, ADB 발표" 같은 기사 클리핑(날짜+헤드라인)을 배제하기 위함.
+_MEETING_LOG_RE = re.compile(r"(회의|미팅|인터뷰|interview|회의록|간담회|논의|워크숍|workshop)", re.I)
+
+
+def _is_meeting_log_title(title: str) -> bool:
+    """우리 미팅 로그(회의/인터뷰/간담회)인지 — 키워드 필수. 날짜-only 클리핑 제외."""
+    return bool(_MEETING_LOG_RE.search(title or ""))
+
+
 def person_context(user_id: str, person_name: str) -> dict | None:
     """인물명 → entity_find → entity_cluster → 미팅이력 추출.
     토큰 없으면 None. OntologyAuthError는 호출부로 올림. seed 없으면 빈 구조.
@@ -321,9 +331,9 @@ def company_research_sources(user_id: str, company_name: str, max_docs: int = 6)
             "seed": slug, "depth": 2, "include_documents": True,
             "limit_entities": 40, "limit_documents": 30, "time_range": _recent_range(12)})
     norm = _normalize_cluster(cluster, slug)
-    # R1: 업체 직접 연결 문서만 (matched에 seed 포함)
-    connected = [d for d in norm["documents"] if slug in (d.get("matched") or [])]
-    pool = connected or norm["documents"]  # 연결문서 0이면 전체에서라도
+    # R1(엄격): 업체 직접 연결 문서만 (matched에 seed 포함). 폴백 없음 —
+    # 연결 0개면 빈 docs(person 혼동으로 딸려온 타 문서·클리핑보다 '없음'이 안전).
+    pool = [d for d in norm["documents"] if slug in (d.get("matched") or [])]
     pool = sorted(pool, key=lambda d: (_doc_priority(d.get("title", "")),
                                        -_ym_key(d.get("ym", ""))))[:max_docs]
     docs = []
@@ -373,6 +383,36 @@ def recent_company_docs(user_id: str, company_name: str, focus_query: str,
         if not connected or not snippet:
             continue
         docs.append({"title": r.get("title", ""), "snippet": snippet,
+                     "uri": r.get("source_uri") or "", "ym": r.get("ym") or ""})
+        if len(docs) >= max_docs:
+            break
+    return {"slug": slug, "docs": docs}
+
+
+def company_meeting_docs(user_id: str, company_name: str, max_docs: int = 4) -> dict | None:
+    """우리가 이 업체와 한 '미팅 로그'만 — media 등 비대상 업체용(클리핑 배제).
+    document_search(업체명·score순) → 회사-직접연결 AND 미팅 키워드 제목 + snippet.
+    cluster+time_range가 인터뷰를 놓치므로 document_search 경로 사용. 토큰 없으면 None."""
+    token = user_store.get_ontology_token(user_id)
+    if not token:
+        return None
+    with OntologyClient(token) as oc:
+        find = oc.call_tool("entity_find", {"name": company_name, "limit": 5})
+        slug = _best_slug(find)
+        if not slug:
+            return {"slug": None, "docs": []}
+        res = oc.call_tool("document_search", {
+            "query": company_name, "seed_entity": slug, "mode": "hybrid",
+            "sort_by": "score", "top_k": 10})
+    results = res.get("results", []) if isinstance(res, dict) else []
+    docs = []
+    for r in results:
+        connected = r.get("min_hop") == 0 or slug in (r.get("matched_via_entities") or [])
+        title = r.get("title", "")
+        snippet = (r.get("snippet") or "").strip()
+        if not connected or not snippet or not _is_meeting_log_title(title):
+            continue  # 회사-직접연결 + 미팅 로그(키워드)만 — 클리핑·person경유 배제
+        docs.append({"title": title, "snippet": snippet,
                      "uri": r.get("source_uri") or "", "ym": r.get("ym") or ""})
         if len(docs) >= max_docs:
             break
