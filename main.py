@@ -1178,6 +1178,8 @@ def _post_company_research_result(client, *, user_id: str, company: str,
     news_lines, parascope_lines, connection_lines, _emails, update_lines = (
         before_agent._extract_company_content_sections(content)
     )
+    # NEWS-DIAG: 추출된 최종 news_lines (동향 공백 추적용)
+    log.info(f"NEWS-DIAG extract news_lines({company}) n={len(news_lines)}: {news_lines}")
     trello_summary: list[str] = []
     trello_card_name = ""
     trello_url = ""

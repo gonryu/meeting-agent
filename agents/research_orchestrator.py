@@ -185,6 +185,9 @@ def run_company_research(*, company_name: str, knowledge_md: str = "",
         f"trend_chars={len(trend_md)})"
     )
 
+    # NEWS-DIAG: trend 원본 미리보기 (동향 공백 원인 추적용)
+    log.info(f"NEWS-DIAG trend_md({company_name}) {len(trend_md)}자: {trend_md[:300]!r}")
+
     # raw 동향 불릿(flat 뉴스) 단계에서 관련성 판정 — judge_news가 기대하는 형식.
     # 태그는 붙이지 않아(add_tags=False) 이후 구조화 synthesis를 오염시키지 않음.
     try:
@@ -192,6 +195,9 @@ def run_company_research(*, company_name: str, knowledge_md: str = "",
         trend_md = news_relevance.judge_news(company_name, trend_md, add_tags=False)
     except Exception as e:
         log.warning(f"동향 관련성 판정 실패, 원본 사용 ({company_name}): {e}")
+
+    # NEWS-DIAG: judge_news 후 미리보기 (다 걸렀으면 _NO_INFO만 남음)
+    log.info(f"NEWS-DIAG post-judge({company_name}) {len(trend_md)}자: {trend_md[:300]!r}")
 
     final_md = _company_synthesis(
         company_name=company_name, today=today,
