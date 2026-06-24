@@ -324,6 +324,10 @@ cd frontend && ./serve.sh           # http://localhost:3030 → config.js의 BAC
 
 **업체 리서치 시 내부 메모 보존:** `research_company()`는 `## 최근 동향`, `## 이메일 맥락`, `## 파라메타 서비스 연결점`, `## ParaScope` 섹션만 갱신하고, `## 내부 메모` 등 리서치 대상이 아닌 섹션은 그대로 유지합니다.
 
+### 업체 타입 분류 (언론사 등 비대상)
+
+`research_company`는 재리서치 시 `_classify_company_type()`(Haiku 1회)로 업체를 `prospect|media|investor|partner|public_agency|other`로 분류하고 wiki frontmatter `company_type`에 캐시(재분류 안 함). **`media`(언론사)면 뉴스 리서치를 스킵**(web_search/오케스트레이터 호출 안 함)하고 **서비스 연결점 대신 `_MEDIA_CONNECTION_MSG`("언론사로 분류되어 … 연결점은 해당하지 않습니다")** 고정 문구를 넣습니다. 분류 실패 시 `other`(정상 경로).
+
 ### 업체 뉴스 관련성 판정
 
 업체 리서치의 `## 최근 동향`은 web_search 결과를 **사후 판정**해 관련 기사만 남깁니다.
