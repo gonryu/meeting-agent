@@ -735,6 +735,34 @@ def _fallback_service_connections(company_context: str) -> str:
     return "\n".join(lines[:3])
 
 
+_COMPANY_TYPES = ("prospect", "media", "investor", "partner", "public_agency", "other")
+_MEDIA_CONNECTION_MSG = "언론사로 분류되어 파라메타 서비스 연결점은 해당하지 않습니다."
+
+
+def _classify_company_type(company_name: str) -> str:
+    """업체 타입 1회 분류(Haiku). media면 뉴스·연결점 스킵(#1/#2). 실패 시 other(정상 경로)."""
+    prompt = (
+        f"다음 조직의 유형을 후보 중 한 단어(영문 소문자)로만 분류하라. "
+        f"후보: {', '.join(_COMPANY_TYPES)}.\n"
+        "- media: 언론사·신문·방송·뉴스 매체 (예: 이데일리, 연합뉴스, 블로터)\n"
+        "- investor: VC·투자사·자산운용\n"
+        "- public_agency: 정부·공공기관·협회\n"
+        "- partner: 협력사·컨소시엄 파트너\n"
+        "- prospect: 잠재 고객사·사업 대상 기업\n"
+        "- other: 위에 명확히 해당 없음\n\n"
+        f"조직: {company_name}\n한 단어로만 답하라:"
+    )
+    try:
+        raw = _generate(prompt).strip().lower()
+    except Exception as e:
+        log.warning(f"업체 타입 분류 실패({company_name}): {e}")
+        return "other"
+    for t in _COMPANY_TYPES:
+        if t != "other" and t in raw:
+            return t
+    return "other"
+
+
 def _build_service_connections(company_context: str, knowledge: str) -> str:
     generated = _to_bullet_lines(_generate(service_connection_prompt(company_context, knowledge)))
     kept = [
@@ -849,6 +877,16 @@ def research_company(user_id: str, company_name: str, force: bool = False) -> tu
 
     today = datetime.now().strftime("%Y-%m-%d")
 
+    # C(#1/#2): 업체 타입 분류 (캐시 우선). media(언론사)면 뉴스·연결점 스킵.
+    _early_fm = {}
+    if content:
+        try:
+            _early_fm, _ = _drive_parse_frontmatter(content)
+        except Exception:
+            _early_fm = {}
+    company_type = _early_fm.get("company_type") or _classify_company_type(company_name)
+    is_media = company_type == "media"
+
     # 1단계: ParaScope 봇 조회 (보류 — 2026-04-08)
     parascope_section = ""
 
@@ -868,7 +906,7 @@ def research_company(user_id: str, company_name: str, force: bool = False) -> tu
     used_orchestrator = False
     try:
         from agents import research_orchestrator as _ro
-        if _ro.is_enabled():
+        if not is_media and _ro.is_enabled():
             gmail_excerpt = email_section if email_section else ""
             news_text = _ro.run_company_research(
                 company_name=company_name,
@@ -880,7 +918,7 @@ def research_company(user_id: str, company_name: str, force: bool = False) -> tu
         log.warning(f"업체 리서치 오케스트레이터 실패, 단일 호출로 폴백 ({company_name}): {e}")
         news_text = ""
 
-    if not used_orchestrator:
+    if not used_orchestrator and not is_media:
         news_text = _to_bullet_lines(_search(company_news_prompt(company_name)))
         # 단일 호출 경로만: flat 뉴스 불릿 관련성 사후 판정 (생성기 불신).
         # 오케스트레이터 산출물(구조화 synthesis)은 동향 불릿 단계에서 이미
@@ -907,7 +945,10 @@ def research_company(user_id: str, company_name: str, force: bool = False) -> tu
     company_context_for_connections = "\n\n".join(
         part for part in (news_text, email_section, trello_section) if part.strip()
     )
-    connections = _build_service_connections(company_context_for_connections, knowledge)
+    if is_media:
+        connections = f"- {_MEDIA_CONNECTION_MSG}"  # 언론사는 서비스 연결점 해당 없음(#2)
+    else:
+        connections = _build_service_connections(company_context_for_connections, knowledge)
     update_check_lines = _build_update_check_lines(content, today, used_orchestrator)
 
     # CM-09: 이메일 섹션에 출처 태그 추가
@@ -962,6 +1003,7 @@ def research_company(user_id: str, company_name: str, force: bool = False) -> tu
         "type": "wiki",
         "stage": "wiki",
         "status": existing_fm.get("status") or "active",
+        "company_type": company_type,  # 재분류 없이 캐시 재사용(#1/#2)
     }
     if not existing_fm.get("tags"):
         fm_updates["tags"] = ["wiki", "active"]
