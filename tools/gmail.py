@@ -67,6 +67,34 @@ def _is_calendar_notification(headers: dict, snippet: str = "") -> bool:
                for pattern in _CALENDAR_NOTIFICATION_PATTERNS)
 
 
+# 브리핑 이메일 맥락에 가치 없는 자동/광고 메일 패턴
+_WORTHLESS_FROM_RE = re.compile(
+    r"no-?reply|do-?not-?reply|googlealerts|mailer-daemon|newsletter@|marketing@|notifications?@",
+    re.IGNORECASE,
+)
+_WORTHLESS_SUBJECT_PATTERNS = ("google 알리미", "google alert", "[광고]", "newsletter")
+_WORTHLESS_SNIPPET_PATTERNS = ("구독 해지", "구독해지", "수신거부", "unsubscribe")
+
+
+def _is_worthless_email(headers: dict, snippet: str = "") -> bool:
+    """브리핑 맥락에서 제외할 무가치 메일 — 캘린더 알림 + Google 알리미·noreply·광고/뉴스레터.
+    사람이 주고받은 메일만 남기는 것이 목적. best-effort(헤더 없으면 통과)."""
+    if _is_calendar_notification(headers, snippet):
+        return True
+    sender = (headers.get("From", "") + " " + headers.get("Sender", "")).lower()
+    if _WORTHLESS_FROM_RE.search(sender):
+        return True
+    if headers.get("List-Unsubscribe"):  # 대량 발송/뉴스레터 표준 헤더
+        return True
+    subject = headers.get("Subject", "").lower()
+    if any(p in subject for p in _WORTHLESS_SUBJECT_PATTERNS):
+        return True
+    sn = (snippet or "").lower()
+    if any(p in sn for p in _WORTHLESS_SNIPPET_PATTERNS):
+        return True
+    return False
+
+
 def parse_address_header(header_value: str) -> list[dict]:
     """'이름 <email>' 또는 'email' 형식의 헤더에서 [{name, email}] 추출"""
     results = []
@@ -223,7 +251,7 @@ def search_recent_emails(creds: Credentials, person_name: str,
         ).execute()
 
         headers = {h["name"]: h["value"] for h in detail.get("payload", {}).get("headers", [])}
-        if _is_calendar_notification(headers, detail.get("snippet", "")):
+        if _is_worthless_email(headers, detail.get("snippet", "")):
             continue
         date_str = headers.get("Date", "")
         subject = headers.get("Subject", "(제목 없음)")
