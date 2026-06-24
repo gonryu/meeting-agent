@@ -1416,7 +1416,10 @@ def _extract_company_content_sections(company_content: str) -> tuple[list[str], 
     news_section_lines: list[str] = []
     in_news = False
     for line in company_content.splitlines():
-        if "최근 동향" in line and line.strip().startswith("#"):
+        # 섹션 시작은 레벨2 '## 최근 동향'만 (이미 in_news면 재트리거 안 함).
+        # '### 최근 동향' 하위헤더를 삼키면 trend 하위섹션 격리가 깨져
+        # 개요 불릿(산업 위치 등)이 뉴스로 오추출되므로 여기서 잡지 않는다.
+        if not in_news and line.strip().startswith("## ") and "최근 동향" in line:
             in_news = True
             continue
         if in_news:

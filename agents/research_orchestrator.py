@@ -199,11 +199,16 @@ def run_company_research(*, company_name: str, knowledge_md: str = "",
     # NEWS-DIAG: judge_news 후 미리보기 (다 걸렀으면 _NO_INFO만 남음)
     log.info(f"NEWS-DIAG post-judge({company_name}) {len(trend_md)}자: {trend_md[:300]!r}")
 
-    final_md = _company_synthesis(
+    overview_md = _company_synthesis(
         company_name=company_name, today=today,
         industry=industry, competitor=competitor,
         trend_md=trend_md, gmail_context=gmail_context,
     )
+    # 최근 동향은 Sonnet이 복사하길 기대하지 않고 trend_md를 결정론적으로 배치
+    # (### 하위헤더 + URL 보존 → 추출/렌더가 안정적으로 뉴스를 잡음).
+    trend_body = (trend_md or "").strip() or "- 최근 공개된 정보 없음"
+    final_md = (overview_md.rstrip()
+                + f"\n\n### 최근 동향 ({today} 기준)\n{trend_body}")
     t2 = datetime.now()
     log.info(
         f"  [4/4] synthesis 완료 ({(t2-t1).total_seconds():.1f}s) "
