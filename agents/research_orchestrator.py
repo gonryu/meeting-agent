@@ -158,6 +158,26 @@ def _company_synthesis(*, company_name: str, today: str,
     return _call_llm(prompt, model=_SONNET, max_tokens=3072)
 
 
+def _trend_relevance(company_name: str, trend_md: str) -> str:
+    """동향을 파라메타 사업분야 렌즈로 판정 — 도메인 겹치는 활동만 유지(미팅 포인트).
+    시세/광고는 fast-cut 선제거 후, Haiku가 도메인 교집합 항목만 남김. best-effort."""
+    try:
+        from agents import news_relevance
+        cut = news_relevance._negative_fast_cut(trend_md or "")
+    except Exception:
+        cut = trend_md or ""
+    if not cut.strip() or "정보 없음" in cut:
+        return cut
+    try:
+        prompt = _render(_load_template("company", "trend_relevance.md"),
+                         company=company_name, trend_md=cut)
+        out = _call_llm(prompt, model=_HAIKU, max_tokens=1024).strip()
+        return out or cut
+    except Exception as e:
+        log.warning(f"동향 도메인 판정 실패, fast-cut 결과 사용 ({company_name}): {e}")
+        return cut
+
+
 def run_company_research(*, company_name: str, knowledge_md: str = "",
                           gmail_context: str = "") -> str:
     """업체 리서치 다단계 파이프라인. Returns: `## 최근 동향` 섹션 본문 마크다운.
@@ -185,21 +205,11 @@ def run_company_research(*, company_name: str, knowledge_md: str = "",
         f"trend_chars={len(trend_md)})"
     )
 
-    # NEWS-DIAG: trend 원본 미리보기 (동향 공백 원인 추적용)
-    log.info(f"NEWS-DIAG trend_md({company_name}) {len(trend_md)}자: {trend_md[:300]!r}")
+    # 동향 = '파라메타 사업분야 렌즈로 본 이 회사의 최근 활동 + 미팅 포인트'.
+    # 시세/광고 fast-cut → 파라메타 도메인과 겹치는 활동만 유지(strict 직접연결 아님,
+    # 전체 PR 아님). KISA 보안체계·AI보안=유지, K-브랜드/IP·인사=제외.
+    trend_md = _trend_relevance(company_name, trend_md)
 
-    # 동향 = '이 회사의 최근 활동' 섹션 → 시세/김프/광고 등 명백한 노이즈만 컷.
-    # 파라메타 사업 관련성 강제는 하지 않는다(그건 '서비스 연결점' 섹션이 담당).
-    # 동명타사는 검색 프롬프트(trend_signals)가 이미 배제. judge_news의 strict LLM
-    # 등급판정을 동향에 걸면 회사 본업 뉴스(예: KISA 보안)가 전부 탈락하므로 제외.
-    try:
-        from agents import news_relevance
-        trend_md = news_relevance._negative_fast_cut(trend_md)
-    except Exception as e:
-        log.warning(f"동향 fast-cut 실패, 원본 사용 ({company_name}): {e}")
-
-    # NEWS-DIAG: fast-cut 후 미리보기
-    log.info(f"NEWS-DIAG post-judge({company_name}) {len(trend_md)}자: {trend_md[:300]!r}")
 
     overview_md = _company_synthesis(
         company_name=company_name, today=today,
