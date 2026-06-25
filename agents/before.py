@@ -1498,8 +1498,14 @@ def _extract_company_content_sections(company_content: str) -> tuple[list[str], 
             if url_m:
                 url = url_m.group(0).rstrip(')').rstrip('.')
                 break
+        # 요약(썰): 불릿 본문에서 제목 볼드·URL·마커 제거한 설명 — 동향에 맥락 제공
+        desc = " ".join(block_lines)
+        desc = re.sub(r'\*\*\[?.+?\]?\*\*', '', desc, count=1)  # 제목 볼드 제거
+        desc = re.sub(r'https?://\S+', '', desc)               # URL 제거
+        desc = re.sub(r'^\s*[-•]\s*', '', desc).strip(' :：()-—').strip()
         if title:
-            news_lines.append(f"{title} ({url})" if url else title)
+            body = f"{title} — {desc}" if (desc and desc != title) else title
+            news_lines.append(f"{body} ({url})" if url else body)
 
     # ParaScope 섹션 추출
     parascope_lines: list[str] = []

@@ -617,9 +617,10 @@ class TestCompanyResearchSectionExtraction:
             before._extract_company_content_sections(content)
         )
 
+        # 제목 + 요약(썰) 보존 — 개요('산업 위치'·'시장 포지션')는 제외, 실제 동향만
         assert news_lines == [
-            "다날, 원화 스테이블코인 결제 실증 추진 (https://example.com/stablecoin)",
-            "다날 DID 인증 적용 (https://example.com/did)",
+            "다날, 원화 스테이블코인 결제 실증 추진 — 결제 인프라 연계 (https://example.com/stablecoin)",
+            "다날 DID 인증 적용 — 외국인 결제 인증 관련 (https://example.com/did)",
         ]
         assert not any("산업 위치" in line for line in news_lines)
         assert connection_lines == ["**MyID**: DID 인증 연계"]
