@@ -1501,8 +1501,12 @@ def _extract_company_content_sections(company_content: str) -> tuple[list[str], 
         # 요약(썰): 불릿 본문에서 제목 볼드·URL·마커 제거한 설명 — 동향에 맥락 제공
         desc = " ".join(block_lines)
         desc = re.sub(r'\*\*\[?.+?\]?\*\*', '', desc, count=1)  # 제목 볼드 제거
-        desc = re.sub(r'https?://\S+', '', desc)               # URL 제거
-        desc = re.sub(r'^\s*[-•]\s*', '', desc).strip(' :：()-—').strip()
+        desc = re.sub(r'https?://[^\s)]+', '', desc)           # URL 제거(닫는 괄호 보존)
+        # URL 제거 후 괄호 잔해 정리: "(날짜, )" → "(날짜)"(날짜 보존), 빈/안닫힌 괄호 제거
+        desc = re.sub(r',\s*\)', ')', desc)
+        desc = re.sub(r'\(\s*\)', '', desc)
+        desc = re.sub(r'\([^)]*$', '', desc)
+        desc = re.sub(r'^\s*[-•]\s*', '', desc).strip(' :：—,').strip()
         if title:
             body = f"{title} — {desc}" if (desc and desc != title) else title
             news_lines.append(f"{body} ({url})" if url else body)
