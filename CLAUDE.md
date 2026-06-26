@@ -337,6 +337,10 @@ cd frontend && ./serve.sh           # http://localhost:3030 → config.js의 BAC
 - `research_company`가 오케스트레이터/단일 두 경로 공통으로 호출. 동명 타사는 검색 프롬프트(`company_news.md`/`trend_signals.md`)에서 배제.
 - 품질 평가: `tests/eval_news_relevance.py --mode {oracle|stub|haiku|sonnet}` (라벨별 P/R/F1 + confusion matrix). 골든셋 `tests/golden/news_relevance.jsonl`.
 
+### 회사리서치 구조화 (스트랭글러, 진행중)
+
+회사리서치/렌더의 '마크다운 손실 왕복'(구조화 dict→문자열→정규식 재파싱, fix-one-break-another의 근본 원인)을 끊는 중. `agents/research_types.py`의 `CompanyResearch`/`NewsItem` 구조화 객체를 단일 진실로 흐르게 하고, 마크다운은 `to_markdown()` 한 방향 방출(저장)·렌더는 객체 직접 소비로 전환. 파싱은 `parse_trend_bullets` 한 곳에서만. 단계: **0 타입/파서(완료)** → 1 `run_company_research`가 객체 생성·`to_markdown` 직렬화(외부 불변) → 2 렌더 객체화(`STRUCTURED_RENDER` 플래그, 추출기 폴백) → 3 판정 단일화(골든셋 게이트) → 4 추출기·`_format_news_line_for_slack`·`_RESEARCH_HEADERS` 제거(폴백 0회 입증 후). 설계/계획: `docs/superpowers/specs/2026-06-26-architecture-audit-company-research.md`, `docs/superpowers/plans/2026-06-26-company-research-structured-stage0.md`.
+
 ### 제안서 워크플로우
 
 `agents/proposal.py`가 회의 기반 제안서 개요·초안을 생성합니다. 개요/초안 각각 Slack 스레드에서 수정 가능합니다. 프롬프트 템플릿: `prompts/templates/proposal_intake.md`, `proposal_generate.md`.
