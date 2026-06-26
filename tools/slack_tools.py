@@ -223,6 +223,23 @@ def _format_news_line_for_slack(news: str) -> str:
     return f"<{url}|{title}>"
 
 
+def _format_news_item_for_slack(item: dict) -> str:
+    """구조화 뉴스 항목(dict: title/summary/url) → Slack 줄. 정규식 재파싱 없음.
+
+    제목을 링크로, 요약(썰)을 뒤에 붙인다: `<url|제목> — 요약`. URL 없으면 `제목 — 요약`.
+    단계2: NewsItem.title/.summary/.url을 직접 소비 — _format_news_line_for_slack 우회."""
+    title = _strip_display_markdown((item.get("title") or "")).strip()
+    summary = _strip_display_markdown((item.get("summary") or "")).strip()
+    url = (item.get("url") or "").strip()
+    if not title and not summary:
+        return ""
+    label = title or summary[:60] or "기사 보기"
+    head = f"<{url}|{label}>" if url else label
+    if summary and summary != title:
+        return f"{head} — {summary}"
+    return head
+
+
 _LOW_VALUE_CONNECTION_PATTERNS = (
     "명확한 접점 없음",
     "서비스 영역 차이",
@@ -253,6 +270,7 @@ def build_company_research_block(
     trello_url: str = "",
     ontology: dict | None = None,
     ontology_brief: str | None = None,
+    news_items: list[dict] | None = None,
 ) -> list[dict]:
     """업체 뉴스 + ParaScope + 서비스 연결점 블록 (리서치 완료 후 발송).
 
@@ -272,12 +290,21 @@ def build_company_research_block(
         lines.append("")
 
     lines.append("📰  *업체 동향*")
-    formatted_news = [
-        formatted for formatted in (
-            _format_news_line_for_slack(n) for n in news_lines if not _is_preamble(n)
-        )
-        if formatted
-    ]
+    if news_items is not None:
+        # 단계2: 구조화 항목 직접 렌더 (정규식 우회)
+        formatted_news = [
+            formatted for formatted in (
+                _format_news_item_for_slack(it) for it in news_items
+            )
+            if formatted
+        ]
+    else:
+        formatted_news = [
+            formatted for formatted in (
+                _format_news_line_for_slack(n) for n in news_lines if not _is_preamble(n)
+            )
+            if formatted
+        ]
     if formatted_news:
         for news in formatted_news[:3]:
             lines.append(f"• {news}")

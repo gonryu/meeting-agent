@@ -339,7 +339,7 @@ cd frontend && ./serve.sh           # http://localhost:3030 → config.js의 BAC
 
 ### 회사리서치 구조화 (스트랭글러, 진행중)
 
-회사리서치/렌더의 '마크다운 손실 왕복'(구조화 dict→문자열→정규식 재파싱, fix-one-break-another의 근본 원인)을 끊는 중. `agents/research_types.py`의 `CompanyResearch`/`NewsItem` 구조화 객체를 단일 진실로 흐르게 하고, 마크다운은 `to_markdown()` 한 방향 방출(저장)·렌더는 객체 직접 소비로 전환. 파싱은 `parse_trend_bullets` 한 곳에서만. 단계: **0 타입/파서(완료)** → 1 `run_company_research`가 객체 생성·`to_markdown` 직렬화(외부 불변) → 2 렌더 객체화(`STRUCTURED_RENDER` 플래그, 추출기 폴백) → 3 판정 단일화(골든셋 게이트) → 4 추출기·`_format_news_line_for_slack`·`_RESEARCH_HEADERS` 제거(폴백 0회 입증 후). 설계/계획: `docs/superpowers/specs/2026-06-26-architecture-audit-company-research.md`, `docs/superpowers/plans/2026-06-26-company-research-structured-stage0.md`.
+회사리서치/렌더의 '마크다운 손실 왕복'(구조화 dict→문자열→정규식 재파싱, fix-one-break-another의 근본 원인)을 끊는 중. `agents/research_types.py`의 `CompanyResearch`/`NewsItem` 구조화 객체를 단일 진실로 흐르게 하고, 마크다운은 `to_markdown()` 한 방향 방출(저장)·렌더는 객체 직접 소비로 전환. 파싱은 `parse_trend_bullets` 한 곳에서만. 단계: **0 타입/파서(완료)** → **1 `run_company_research`가 CompanyResearch 객체 반환·`render_company_news_block` 직렬화(완료, 외부 불변)** → **2 렌더 객체화(완료 — `extract_news_items` 단일 파서 + NewsItem 직접 렌더, `STRUCTURED_RENDER` 플래그 기본 ON, 구조화 0건+레거시 비0건이면 레거시 폴백)** → 3 판정 단일화(골든셋 게이트) → 4 추출기·`_format_news_line_for_slack`·`_RESEARCH_HEADERS` 제거(폴백 0회 입증 후). 뉴스→Slack 렌더는 `tools/slack_tools._format_news_item_for_slack`(`<url\|제목> — 썰`). 설계/계획: `docs/superpowers/specs/2026-06-26-architecture-audit-company-research.md`, `docs/superpowers/plans/2026-06-26-company-research-structured-stage0.md`.
 
 ### 제안서 워크플로우
 

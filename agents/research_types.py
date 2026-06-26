@@ -90,6 +90,39 @@ def _news_to_md(items: list[NewsItem]) -> str:
     return "\n".join(lines)
 
 
+def extract_news_items(wiki_content: str) -> list[NewsItem]:
+    """위키 `## 최근 동향` 섹션의 `### 최근 동향` 하위섹션 불릿을 NewsItem으로 추출.
+
+    단일 파서(parse_trend_bullets)를 재사용 — 렌더 시점에 _extract의 뉴스 정규식을
+    대체한다. 개요 불릿(산업 위치 등 `### 최근 동향` 이전)은 배제한다."""
+    section: list[str] = []
+    in_news = False
+    for line in (wiki_content or "").splitlines():
+        s = line.strip()
+        if not in_news and s.startswith("## ") and "최근 동향" in s:
+            in_news = True
+            continue
+        if in_news:
+            if s.startswith("## ") and "최근 동향" not in s:
+                break
+            section.append(line)
+    # '### 최근 동향' 하위헤더가 있으면 그 이후 불릿만(개요 불릿 배제)
+    trend: list[str] = []
+    found_sub = False
+    for line in section:
+        s = line.strip()
+        if s.startswith("#") and "최근 동향" in s:
+            found_sub = True
+            trend = []
+            continue
+        if found_sub and s.startswith("#"):
+            break
+        if found_sub:
+            trend.append(line)
+    body = "\n".join(trend if found_sub else section)
+    return parse_trend_bullets(body)
+
+
 def render_company_news_block(r: CompanyResearch) -> str:
     """오케스트레이터 산출물(개요 + 최근 동향)을 위키 `## 최근 동향` 본문으로 직렬화.
 

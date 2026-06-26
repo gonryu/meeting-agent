@@ -1410,6 +1410,12 @@ def run_briefing(slack_client, user_id: str, event: dict = None,
     return sent_threads
 
 
+def _structured_render_enabled() -> bool:
+    """단계2: 구조화 뉴스 렌더 토글. 기본 ON(STRUCTURED_RENDER=false로 끔).
+    켜져 있어도 방어적 폴백(구조화 0건+레거시 비0건 → 레거시)으로 회귀를 막는다."""
+    return os.getenv("STRUCTURED_RENDER", "true").lower() != "false"
+
+
 def _extract_company_content_sections(company_content: str) -> tuple[list[str], list[str], list[str], list[dict], list[str]]:
     """업체 Drive 파일에서 뉴스·ParaScope·연결점·이메일 섹션을 추출.
     Returns: (news_lines, parascope_lines, connection_lines, drive_emails)
@@ -1640,8 +1646,26 @@ def _run_briefing_research(
             _extract_company_content_sections(company_content)
         log.info(f"news_lines ({company_name}): {news_lines}")
 
+        # 단계2: 구조화 뉴스 렌더 (단일 파서 extract_news_items → NewsItem 직접 렌더로
+        # _extract 뉴스 정규식 + _format_news_line_for_slack 우회). 방어적 폴백:
+        # 구조화 0건인데 레거시가 찾았으면 레거시 유지(회귀 방지). divergence 로깅.
+        news_items = None
+        if _structured_render_enabled():
+            try:
+                from agents import research_types as _rt
+                items = _rt.extract_news_items(company_content)
+                if len(items) != len(news_lines):
+                    log.info(f"[STRUCTURED_RENDER] {company_name}: "
+                             f"structured={len(items)} legacy={len(news_lines)}")
+                if items or not news_lines:
+                    news_items = [{"title": n.title, "summary": n.summary, "url": n.url}
+                                  for n in items]
+            except Exception as e:
+                log.warning(f"구조화 뉴스 추출 실패, 레거시 렌더 폴백 ({company_name}): {e}")
+
         company_blocks = build_company_research_block(
-            company_name, news_lines, parascope_lines, connection_lines, update_lines
+            company_name, news_lines, parascope_lines, connection_lines, update_lines,
+            news_items=news_items,
         )
         _post(slack_client, user_id=user_id, channel=channel, thread_ts=thread_ts,
               blocks=company_blocks, text=f"🏢 {company_name} 업체 정보")

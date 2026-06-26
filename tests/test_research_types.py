@@ -112,6 +112,34 @@ class TestStage1NewsBlock:
         assert any("N2SF 도입" in n for n in news_lines)
 
 
+class TestStage2ExtractNewsItems:
+    """단계2: 위키 '### 최근 동향' 하위섹션을 단일 파서로 NewsItem 추출 (개요 불릿 배제)."""
+
+    _WIKI = (
+        "---\ntitle: KISA\n---\n# KISA\n\n## 최근 동향\n- last_searched: 2026-06-25\n"
+        "- **산업 위치**: 정보보호 전문기관 (개요 불릿 — 뉴스 아님)\n"
+        "### 최근 동향 (2026-06-25 기준)\n"
+        "- **[N2SF 도입 본격화]**: KISA가 N2SF 공공 확산에 예산 투입 (https://kisa.or.kr/n)\n"
+        "- **[BCMD 교육생 모집]**: 블록체인 인력 양성 (https://kisa.or.kr/b)\n\n"
+        "## 이메일 맥락\n- 2026-06-01 | 협의\n"
+    )
+
+    def test_isolates_trend_subsection(self):
+        from agents.research_types import extract_news_items
+        items = extract_news_items(self._WIKI)
+        titles = [n.title for n in items]
+        assert "N2SF 도입 본격화" in titles
+        assert "BCMD 교육생 모집" in titles
+        assert not any("산업 위치" in t for t in titles)   # 개요 불릿 배제
+        assert items[0].summary and items[0].url
+
+    def test_no_trend_subsection_empty(self):
+        from agents.research_types import extract_news_items
+        wiki = ("# X\n\n## 최근 동향\n- last_searched: 2026-06-25\n"
+                "### 최근 동향 (2026-06-25 기준)\n- 파라메타 사업 맥락의 최근 공개 정보 없음\n\n## 이메일 맥락\n")
+        assert extract_news_items(wiki) == []
+
+
 class TestStage1Orchestrator:
     """단계1: run_company_research가 CompanyResearch 객체를 반환."""
 
