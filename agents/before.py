@@ -1416,6 +1416,30 @@ def _structured_render_enabled() -> bool:
     return os.getenv("STRUCTURED_RENDER", "true").lower() != "false"
 
 
+def _structured_news_items(company_content: str, news_lines: list[str],
+                           label: str = "") -> list[dict] | None:
+    """단계2: 위키 `### 최근 동향`을 단일 파서로 NewsItem 추출 → 렌더용 dict 리스트.
+
+    build_company_research_block의 news_items 인자로 전달해 _extract 뉴스 정규식 +
+    _format_news_line_for_slack를 우회한다(브리핑·온디맨드 렌더 공통). 반환 None이면
+    레거시 news_lines 경로 사용. 방어적 폴백: 플래그 OFF거나 (구조화 0건 + 레거시 비0건)
+    이면 None — 구조화는 커버리지를 더할 뿐 뺄 수 없다. divergence는 로깅."""
+    if not _structured_render_enabled():
+        return None
+    try:
+        from agents import research_types as _rt
+        items = _rt.extract_news_items(company_content or "")
+        if len(items) != len(news_lines):
+            log.info(f"[STRUCTURED_RENDER] {label}: "
+                     f"structured={len(items)} legacy={len(news_lines)}")
+        if items or not news_lines:
+            return [{"title": n.title, "summary": n.summary, "url": n.url}
+                    for n in items]
+    except Exception as e:
+        log.warning(f"구조화 뉴스 추출 실패, 레거시 렌더 폴백 ({label}): {e}")
+    return None
+
+
 def _extract_company_content_sections(company_content: str) -> tuple[list[str], list[str], list[str], list[dict], list[str]]:
     """업체 Drive 파일에서 뉴스·ParaScope·연결점·이메일 섹션을 추출.
     Returns: (news_lines, parascope_lines, connection_lines, drive_emails)
@@ -1646,23 +1670,8 @@ def _run_briefing_research(
             _extract_company_content_sections(company_content)
         log.info(f"news_lines ({company_name}): {news_lines}")
 
-        # 단계2: 구조화 뉴스 렌더 (단일 파서 extract_news_items → NewsItem 직접 렌더로
-        # _extract 뉴스 정규식 + _format_news_line_for_slack 우회). 방어적 폴백:
-        # 구조화 0건인데 레거시가 찾았으면 레거시 유지(회귀 방지). divergence 로깅.
-        news_items = None
-        if _structured_render_enabled():
-            try:
-                from agents import research_types as _rt
-                items = _rt.extract_news_items(company_content)
-                if len(items) != len(news_lines):
-                    log.info(f"[STRUCTURED_RENDER] {company_name}: "
-                             f"structured={len(items)} legacy={len(news_lines)}")
-                if items or not news_lines:
-                    news_items = [{"title": n.title, "summary": n.summary, "url": n.url}
-                                  for n in items]
-            except Exception as e:
-                log.warning(f"구조화 뉴스 추출 실패, 레거시 렌더 폴백 ({company_name}): {e}")
-
+        # 단계2: 구조화 뉴스 렌더 (단일 파서 → NewsItem 직접 렌더, _extract 정규식 우회).
+        news_items = _structured_news_items(company_content, news_lines, company_name)
         company_blocks = build_company_research_block(
             company_name, news_lines, parascope_lines, connection_lines, update_lines,
             news_items=news_items,

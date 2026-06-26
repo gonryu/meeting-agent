@@ -1208,6 +1208,8 @@ def _post_company_research_result(client, *, user_id: str, company: str,
     onto_brief = before_agent.deep_company_ontology(user_id, company, is_media=_is_media)
     onto = None if onto_brief else before_agent._company_ontology(user_id, company)
 
+    # 단계2: 구조화 뉴스 렌더 (브리핑 경로와 공통 헬퍼). None이면 레거시 폴백.
+    news_items = before_agent._structured_news_items(content or "", news_lines, company)
     blocks = before_agent.build_company_research_block(
         company,
         news_lines,
@@ -1219,6 +1221,7 @@ def _post_company_research_result(client, *, user_id: str, company: str,
         trello_url,
         ontology=onto,
         ontology_brief=onto_brief,
+        news_items=news_items,
     )
     client.chat_postMessage(
         channel=channel or user_id,

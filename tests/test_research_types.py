@@ -152,6 +152,43 @@ class TestStage2ExtractNewsItems:
         assert items[0].url == "https://x.com/sto"
 
 
+class TestStructuredNewsItemsHelper:
+    """단계2: 공통 헬퍼 _structured_news_items — 플래그·방어적 폴백."""
+
+    _WIKI = ("# KISA\n\n## 최근 동향\n- last_searched: 2026-06-25\n"
+             "### 최근 동향 (2026-06-25 기준)\n"
+             "- **[N2SF 도입]**: 공공 확산 (https://kisa.or.kr/n)\n\n## 이메일 맥락\n")
+
+    def test_returns_dicts_when_news_present(self, monkeypatch):
+        import agents.before as before
+        monkeypatch.delenv("STRUCTURED_RENDER", raising=False)
+        out = before._structured_news_items(self._WIKI, news_lines=["x"], label="KISA")
+        assert out is not None and out[0]["title"] == "N2SF 도입"
+        assert out[0]["url"] == "https://kisa.or.kr/n"
+
+    def test_fallback_when_structured_empty_but_legacy_found(self, monkeypatch):
+        # 구조화 0건 + 레거시 비0건 → None(레거시 유지, 회귀 방지)
+        import agents.before as before
+        monkeypatch.delenv("STRUCTURED_RENDER", raising=False)
+        wiki_no_trend = "# X\n\n## 최근 동향\n- last_searched: 2026-06-25\n\n## 이메일 맥락\n"
+        out = before._structured_news_items(wiki_no_trend, news_lines=["레거시가 찾은 뉴스"], label="X")
+        assert out is None
+
+    def test_empty_list_when_both_empty(self, monkeypatch):
+        # 구조화 0건 + 레거시 0건 → [] ('정보 없음' 렌더, None 아님)
+        import agents.before as before
+        monkeypatch.delenv("STRUCTURED_RENDER", raising=False)
+        wiki_no_trend = "# X\n\n## 최근 동향\n- last_searched: 2026-06-25\n\n## 이메일 맥락\n"
+        out = before._structured_news_items(wiki_no_trend, news_lines=[], label="X")
+        assert out == []
+
+    def test_flag_off_returns_none(self, monkeypatch):
+        import agents.before as before
+        monkeypatch.setenv("STRUCTURED_RENDER", "false")
+        out = before._structured_news_items(self._WIKI, news_lines=["x"], label="KISA")
+        assert out is None
+
+
 class TestStage1Orchestrator:
     """단계1: run_company_research가 CompanyResearch 객체를 반환."""
 
