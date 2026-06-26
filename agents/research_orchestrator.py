@@ -158,26 +158,6 @@ def _company_synthesis(*, company_name: str, today: str,
     return _call_llm(prompt, model=_SONNET, max_tokens=3072)
 
 
-def _trend_relevance(company_name: str, trend_md: str) -> str:
-    """동향을 파라메타 사업분야 렌즈로 판정 — 도메인 겹치는 활동만 유지(미팅 포인트).
-    시세/광고는 fast-cut 선제거 후, Haiku가 도메인 교집합 항목만 남김. best-effort."""
-    try:
-        from agents import news_relevance
-        cut = news_relevance._negative_fast_cut(trend_md or "")
-    except Exception:
-        cut = trend_md or ""
-    if not cut.strip() or "정보 없음" in cut:
-        return cut
-    try:
-        prompt = _render(_load_template("company", "trend_relevance.md"),
-                         company=company_name, trend_md=cut)
-        out = _call_llm(prompt, model=_HAIKU, max_tokens=1024).strip()
-        return out or cut
-    except Exception as e:
-        log.warning(f"동향 도메인 판정 실패, fast-cut 결과 사용 ({company_name}): {e}")
-        return cut
-
-
 def run_company_research(*, company_name: str, knowledge_md: str = "",
                           gmail_context: str = "") -> "CompanyResearch":
     """업체 리서치 다단계 파이프라인. Returns: CompanyResearch 구조화 객체.
@@ -208,22 +188,26 @@ def run_company_research(*, company_name: str, knowledge_md: str = "",
     )
 
     # 동향 = '파라메타 사업분야 렌즈로 본 이 회사의 최근 활동 + 미팅 포인트'.
-    # 시세/광고 fast-cut → 파라메타 도메인과 겹치는 활동만 유지(strict 직접연결 아님,
-    # 전체 PR 아님). KISA 보안체계·AI보안=유지, K-브랜드/IP·인사=제외.
-    trend_md = _trend_relevance(company_name, trend_md)
-
+    # 단계3: trend_md를 NewsItem으로 파싱(URL 포함) → judge로 도메인 필터(재작성 없이
+    # keep/drop만 → URL 구조적 보존). _trend_relevance(재작성 판정, URL 유실)를 대체.
+    # KISA 보안체계·AI보안=유지, K-브랜드/IP·인사·시세=제외(trend_judge.md).
+    from agents import news_relevance
+    news_items = news_relevance.judge(parse_trend_bullets(trend_md), company_name)
+    # synthesis 개요는 판정 통과 동향을 컨텍스트로(시세/무관 항목 제외, URL 불필요)
+    judged_trend_md = "\n".join(
+        f"- **[{n.title}]**: {n.summary}".rstrip() for n in news_items
+    ) or "최근 공개된 정보 없음"
 
     overview_md = _company_synthesis(
         company_name=company_name, today=today,
         industry=industry, competitor=competitor,
-        trend_md=trend_md, gmail_context=gmail_context,
+        trend_md=judged_trend_md, gmail_context=gmail_context,
     )
-    # 동향 불릿을 NewsItem으로 구조화(파싱은 parse_trend_bullets 한 곳에서만).
     # 개요(Sonnet 합성)는 표시 전용 마크다운으로 보존 — 재파싱하지 않는다.
     research = CompanyResearch(
         company_name=company_name,
         overview=overview_md,
-        news=parse_trend_bullets(trend_md),
+        news=news_items,
         searched_at=today,
     )
     t2 = datetime.now()
