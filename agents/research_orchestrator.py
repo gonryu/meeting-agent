@@ -179,12 +179,14 @@ def _trend_relevance(company_name: str, trend_md: str) -> str:
 
 
 def run_company_research(*, company_name: str, knowledge_md: str = "",
-                          gmail_context: str = "") -> str:
-    """업체 리서치 다단계 파이프라인. Returns: `## 최근 동향` 섹션 본문 마크다운.
+                          gmail_context: str = "") -> "CompanyResearch":
+    """업체 리서치 다단계 파이프라인. Returns: CompanyResearch 구조화 객체.
 
-    호출부(before.py.research_company)는 이 결과를 기존 `news_text` 자리에 삽입한다.
+    호출부(before.py.research_company)는 research_types.render_company_news_block()로
+    `## 최근 동향` 본문 문자열을 만들어 기존 news_text 자리에 삽입한다(전환기 단계1).
     Raises: 단계 실패 시. 호출부가 캐치하여 기존 단일 호출 경로로 폴백.
     """
+    from agents.research_types import CompanyResearch, parse_trend_bullets
     log.info(f"Research Orchestrator (company) 시작: {company_name}")
     t0 = datetime.now()
     today = datetime.now().strftime("%Y-%m-%d")
@@ -216,17 +218,21 @@ def run_company_research(*, company_name: str, knowledge_md: str = "",
         industry=industry, competitor=competitor,
         trend_md=trend_md, gmail_context=gmail_context,
     )
-    # 최근 동향은 Sonnet이 복사하길 기대하지 않고 trend_md를 결정론적으로 배치
-    # (### 하위헤더 + URL 보존 → 추출/렌더가 안정적으로 뉴스를 잡음).
-    trend_body = (trend_md or "").strip() or "- 최근 공개된 정보 없음"
-    final_md = (overview_md.rstrip()
-                + f"\n\n### 최근 동향 ({today} 기준)\n{trend_body}")
+    # 동향 불릿을 NewsItem으로 구조화(파싱은 parse_trend_bullets 한 곳에서만).
+    # 개요(Sonnet 합성)는 표시 전용 마크다운으로 보존 — 재파싱하지 않는다.
+    research = CompanyResearch(
+        company_name=company_name,
+        overview=overview_md,
+        news=parse_trend_bullets(trend_md),
+        searched_at=today,
+    )
     t2 = datetime.now()
     log.info(
         f"  [4/4] synthesis 완료 ({(t2-t1).total_seconds():.1f}s) "
-        f"— 총 {(t2-t0).total_seconds():.1f}s, {len(final_md):,}자"
+        f"— 총 {(t2-t0).total_seconds():.1f}s, "
+        f"overview={len(overview_md):,}자, news={len(research.news)}건"
     )
-    return final_md
+    return research
 
 
 # ── 인물 리서치 단계 ──────────────────────────────────────────
