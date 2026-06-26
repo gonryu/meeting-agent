@@ -139,6 +139,18 @@ class TestStage2ExtractNewsItems:
                 "### 최근 동향 (2026-06-25 기준)\n- 파라메타 사업 맥락의 최근 공개 정보 없음\n\n## 이메일 맥락\n")
         assert extract_news_items(wiki) == []
 
+    def test_single_path_shape_skips_bookkeeping_and_source_tag(self):
+        # 단일 경로(웹검색 폴백): ### 하위헤더 없음 + last_searched + 인라인 출처태그
+        from agents.research_types import extract_news_items
+        wiki = ("# 삼성증권\n\n## 최근 동향\n- last_searched: 2026-06-25\n"
+                "- **[STO 플랫폼 출시]**: 토큰증권 베타 오픈 (https://x.com/sto) `[출처: 웹 검색, 2026-06-25]`\n\n"
+                "## 이메일 맥락\n")
+        items = extract_news_items(wiki)
+        assert len(items) == 1
+        assert items[0].title == "STO 플랫폼 출시"
+        assert "출처" not in items[0].summary and "토큰증권 베타 오픈" in items[0].summary
+        assert items[0].url == "https://x.com/sto"
+
 
 class TestStage1Orchestrator:
     """단계1: run_company_research가 CompanyResearch 객체를 반환."""

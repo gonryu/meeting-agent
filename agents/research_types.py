@@ -48,6 +48,8 @@ def parse_trend_bullets(trend_md: str) -> list[NewsItem]:
         if not line.startswith(("- ", "• ")):
             continue
         line = line[2:].strip()
+        # 단일경로(웹검색) 불릿에 붙는 인라인 출처 태그 제거: `[출처: 웹 검색, 날짜]`
+        line = re.sub(r"`?\[출처:[^\]]*\]`?", "", line).strip()
         if not line or "정보 없음" in line:
             continue
         url_m = _URL_RE.search(line)
@@ -105,6 +107,8 @@ def extract_news_items(wiki_content: str) -> list[NewsItem]:
         if in_news:
             if s.startswith("## ") and "최근 동향" not in s:
                 break
+            if "last_searched" in s:   # 부기 라인 — 뉴스 아님(단일경로엔 ### 하위헤더 없음)
+                continue
             section.append(line)
     # '### 최근 동향' 하위헤더가 있으면 그 이후 불릿만(개요 불릿 배제)
     trend: list[str] = []
