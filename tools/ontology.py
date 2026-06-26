@@ -102,6 +102,10 @@ def _normalize_cluster(cluster, slug) -> dict:
     for e in ents:
         via = e.get("via")
         title = e.get("title") or e.get("slug")
+        # instance-of(유형)는 타입 멤버십 — 같은 타입 허브에 매달린 무관한 형제 엔티티가
+        # 2홉으로 딸려와 브리핑 노이즈가 됨(예: 1inch·00은행). 의미 관계만 남긴다.
+        if (via or "").strip().lower().replace("_", "-") == "instance-of":
+            continue
         if via and e.get("slug") != slug and not _is_noise_entity(title):
             relations.append({"relation": via, "title": title, "hop": e.get("hop", 1)})
     relations.sort(key=lambda r: r.get("hop", 1))  # 가까운 관계 우선
