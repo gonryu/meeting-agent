@@ -66,3 +66,66 @@ class TestToMarkdown:
         r = CompanyResearch(company_name="X", searched_at="2026-06-25")
         md = to_markdown(r)
         assert "최근 공개된 정보 없음" in md
+
+
+class TestStage1NewsBlock:
+    """단계1: run_company_research 객체 직렬화가 레거시 final_md와 의미 동등."""
+
+    def test_render_block_matches_legacy_semantics(self):
+        import re
+        from agents.research_types import render_company_news_block
+        overview = "- **산업 위치**: 정보보호 전문기관\n- **경쟁 구도**: 공공 인증기관"
+        trend_md = ("- **[N2SF 도입]**: 공공 확산 (2026.06.17, https://kisa.or.kr/n)\n"
+                    "- **[BCMD 모집]**: 교육생 모집 (https://kisa.or.kr/b)")
+        today = "2026-06-25"
+        # 레거시 경로 재현
+        legacy = overview.rstrip() + f"\n\n### 최근 동향 ({today} 기준)\n{trend_md.strip()}"
+        # 신규 경로 (객체→직렬화)
+        obj = CompanyResearch(company_name="KISA", overview=overview,
+                              news=parse_trend_bullets(trend_md), searched_at=today)
+        new = render_company_news_block(obj)
+        assert "### 최근 동향 (2026-06-25 기준)" in new
+        assert new.startswith("- **산업 위치**")           # 개요 보존
+        # 같은 URL 집합·제목 보존
+        u = lambda s: set(re.findall(r"https?://[^\s)]+", s))
+        assert u(new) == u(legacy)
+        assert "N2SF 도입" in new and "BCMD 모집" in new
+
+    def test_no_news_block_renders_no_info(self):
+        from agents.research_types import render_company_news_block
+        obj = CompanyResearch(company_name="X", overview="개요만",
+                              news=[], searched_at="2026-06-25")
+        out = render_company_news_block(obj)
+        assert out.startswith("개요만")
+        assert "최근 공개된 정보 없음" in out
+
+    def test_roundtrip_through_extractor_preserves_news(self):
+        import agents.before as before
+        from agents.research_types import render_company_news_block
+        trend_md = "- **[N2SF 도입]**: 공공 확산 (https://kisa.or.kr/n)"
+        obj = CompanyResearch(company_name="KISA", overview="개요",
+                              news=parse_trend_bullets(trend_md), searched_at="2026-06-25")
+        news_text = render_company_news_block(obj)
+        wiki = ("---\ntitle: KISA\n---\n# KISA\n\n## 최근 동향\n"
+                f"- last_searched: 2026-06-25\n{news_text}\n\n## 이메일 맥락\n")
+        news_lines, _, _, _, _ = before._extract_company_content_sections(wiki)
+        assert any("N2SF 도입" in n for n in news_lines)
+
+
+class TestStage1Orchestrator:
+    """단계1: run_company_research가 CompanyResearch 객체를 반환."""
+
+    def test_returns_company_research_object(self, monkeypatch):
+        import agents.research_orchestrator as ro
+        monkeypatch.setattr(ro, "_company_industry", lambda *a, **k: {"industry": "보안"})
+        monkeypatch.setattr(ro, "_company_competitors", lambda *a, **k: {"peers": []})
+        monkeypatch.setattr(ro, "_company_trends", lambda *a, **k:
+                            "- **[N2SF 도입]**: 공공 확산 (https://kisa.or.kr/n)")
+        monkeypatch.setattr(ro, "_trend_relevance", lambda c, t: t)
+        monkeypatch.setattr(ro, "_company_synthesis", lambda **k: "- **산업 위치**: 보안기관")
+        out = ro.run_company_research(company_name="KISA")
+        assert isinstance(out, CompanyResearch)
+        assert out.company_name == "KISA"
+        assert out.overview.startswith("- **산업 위치**")
+        assert len(out.news) == 1 and out.news[0].title == "N2SF 도입"
+        assert out.news[0].url == "https://kisa.or.kr/n"

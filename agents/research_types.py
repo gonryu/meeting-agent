@@ -90,6 +90,17 @@ def _news_to_md(items: list[NewsItem]) -> str:
     return "\n".join(lines)
 
 
+def render_company_news_block(r: CompanyResearch) -> str:
+    """오케스트레이터 산출물(개요 + 최근 동향)을 위키 `## 최근 동향` 본문으로 직렬화.
+
+    레거시 run_company_research final_md 포맷과 동등: 개요 마크다운 그대로 +
+    `### 최근 동향 (날짜 기준)` 하위헤더 + 뉴스 불릿. 호출부(before.research_company)는
+    이 문자열을 기존 news_text 자리에 삽입한다(전환기: 위키/저장/렌더 불변)."""
+    head = (r.overview or "").rstrip()
+    block = f"### 최근 동향 ({r.searched_at} 기준)\n{_news_to_md(r.news)}"
+    return (head + "\n\n" + block) if head else block
+
+
 def to_markdown(r: CompanyResearch, preserved_sections: str = "",
                 sources_log_line: str = "") -> str:
     """CompanyResearch → 위키 마크다운 본문(# 헤더부터). 한 방향 방출.

@@ -914,13 +914,16 @@ def research_company(user_id: str, company_name: str, force: bool = False) -> tu
     used_orchestrator = False
     try:
         from agents import research_orchestrator as _ro
+        from agents import research_types as _rt
         if not is_media and _ro.is_enabled():
             gmail_excerpt = email_section if email_section else ""
-            news_text = _ro.run_company_research(
+            research_obj = _ro.run_company_research(
                 company_name=company_name,
                 knowledge_md=knowledge or "",
                 gmail_context=gmail_excerpt,
             )
+            # 단계1: 구조화 객체 → 위키 '## 최근 동향' 본문 직렬화(외부 동작 불변).
+            news_text = _rt.render_company_news_block(research_obj)
             used_orchestrator = True
     except Exception as e:
         log.warning(f"업체 리서치 오케스트레이터 실패, 단일 호출로 폴백 ({company_name}): {e}")
