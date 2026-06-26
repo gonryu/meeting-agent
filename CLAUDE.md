@@ -332,14 +332,15 @@ cd frontend && ./serve.sh           # http://localhost:3030 → config.js의 BAC
 
 업체 리서치의 `## 최근 동향`은 web_search 결과를 **사후 판정**해 관련 기사만 남깁니다.
 
-- `agents/news_relevance.py::judge_news()` — ① negative 정규식 fast-cut(시세/마케팅 무비용 제거) → ② Sonnet(`claude-sonnet-4-5`)이 high/mid/low/exclude 판정 → high·mid만 보존. 등급 판단이라 Sonnet 사용(fast-cut이 쉬운 노이즈를 먼저 거르고 애매한 경계 케이스만 LLM에 도달). **best-effort**: 판정 LLM 실패 시 fast-cut 결과만 통과(절대 '정보 없음' 강제 생성 안 함).
-- 관련성 정의: `prompts/templates/news_relevance.md`(positive/negative/high·low 신호, parameta_radar 발췌·핫리로드·관리자 편집 가능).
-- `research_company`가 오케스트레이터/단일 두 경로 공통으로 호출. 동명 타사는 검색 프롬프트(`company_news.md`/`trend_signals.md`)에서 배제.
+- **구조화 판정 `news_relevance.judge(list[NewsItem], company)` (단계3, 오케스트레이터 경로)** — ① negative fast-cut(시세/광고) → ② Haiku **도메인 렌즈**(`trend_judge.md`)가 유지할 **인덱스만** 반환 → 항목을 **재작성하지 않고** keep/drop + `relevance` 필드만 설정. **URL/제목/요약이 객체 필드라 LLM이 건드릴 경로가 없어 구조적으로 보존**됨(과거 `_trend_relevance`의 재작성 판정이 URL을 유실시키던 문제 해소). 등급(strict)이 아니라 도메인 교집합 판정이라 Haiku(#64 strict 기각 회귀 방지 — #65 도메인 렌즈 계승). best-effort(LLM 실패 시 fast-cut 생존분 통과).
+- `agents/news_relevance.py::judge_news()` (마크다운 경로, **단일 호출 폴백 전용**) — ① fast-cut → ② Sonnet high/mid/low/exclude 등급 → high·mid 보존. 오케스트레이터 비활성/실패 시에만 사용. (단계3b에서 `judge`로 통합 예정 — 현재는 폴백이라 잔존.)
+- 관련성 정의: `prompts/templates/research/company/trend_judge.md`(도메인 렌즈 keep/drop, 핫리로드·편집 가능), `prompts/templates/news_relevance.md`(judge_news 등급, parameta_radar).
+- 동명 타사는 검색 프롬프트(`company_news.md`/`trend_signals.md`) + 판정에서 배제.
 - 품질 평가: `tests/eval_news_relevance.py --mode {oracle|stub|haiku|sonnet}` (라벨별 P/R/F1 + confusion matrix). 골든셋 `tests/golden/news_relevance.jsonl`.
 
 ### 회사리서치 구조화 (스트랭글러, 진행중)
 
-회사리서치/렌더의 '마크다운 손실 왕복'(구조화 dict→문자열→정규식 재파싱, fix-one-break-another의 근본 원인)을 끊는 중. `agents/research_types.py`의 `CompanyResearch`/`NewsItem` 구조화 객체를 단일 진실로 흐르게 하고, 마크다운은 `to_markdown()` 한 방향 방출(저장)·렌더는 객체 직접 소비로 전환. 파싱은 `parse_trend_bullets` 한 곳에서만. 단계: **0 타입/파서(완료)** → **1 `run_company_research`가 CompanyResearch 객체 반환·`render_company_news_block` 직렬화(완료, 외부 불변)** → **2 렌더 객체화(완료 — `extract_news_items` 단일 파서 + NewsItem 직접 렌더, `STRUCTURED_RENDER` 플래그 기본 ON, 구조화 0건+레거시 비0건이면 레거시 폴백)** → 3 판정 단일화(골든셋 게이트) → 4 추출기·`_format_news_line_for_slack`·`_RESEARCH_HEADERS` 제거(폴백 0회 입증 후). 뉴스→Slack 렌더는 `tools/slack_tools._format_news_item_for_slack`(`<url\|제목> — 썰`). 설계/계획: `docs/superpowers/specs/2026-06-26-architecture-audit-company-research.md`, `docs/superpowers/plans/2026-06-26-company-research-structured-stage0.md`.
+회사리서치/렌더의 '마크다운 손실 왕복'(구조화 dict→문자열→정규식 재파싱, fix-one-break-another의 근본 원인)을 끊는 중. `agents/research_types.py`의 `CompanyResearch`/`NewsItem` 구조화 객체를 단일 진실로 흐르게 하고, 마크다운은 `to_markdown()` 한 방향 방출(저장)·렌더는 객체 직접 소비로 전환. 파싱은 `parse_trend_bullets` 한 곳에서만. 단계: **0 타입/파서(완료)** → **1 `run_company_research`가 CompanyResearch 객체 반환·`render_company_news_block` 직렬화(완료, 외부 불변)** → **2 렌더 객체화(완료 — `extract_news_items` 단일 파서 + NewsItem 직접 렌더, `STRUCTURED_RENDER` 플래그 기본 ON, 구조화 0건+레거시 비0건이면 레거시 폴백)** → **3 판정 구조화(완료 — `news_relevance.judge(list[NewsItem])` 도메인 렌즈 keep/drop, URL 구조 보존, `_trend_relevance` 제거. 단일경로 `judge_news` 통합은 3b로 잔존)** → 4 추출기·`_format_news_line_for_slack`·`_RESEARCH_HEADERS` 제거(폴백 0회 입증 후). 뉴스→Slack 렌더는 `tools/slack_tools._format_news_item_for_slack`(`<url\|제목> — 썰`). 설계/계획: `docs/superpowers/specs/2026-06-26-architecture-audit-company-research.md`, `docs/superpowers/plans/2026-06-26-company-research-structured-stage0.md`.
 
 ### 제안서 워크플로우
 

@@ -194,15 +194,18 @@ class TestStage1Orchestrator:
 
     def test_returns_company_research_object(self, monkeypatch):
         import agents.research_orchestrator as ro
+        from agents import news_relevance
         monkeypatch.setattr(ro, "_company_industry", lambda *a, **k: {"industry": "보안"})
         monkeypatch.setattr(ro, "_company_competitors", lambda *a, **k: {"peers": []})
         monkeypatch.setattr(ro, "_company_trends", lambda *a, **k:
                             "- **[N2SF 도입]**: 공공 확산 (https://kisa.or.kr/n)")
-        monkeypatch.setattr(ro, "_trend_relevance", lambda c, t: t)
+        # 단계3: 도메인 judge가 0번 유지(재작성 없이 keep만)
+        monkeypatch.setattr(news_relevance, "_judge_domain_keep",
+                            lambda company, bullets: {0})
         monkeypatch.setattr(ro, "_company_synthesis", lambda **k: "- **산업 위치**: 보안기관")
         out = ro.run_company_research(company_name="KISA")
         assert isinstance(out, CompanyResearch)
         assert out.company_name == "KISA"
         assert out.overview.startswith("- **산업 위치**")
         assert len(out.news) == 1 and out.news[0].title == "N2SF 도입"
-        assert out.news[0].url == "https://kisa.or.kr/n"
+        assert out.news[0].url == "https://kisa.or.kr/n"   # 단계3: URL 구조적 보존

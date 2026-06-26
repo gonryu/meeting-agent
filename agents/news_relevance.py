@@ -125,6 +125,66 @@ JSON만 출력(코드펜스·설명 없이):
             for it in data.get("items", [])}
 
 
+_TREND_JUDGE_TEMPLATE = (Path(__file__).parent.parent / "prompts" / "templates"
+                         / "research" / "company" / "trend_judge.md")
+
+
+def _judge_domain_keep(company_name: str, bullets: list[str]) -> set[int]:
+    """도메인 렌즈로 유지할 항목의 0-based 인덱스 집합 반환(재작성 없음).
+
+    실패 시 예외 → 호출부(judge)가 best-effort 폴백. trend_judge.md(핫리로드) 기준."""
+    try:
+        criteria = _TREND_JUDGE_TEMPLATE.read_text(encoding="utf-8")
+    except Exception as e:
+        log.warning(f"trend_judge.md 로드 실패: {e}")
+        raise
+    numbered = "\n".join(f"{i}. {b}" for i, b in enumerate(bullets))
+    prompt = (criteria.replace("{{company}}", company_name)
+                      .replace("{{numbered}}", numbered))
+    # 도메인 렌즈는 등급이 아니라 keep/drop이라 Haiku로 충분(strict 등급 회귀 방지 — #64/#65).
+    resp = _claude.messages.create(
+        model="claude-haiku-4-5", max_tokens=512,
+        messages=[{"role": "user", "content": prompt}],
+    )
+    raw = resp.content[0].text.strip()
+    raw = raw.removeprefix("```json").removeprefix("```").removesuffix("```").strip()
+    data = json.loads(raw)
+    return {int(i) for i in data.get("keep", [])}
+
+
+def judge(items: list, company_name: str) -> list:
+    """동향 NewsItem 리스트를 파라메타 사업 렌즈로 필터링(유지 항목만 반환).
+
+    항목을 재작성하지 않고 keep/drop + relevance 필드만 설정 → url/title/summary가
+    구조적으로 보존된다(마크다운 왕복·LLM 재작성 경로 없음). 오케스트레이터·단일경로 공통
+    진입점(스트랭글러 단계3). best-effort: fast-cut(시세/광고) 후 LLM 실패 시 생존분 통과.
+    """
+    if not items:
+        return []
+    negatives = _load_negatives()
+
+    def _is_neg(it) -> bool:
+        text = f"- {it.title} {it.summary}"
+        return bool(_PRICE_RE.search(text) or _matches_negative(text, negatives))
+
+    survivors = [it for it in items if not _is_neg(it)]
+    if not survivors:
+        return []
+    bullets = [f"{it.title}: {it.summary}".strip().rstrip(":").strip()
+               for it in survivors]
+    try:
+        keep = _judge_domain_keep(company_name, bullets)
+    except Exception as e:
+        log.warning(f"judge 도메인 판정 실패, fast-cut 생존분 통과 ({company_name}): {e}")
+        return survivors
+    kept = []
+    for i, it in enumerate(survivors):
+        if i in keep:
+            it.relevance = it.relevance or "mid"
+            kept.append(it)
+    return kept
+
+
 def judge_news(company_name: str, news_text: str, today: str = None,
                add_tags: bool = True) -> str:
     """뉴스 텍스트를 관련성 판정해 high·mid만 보존한 마크다운 반환.
