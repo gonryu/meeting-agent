@@ -170,6 +170,14 @@ def run_company_research(*, company_name: str, knowledge_md: str = "",
     log.info(f"Research Orchestrator (company) 시작: {company_name}")
     t0 = datetime.now()
     today = datetime.now().strftime("%Y-%m-%d")
+    try:
+        from agents import research_assist
+        assisted = research_assist.assisted_knowledge(company_name)
+        if assisted:
+            knowledge_md = "\n\n".join(part for part in (knowledge_md, assisted) if part)
+            log.info(f"  assisted public sources 주입: {company_name} ({len(assisted):,}자)")
+    except Exception as e:
+        log.warning(f"assisted public sources 주입 실패, 기본 리서치 계속 ({company_name}): {e}")
 
     with ThreadPoolExecutor(max_workers=3) as pool:
         f_industry = pool.submit(_company_industry, company_name, today, knowledge_md)

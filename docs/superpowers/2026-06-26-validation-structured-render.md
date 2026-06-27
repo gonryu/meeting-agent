@@ -65,6 +65,67 @@
 
 ---
 
+## E. 결정론적 출력 품질 eval
+
+실제 Slack 렌더 출력은 분류별 가이드를 `tests/eval_output_quality.py`로 검증한다.
+
+```bash
+.venv/bin/python tests/eval_output_quality.py
+```
+
+분류:
+- `company_research`: 제목 링크 + 한 줄 요약, raw URL/`**`/`last_searched`/`• **` 금지
+- `media_company`: 언론사 뉴스 조작 금지, 연결점 비대상 고정 문구
+- `ontology_render`: 한국어 관계 라벨, 번호섹션 노이즈 제거, Drive 문서 링크
+- `context_block`: 이전 미팅/이메일/온톨로지 최근상황 분리, false empty 금지
+- `meeting_header`: 시간/Meet/장소/업체/참석자/어젠다 표시
+
+PASS 기준: 모든 rule 통과. 특정 분류만 볼 때는 `--category company_research`처럼 실행.
+
+---
+
+## F. 추가 eval — source / polish / golden
+
+```bash
+.venv/bin/python tests/eval_source_quality.py
+.venv/bin/python tests/eval_polish_fidelity.py
+.venv/bin/python tests/eval_company_research_golden.py
+```
+
+- `eval_source_quality.py`: 뉴스 불릿별 출처 URL 존재, 깨진 URL, 명시적 no-info 상태 검증
+- `eval_polish_fidelity.py`: 윤문 전후 URL/날짜/수치/보호용어 보존 검증
+- `eval_company_research_golden.py`: 대표 업체 유형(KISA/언론사/동향없음)의 Slack 출력 회귀 검증
+
+---
+
+## G. 선택 워크플로우 — insane-search / im-not-ai
+
+기본 라이브 경로는 그대로 Claude web_search + `NewsItem` 구조화 렌더다. 외부 도구는 아래 플래그가 켜진 경우에만 보조 경로로 사용한다.
+
+### insane-search assisted sources
+
+- 모듈: `agents/research_assist.py`
+- 기본값: 비활성
+- 플래그:
+  - `INSANE_SEARCH_ASSISTED=true`
+  - `INSANE_SEARCH_RESULTS_DIR=/path/to/sources` — `{업체}/sources.md`, `{업체}/research.md`, `{업체}.md` ingest
+  - `INSANE_SEARCH_COMMAND="..."` — stdout markdown을 evidence로 ingest
+- 주입 위치: `research_orchestrator.run_company_research()`의 `knowledge_md` 보강. Slack에 원문 렌더하지 않음.
+
+### im-not-ai / humanize-korean polish
+
+- 모듈: `agents/korean_polish.py`
+- 기본값: 비활성
+- 플래그:
+  - `KOREAN_POLISH_ENABLED=true`
+  - `KOREAN_POLISH_COMMAND="..."` — stdin 원문, stdout 윤문본
+  - `POLISH_MAX_CHANGE_RATIO=0.30`
+- 적용 후보: 서비스 연결점 프로즈, 온톨로지 프로즈 요약, 브리핑 요약
+- 적용 금지: `NewsItem.title/url/date`, URL, 수치, 날짜, 고유명사, 직접 인용
+- 채택 조건: `validate_fidelity()` 통과. 실패 시 원문 유지.
+
+---
+
 ## 회귀 모니터링 (내가 보는 것)
 
 - 라이브 로그에 `[STRUCTURED_RENDER] {업체}: structured=N legacy=M` — 구조화 vs 레거시 추출 건수 차이.

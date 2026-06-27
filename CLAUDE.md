@@ -337,6 +337,14 @@ cd frontend && ./serve.sh           # http://localhost:3030 → config.js의 BAC
 - 관련성 정의: `prompts/templates/research/company/trend_judge.md`(도메인 렌즈 keep/drop, 핫리로드·편집 가능), `prompts/templates/news_relevance.md`(judge_news 등급, parameta_radar).
 - 동명 타사는 검색 프롬프트(`company_news.md`/`trend_signals.md`) + 판정에서 배제.
 - 품질 평가: `tests/eval_news_relevance.py --mode {oracle|stub|haiku|sonnet}` (라벨별 P/R/F1 + confusion matrix). 골든셋 `tests/golden/news_relevance.jsonl`.
+- 출력/출처/윤문 안전 평가: `tests/eval_output_quality.py`, `tests/eval_source_quality.py`, `tests/eval_polish_fidelity.py`, `tests/eval_company_research_golden.py`.
+
+### 선택 리서치/윤문 보조 워크플로우
+
+외부 도구는 기본 경로에 직접 결합하지 않고, 플래그가 켜진 경우에만 보조 입력으로 쓴다.
+
+- `agents/research_assist.py` — `INSANE_SEARCH_ASSISTED=true`일 때 `INSANE_SEARCH_RESULTS_DIR` markdown 또는 `INSANE_SEARCH_COMMAND` stdout을 public-source evidence로 읽어 `research_orchestrator.run_company_research()`의 `knowledge_md`에 추가한다. Slack에는 원문 렌더하지 않는다.
+- `agents/korean_polish.py` — `KOREAN_POLISH_ENABLED=true` + `KOREAN_POLISH_COMMAND`일 때 stdin/stdout 기반 윤문을 실행하되, URL/날짜/수치/보호용어/변경률(`POLISH_MAX_CHANGE_RATIO`, 기본 0.30) fidelity gate를 통과한 결과만 채택한다. 뉴스 제목·URL·날짜·직접 인용에는 적용 금지.
 
 ### 회사리서치 구조화 (스트랭글러, 진행중)
 
@@ -408,4 +416,3 @@ cd frontend && ./serve.sh           # http://localhost:3030 → config.js의 BAC
 - `tools/calendar.py`의 `create_event()`는 `location` 파라미터를 지원함 (자연어 미팅 생성 시 장소 설정)
 - 일정 드래프트 스레드에서 업체명은 참석자와 동일한 누적 패턴: "업체 추가해줘 X" → 기존 유지 + 추가, "업체는 X야" → 대체. `draft["company"]`는 쉼표 구분 문자열, LLM 호출 전 `company_candidates` 배열로 동기화됨
 - Slack 발송 텍스트는 `tools/slack_tools.to_slack_mrkdwn()`로 `**볼드**`→`*볼드*` 정규화. 온톨로지 관계타입은 `_relation_label()`(한국어), 번호섹션 엔티티는 `_is_noise_relation()`로 렌더 제외, 문서는 uri 있으면 `<uri|제목>` 링크. 담당자/참석자 이름은 `_resolve_attendee_names` 리졸버 통일(폴백=전체 이메일, localpart 금지).
-
