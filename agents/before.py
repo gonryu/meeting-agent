@@ -743,8 +743,10 @@ def _fallback_service_connections(company_context: str) -> str:
     return "\n".join(lines[:3])
 
 
-_COMPANY_TYPES = ("prospect", "media", "investor", "partner", "public_agency", "other")
+_COMPANY_TYPES = ("prospect", "media", "investor", "partner", "public_agency", "internal", "other")
 _MEDIA_CONNECTION_MSG = "언론사로 분류되어 파라메타 서비스 연결점은 해당하지 않습니다."
+_INTERNAL_CONNECTION_MSG = "자사/내부 조직으로 분류되어 파라메타 서비스 연결점 분석은 생략합니다."
+_INTERNAL_NEWS_MSG = "- 자사/내부 조직은 외부 업체 동향 리서치 대상이 아닙니다"
 
 
 def _classify_company_type(company_name: str) -> str:
@@ -757,6 +759,7 @@ def _classify_company_type(company_name: str) -> str:
         "- public_agency: 정부·공공기관·협회\n"
         "- partner: 협력사·컨소시엄 파트너\n"
         "- prospect: 잠재 고객사·사업 대상 기업\n"
+        "- internal: 파라메타·아이콘루프 등 자사/계열사/자사 서비스\n"
         "- other: 위에 명확히 해당 없음\n\n"
         f"조직: {company_name}\n한 단어로만 답하라:"
     )
@@ -892,7 +895,15 @@ def research_company(user_id: str, company_name: str, force: bool = False) -> tu
             _early_fm, _ = _drive_parse_frontmatter(content)
         except Exception:
             _early_fm = {}
-    company_type = _early_fm.get("company_type") or _classify_company_type(company_name)
+    try:
+        from agents import company_profile
+        is_internal_hint = company_profile.is_internal_company(company_name)
+    except Exception:
+        is_internal_hint = False
+    company_type = "internal" if is_internal_hint else (
+        _early_fm.get("company_type") or _classify_company_type(company_name)
+    )
+    is_internal = company_type == "internal"
     is_media = company_type == "media"
 
     # 1단계: ParaScope 봇 조회 (보류 — 2026-04-08)
@@ -915,7 +926,7 @@ def research_company(user_id: str, company_name: str, force: bool = False) -> tu
     try:
         from agents import research_orchestrator as _ro
         from agents import research_types as _rt
-        if not is_media and _ro.is_enabled():
+        if not is_media and not is_internal and _ro.is_enabled():
             gmail_excerpt = email_section if email_section else ""
             research_obj = _ro.run_company_research(
                 company_name=company_name,
@@ -929,7 +940,9 @@ def research_company(user_id: str, company_name: str, force: bool = False) -> tu
         log.warning(f"업체 리서치 오케스트레이터 실패, 단일 호출로 폴백 ({company_name}): {e}")
         news_text = ""
 
-    if not used_orchestrator and not is_media:
+    if is_internal:
+        news_text = _INTERNAL_NEWS_MSG
+    elif not used_orchestrator and not is_media:
         news_text = _to_bullet_lines(_search(company_news_prompt(company_name)))
         # 단일 호출 경로만: flat 뉴스 불릿 관련성 사후 판정 (생성기 불신).
         # 오케스트레이터 산출물(구조화 synthesis)은 동향 불릿 단계에서 이미
@@ -937,7 +950,7 @@ def research_company(user_id: str, company_name: str, force: bool = False) -> tu
         news_text = news_relevance.judge_news(company_name, news_text, today=today)
 
     # CM-09: 웹 검색 결과에 출처 태그 추가 (오케스트레이터 산출물에는 이미 출처 URL이 인라인됨)
-    if not used_orchestrator and news_text.strip():
+    if not used_orchestrator and not is_internal and news_text.strip():
         news_lines = []
         for line in news_text.split("\n"):
             if line.strip().startswith("- ") and "[출처:" not in line:
@@ -958,6 +971,8 @@ def research_company(user_id: str, company_name: str, force: bool = False) -> tu
     )
     if is_media:
         connections = f"- {_MEDIA_CONNECTION_MSG}"  # 언론사는 서비스 연결점 해당 없음(#2)
+    elif is_internal:
+        connections = f"- {_INTERNAL_CONNECTION_MSG}"
     else:
         connections = _build_service_connections(company_context_for_connections, knowledge)
     update_check_lines = _build_update_check_lines(content, today, used_orchestrator)
@@ -970,7 +985,7 @@ def research_company(user_id: str, company_name: str, force: bool = False) -> tu
         )
 
     # CM-10: Sources/ 에 웹 검색 원본 저장
-    if news_text.strip():
+    if news_text.strip() and not is_internal:
         try:
             source_content = f"# {company_name} 웹 검색 결과\n- 검색일: {today}\n\n{news_text}"
             drive.save_source_file(

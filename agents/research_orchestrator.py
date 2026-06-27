@@ -137,8 +137,14 @@ def _company_competitors(company_name: str, today: str) -> dict:
 
 
 def _company_trends(company_name: str, today: str) -> str:
+    from agents import company_profile
     template = _load_template("company", "trend_signals.md")
-    prompt = _render(template, company_name=company_name, today=today)
+    prompt = _render(
+        template,
+        company_name=company_name,
+        today=today,
+        search_context=company_profile.trend_search_context(company_name),
+    )
     return _call_llm_with_search(prompt, model=_HAIKU, max_tokens=2048)
 
 
@@ -200,7 +206,10 @@ def run_company_research(*, company_name: str, knowledge_md: str = "",
     # keep/drop만 → URL 구조적 보존). _trend_relevance(재작성 판정, URL 유실)를 대체.
     # KISA 보안체계·AI보안=유지, K-브랜드/IP·인사·시세=제외(trend_judge.md).
     from agents import news_relevance
-    news_items = news_relevance.judge(parse_trend_bullets(trend_md), company_name)
+    raw_news_items = [n for n in parse_trend_bullets(trend_md) if n.url]
+    if trend_md.strip() and not raw_news_items:
+        log.info(f"  trend_signals URL 포함 항목 없음 — 뉴스 제외 ({company_name})")
+    news_items = news_relevance.judge(raw_news_items, company_name)
     # synthesis 개요는 판정 통과 동향을 컨텍스트로(시세/무관 항목 제외, URL 불필요)
     judged_trend_md = "\n".join(
         f"- **[{n.title}]**: {n.summary}".rstrip() for n in news_items
