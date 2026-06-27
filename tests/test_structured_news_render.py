@@ -28,6 +28,9 @@ class TestFormatNewsItem:
     def test_empty_returns_blank(self):
         assert _format_news_item_for_slack({"title": "", "summary": "", "url": None}) == ""
 
+    def test_markdown_only_title_returns_blank(self):
+        assert _format_news_item_for_slack({"title": "**", "summary": "", "url": None}) == ""
+
 
 class TestBlockStructuredPath:
     def test_renders_from_news_items(self):

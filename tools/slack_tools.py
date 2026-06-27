@@ -231,7 +231,7 @@ def _format_news_item_for_slack(item: dict) -> str:
     title = _strip_display_markdown((item.get("title") or "")).strip()
     summary = _strip_display_markdown((item.get("summary") or "")).strip()
     url = (item.get("url") or "").strip()
-    if not title and not summary:
+    if not re.search(r"\w", re.sub(r"[*_`\[\](){}<>:：—\-\s]+", "", f"{title} {summary}"), re.UNICODE):
         return ""
     label = title or summary[:60] or "기사 보기"
     head = f"<{url}|{label}>" if url else label

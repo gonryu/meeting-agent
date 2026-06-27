@@ -33,6 +33,15 @@ class TestParseTrendBullets:
         items = parse_trend_bullets("- 그냥 제목 요약 (https://x.com)")
         assert len(items) == 1 and items[0].url == "https://x.com"
 
+    def test_malformed_markdown_only_bullets_are_ignored(self):
+        md = "\n".join([
+            "- **",
+            "- ****:",
+            "- **[]**:",
+            "- **[ ]**:   ",
+        ])
+        assert parse_trend_bullets(md) == []
+
 
 class TestToMarkdown:
     def _research(self):

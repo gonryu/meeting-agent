@@ -37,6 +37,13 @@ class CompanyResearch:
 _BOLD_TITLE_RE = re.compile(r"\*\*\[?(.+?)\]?\*\*")
 _URL_RE = re.compile(r"https?://[^\s)]+")
 _DATE_RE = re.compile(r"\b(\d{4}[.\-]\d{1,2}(?:[.\-]\d{1,2})?)\b")
+_MEANINGFUL_RE = re.compile(r"\w", re.UNICODE)
+
+
+def _has_meaningful_text(text: str) -> bool:
+    """마크다운 기호만 있는 깨진 불릿(`**`, `[]` 등)은 뉴스가 아니다."""
+    cleaned = re.sub(r"[*_`\[\](){}<>:：—\-\s]+", "", text or "")
+    return bool(_MEANINGFUL_RE.search(cleaned))
 
 
 def parse_trend_bullets(trend_md: str) -> list[NewsItem]:
@@ -72,7 +79,7 @@ def parse_trend_bullets(trend_md: str) -> list[NewsItem]:
         summary = re.sub(r"\(\s*[\d.\-]*\s*,?\s*\)", "", summary)  # 빈/날짜만 괄호
         summary = summary.strip(" :：—-()").strip()
         title = title.strip(" :：[]").strip()
-        if title or summary:
+        if _has_meaningful_text(f"{title} {summary}"):
             out.append(NewsItem(title=title or summary[:60], summary=summary,
                                 url=url, date=date))
     return out
