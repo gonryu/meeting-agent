@@ -226,12 +226,17 @@ class TestBuildCompanyResearchBlock:
             "다날핀테크",
             [],
             [],
-            ["명확한 접점 없음", "1. 서비스 영역 차이"],
+            [
+                "명확한 접점 없음",
+                "1. 서비스 영역 차이",
+                "제공하신 정보만으로는 상대 업체의 구체적인 정보가 불명확하여, 정확한 접점 분석이 제한됩니다.",
+            ],
         )
         text = _get_text(blocks)
 
         assert "명확한 접점 없음" not in text
         assert "서비스 영역 차이" not in text
+        assert "제공하신 정보" not in text
         assert "분석 정보 없음" in text
 
     def test_trello_summary_and_card_link_visible(self):

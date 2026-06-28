@@ -1228,6 +1228,8 @@ def _post_company_research_result(client, *, user_id: str, company: str,
         thread_ts=thread_ts,
         text=f"✅ *{company}* 기업정보 갱신 완료.",
         blocks=blocks,
+        unfurl_links=False,
+        unfurl_media=False,
     )
 
 

@@ -32,6 +32,19 @@ def test_google_news_rss_parser_returns_markdown_with_urls(monkeypatch):
     assert "https://news.google.com/rss/articles/abc" in out
 
 
+def test_clean_title_removes_leading_news_section_tags():
+    from agents.news_rss import _clean_title
+
+    assert (
+        _clean_title("[은행 이모저모] 신한은행·iM뱅크, 프로젝트 ‘판게아’ 참여 - 비즈월드", "비즈월드")
+        == "신한은행·iM뱅크, 프로젝트 ‘판게아’ 참여"
+    )
+    assert (
+        _clean_title("인사이트] '가상자산'을 잡으려는 자, '두나무'로 몰린다 - 데일리팝", "데일리팝")
+        == "'가상자산'을 잡으려는 자, '두나무'로 몰린다"
+    )
+
+
 def test_orchestrator_uses_rss_when_web_search_has_no_url(monkeypatch):
     import agents.research_orchestrator as ro
     from agents import news_relevance, research_assist, news_rss

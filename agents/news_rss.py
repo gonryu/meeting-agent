@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import html
 import logging
+import re
 from urllib.parse import quote_plus
 from urllib.request import Request, urlopen
 import xml.etree.ElementTree as ET
@@ -23,6 +24,10 @@ def _clean_title(title: str, source: str = "") -> str:
     suffix = f" - {source}"
     if source and title.endswith(suffix):
         title = title[: -len(suffix)].strip()
+    # Google News RSS often preserves publisher section labels in the title.
+    # They add noise in Slack and can look broken after markdown/link handling.
+    title = re.sub(r"^\[[^\]]{1,30}\]\s*", "", title).strip()
+    title = re.sub(r"^[^]\n]{1,30}\]\s*", "", title).strip()
     return title
 
 
