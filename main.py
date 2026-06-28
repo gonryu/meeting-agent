@@ -1334,10 +1334,19 @@ def _route_message(text: str, client, user_id: str, channel: str = None,
             ).start()
             return
 
-    intent_data = _classify_intent(text)
-    intent = intent_data.get("intent", "unknown")
-    params = intent_data.get("params", {})
-    log.info(f"인텐트 분류: {intent} / params: {params}")
+    try:
+        from agents import company_profile
+        direct = company_profile.try_direct_company_research_route(text)
+    except Exception:
+        direct = None
+    if direct is not None:
+        intent, params = direct
+        log.info(f"직접 라우팅: intent={intent} / params={params}")
+    else:
+        intent_data = _classify_intent(text)
+        intent = intent_data.get("intent", "unknown")
+        params = intent_data.get("params", {})
+        log.info(f"인텐트 분류: {intent} / params: {params}")
 
 
     if intent == "briefing":

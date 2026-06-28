@@ -7,6 +7,7 @@ profile table for high-value targets and use it only as search guidance.
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+import re
 
 
 @dataclass(frozen=True)
@@ -66,6 +67,18 @@ _PROFILES = (
         aliases=("삼성리서치", "삼성 리서치", "Samsung Research", "Samsung Research Korea"),
         domain_terms=("AI 보안", "블록체인", "디지털자산", "보안", "핀테크", "인증"),
     ),
+    CompanyResearchProfile(
+        input_name="삼성증권",
+        canonical_name="삼성증권",
+        aliases=("삼성증권", "Samsung Securities", "Samsung Securities Korea"),
+        domain_terms=("STO", "토큰증권", "비수탁 지갑", "DeFi", "디지털자산", "KYC", "AML", "RFP"),
+    ),
+    CompanyResearchProfile(
+        input_name="KOMSA",
+        canonical_name="KOMSA",
+        aliases=("KOMSA", "한국해양교통안전공단", "해양교통안전공단"),
+        domain_terms=("선박검사", "전자증서", "DID", "VC", "검증체계", "블록체인", "공공과제", "KISA"),
+    ),
 )
 
 
@@ -78,7 +91,43 @@ def is_internal_company(company_name: str) -> bool:
     return bool(n) and any(_norm(alias) in n for alias in _INTERNAL_ALIASES)
 
 
+def normalize_company_name(company_name: str) -> str:
+    """Normalize command-ish company text to the canonical research target."""
+    raw = (company_name or "").strip()
+    if not raw:
+        return ""
+
+    direct = _profile_for_norm(_norm(raw))
+    if direct:
+        return direct.canonical_name
+    if is_internal_company(raw):
+        return raw
+
+    candidates = [raw]
+    for suffix in ("기업정보 리서치", "회사정보 리서치", "업체정보 리서치", "리서치", "알아봐줘", "조사해줘"):
+        if raw.endswith(suffix):
+            candidates.append(raw[: -len(suffix)].strip(" :,-"))
+    compact = _norm(raw)
+    if compact.endswith("리서치"):
+        candidates.append(raw[:-3].strip(" :,-"))
+
+    for candidate in candidates:
+        profile = _profile_for_norm(_norm(candidate))
+        if profile:
+            return profile.canonical_name
+    return candidates[-1] if candidates and candidates[-1] else raw
+
+
+def _profile_for_norm(norm_name: str) -> CompanyResearchProfile | None:
+    for profile in _PROFILES:
+        keys = {_norm(profile.canonical_name), *(_norm(a) for a in profile.aliases)}
+        if norm_name in keys:
+            return profile
+    return None
+
+
 def research_profile(company_name: str) -> CompanyResearchProfile:
+    company_name = normalize_company_name(company_name)
     if is_internal_company(company_name):
         return CompanyResearchProfile(
             input_name=company_name,
@@ -87,10 +136,9 @@ def research_profile(company_name: str) -> CompanyResearchProfile:
             is_internal=True,
         )
     n = _norm(company_name)
-    for profile in _PROFILES:
-        keys = {_norm(profile.canonical_name), *(_norm(a) for a in profile.aliases)}
-        if n in keys:
-            return replace(profile, input_name=company_name)
+    profile = _profile_for_norm(n)
+    if profile:
+        return replace(profile, input_name=company_name)
     return CompanyResearchProfile(
         input_name=company_name,
         canonical_name=company_name,
@@ -134,3 +182,33 @@ def _suggested_queries(profile: CompanyResearchProfile) -> list[str]:
             if len(queries) >= 12:
                 return queries
     return queries
+
+
+def try_direct_company_research_route(text: str) -> tuple[str, dict] | None:
+    """Route simple natural-language company research commands without LLM."""
+    raw = (text or "").strip()
+    if not raw or "\n" in raw:
+        return None
+    lowered = raw.lower()
+    normalized_raw = normalize_company_name(raw)
+    if normalized_raw != raw:
+        return ("research_company", {"company": normalized_raw})
+    trigger_patterns = (
+        r"^(.+?)(?:\s*)리서치$",
+        r"^(.+?)(?:\s*)기업정보(?:\s*)리서치$",
+        r"^(.+?)(?:\s*)알아봐줘$",
+        r"^(.+?)(?:\s*)조사해줘$",
+    )
+    if not any(token in lowered for token in ("리서치", "알아봐", "조사")):
+        return None
+    for pattern in trigger_patterns:
+        m = re.match(pattern, raw)
+        if not m:
+            continue
+        company = normalize_company_name(m.group(1).strip())
+        if company:
+            return ("research_company", {"company": company})
+    company = normalize_company_name(raw)
+    if company != raw:
+        return ("research_company", {"company": company})
+    return None

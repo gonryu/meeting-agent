@@ -172,10 +172,13 @@ def run_company_research(*, company_name: str, knowledge_md: str = "",
     `## 최근 동향` 본문 문자열을 만들어 기존 news_text 자리에 삽입한다(전환기 단계1).
     Raises: 단계 실패 시. 호출부가 캐치하여 기존 단일 호출 경로로 폴백.
     """
+    from agents import company_profile
     from agents.research_types import CompanyResearch, parse_trend_bullets
+    company_name = company_profile.normalize_company_name(company_name)
     log.info(f"Research Orchestrator (company) 시작: {company_name}")
     t0 = datetime.now()
     today = datetime.now().strftime("%Y-%m-%d")
+    assisted = ""
     try:
         from agents import research_assist
         assisted = research_assist.assisted_knowledge(company_name)
@@ -206,7 +209,7 @@ def run_company_research(*, company_name: str, knowledge_md: str = "",
     # keep/drop만 → URL 구조적 보존). _trend_relevance(재작성 판정, URL 유실)를 대체.
     # KISA 보안체계·AI보안=유지, K-브랜드/IP·인사·시세=제외(trend_judge.md).
     from agents import news_relevance
-    raw_news_items = [n for n in parse_trend_bullets(trend_md) if n.url]
+    raw_news_items = [n for n in parse_trend_bullets("\n".join((trend_md, assisted))) if n.url]
     if trend_md.strip() and not raw_news_items:
         log.info(f"  trend_signals URL 포함 항목 없음 — 뉴스 제외 ({company_name})")
     news_items = news_relevance.judge(raw_news_items, company_name)

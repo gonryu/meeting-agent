@@ -714,6 +714,12 @@ _LOW_VALUE_CONNECTION_PATTERNS = (
     "접점 제한",
     "직접적 협력 니즈는 높지",
     "직접적인 협업 필요성이 드러나지",
+    "죄송하지만",
+    "구체적인 정보가 제공되지 않아",
+    "구체적인 정보가 부족",
+    "현재 제공된 자료에서",
+    "명시되지 않음",
+    "알려주세요",
 )
 
 
@@ -783,7 +789,7 @@ def _build_service_connections(company_context: str, knowledge: str) -> str:
     if kept:
         return "\n".join(kept[:3])
     fallback = _fallback_service_connections(company_context)
-    return fallback or generated
+    return fallback or "- 분석 정보 없음"
 
 
 def _format_email_context_section(emails: list[dict], today: str) -> str:
@@ -880,6 +886,11 @@ def research_company(user_id: str, company_name: str, force: bool = False) -> tu
     """업체 정보 수집. Returns: (content, file_id)
     force=True 이면 신선도 체크 없이 강제 재검색.
     """
+    try:
+        from agents import company_profile
+        company_name = company_profile.normalize_company_name(company_name)
+    except Exception:
+        company_name = (company_name or "").strip()
     creds, contacts_folder_id, knowledge_file_id = _get_creds_and_config(user_id)
     content, file_id, is_fresh = drive.get_company_info(creds, contacts_folder_id, company_name)
 

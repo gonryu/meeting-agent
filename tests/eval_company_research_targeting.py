@@ -60,6 +60,18 @@ CASES = [
         [],
     ),
     Case(
+        "samsung-securities",
+        "삼성증권",
+        ["STO", "토큰증권", "비수탁 지갑", "추천 검색 질의"],
+        [],
+    ),
+    Case(
+        "komsa-public-agency",
+        "komsa",
+        ["KOMSA", "선박검사", "전자증서", "DID", "추천 검색 질의"],
+        [],
+    ),
+    Case(
         "internal-parameta",
         "파라메타",
         ["자사/내부 조직"],
