@@ -212,7 +212,21 @@ def run_company_research(*, company_name: str, knowledge_md: str = "",
     raw_news_items = [n for n in parse_trend_bullets("\n".join((trend_md, assisted))) if n.url]
     if trend_md.strip() and not raw_news_items:
         log.info(f"  trend_signals URL 포함 항목 없음 — 뉴스 제외 ({company_name})")
+    if not raw_news_items:
+        try:
+            from agents import news_rss
+            rss_md = news_rss.search_company_news(company_name)
+            raw_news_items = [n for n in parse_trend_bullets(rss_md) if n.url]
+            if raw_news_items:
+                log.info(f"  Google News RSS fallback 후보 확보 ({company_name}): {len(raw_news_items)}건")
+        except Exception as e:
+            log.warning(f"Google News RSS fallback 실패 ({company_name}): {e}")
     news_items = news_relevance.judge(raw_news_items, company_name)
+    if raw_news_items and not news_items:
+        log.info(f"  judge가 URL 후보를 모두 제외 — 상위 후보 보존 ({company_name}): {len(raw_news_items)}건")
+        for item in raw_news_items[:3]:
+            item.relevance = item.relevance or "mid"
+        news_items = raw_news_items[:3]
     # synthesis 개요는 판정 통과 동향을 컨텍스트로(시세/무관 항목 제외, URL 불필요)
     judged_trend_md = "\n".join(
         f"- **[{n.title}]**: {n.summary}".rstrip() for n in news_items

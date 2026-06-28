@@ -184,6 +184,28 @@ def _suggested_queries(profile: CompanyResearchProfile) -> list[str]:
     return queries
 
 
+def search_queries(company_name: str, max_queries: int = 8) -> list[str]:
+    """Return deterministic public-news search queries for a company."""
+    profile = research_profile(company_name)
+    if profile.is_internal:
+        return []
+    queries = _suggested_queries(profile)
+    if not queries and profile.canonical_name:
+        queries = [profile.canonical_name]
+    seen: set[str] = set()
+    out: list[str] = []
+    for q in queries:
+        q = q.strip()
+        key = _norm(q)
+        if not q or key in seen:
+            continue
+        seen.add(key)
+        out.append(q)
+        if len(out) >= max_queries:
+            break
+    return out
+
+
 def try_direct_company_research_route(text: str) -> tuple[str, dict] | None:
     """Route simple natural-language company research commands without LLM."""
     raw = (text or "").strip()
