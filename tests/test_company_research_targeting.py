@@ -9,6 +9,14 @@ from agents import before
 
 
 class TestCompanyResearchProfile:
+    def test_normalizes_command_suffix_without_breaking_samsung_research(self):
+        from agents import company_profile
+
+        assert company_profile.normalize_company_name("다날리서치") == "다날"
+        assert company_profile.normalize_company_name("두나무 리서치") == "두나무"
+        assert company_profile.normalize_company_name("삼성 리서치") == "삼성리서치"
+        assert company_profile.normalize_company_name("komsa") == "KOMSA"
+
     def test_dunamu_search_context_includes_upbit_and_regulatory_terms(self):
         from agents import company_profile
 
@@ -39,6 +47,15 @@ class TestCompanyResearchProfile:
         assert company_profile.is_internal_company("파라메타")
         assert company_profile.is_internal_company("Parameta")
 
+    def test_samsung_securities_and_komsa_have_domain_context(self):
+        from agents import company_profile
+
+        samsung = company_profile.trend_search_context("삼성증권")
+        assert "STO" in samsung and "토큰증권" in samsung and "비수탁 지갑" in samsung
+
+        komsa = company_profile.trend_search_context("komsa")
+        assert "KOMSA" in komsa and "선박검사" in komsa and "전자증서" in komsa
+
 
 class TestTrendPromptTargeting:
     def test_company_trends_injects_alias_and_domain_context(self, monkeypatch):
@@ -59,6 +76,21 @@ class TestTrendPromptTargeting:
         assert "업비트" in seen["prompt"]
         assert "디지털자산" in seen["prompt"]
         assert "URL 없는 항목은 제외" in seen["prompt"]
+
+
+class TestDirectCompanyResearchRoute:
+    def test_direct_route_normalizes_company_research_commands(self):
+        from agents import company_profile
+
+        assert company_profile.try_direct_company_research_route("다날리서치") == (
+            "research_company", {"company": "다날"}
+        )
+        assert company_profile.try_direct_company_research_route("두나무 리서치") == (
+            "research_company", {"company": "두나무"}
+        )
+        assert company_profile.try_direct_company_research_route("komsa 리서치") == (
+            "research_company", {"company": "KOMSA"}
+        )
 
 
 class TestOrchestratorSourceRequirement:
@@ -84,6 +116,27 @@ class TestOrchestratorSourceRequirement:
 
         assert [n.title for n in out.news] == ["출처 있는 동향"]
         assert out.news[0].url == "https://example.com/news"
+
+    def test_run_company_research_uses_assisted_items_as_trend_candidates(self, monkeypatch):
+        import agents.research_orchestrator as ro
+        from agents import news_relevance, research_assist
+
+        monkeypatch.setattr(ro, "_company_industry", lambda *a, **k: {"industry": "가상자산"})
+        monkeypatch.setattr(ro, "_company_competitors", lambda *a, **k: {"peers": []})
+        monkeypatch.setattr(ro, "_company_trends", lambda *a, **k: "파라메타 사업 맥락의 최근 공개 정보 없음")
+        monkeypatch.setattr(
+            research_assist,
+            "assisted_knowledge",
+            lambda company: "- **[실명계좌 제휴 경쟁]**: 은행권 경쟁 심화 (https://example.com/upbit-bank)",
+        )
+        monkeypatch.setattr(news_relevance, "_judge_domain_keep",
+                            lambda company, bullets: set(range(len(bullets))))
+        monkeypatch.setattr(ro, "_company_synthesis", lambda **k: "- **산업 위치**: 가상자산 거래소")
+
+        out = ro.run_company_research(company_name="업비트")
+
+        assert [n.title for n in out.news] == ["실명계좌 제휴 경쟁"]
+        assert out.news[0].url == "https://example.com/upbit-bank"
 
 
 class TestInternalCompanyResearchGuard:
@@ -111,3 +164,27 @@ class TestInternalCompanyResearchGuard:
         assert "자사/내부 조직은 외부 업체 동향 리서치 대상이 아닙니다" in content
         assert "자사/내부 조직으로 분류되어 파라메타 서비스 연결점 분석은 생략합니다." in content
         assert "[출처: 웹 검색" not in content
+
+
+class TestConnectionQualityGuard:
+    def test_low_value_apology_connections_are_filtered_to_fallback(self):
+        generated = (
+            "- 죄송하지만, 상대 업체의 구체적인 정보가 제공되지 않아 정확한 접점 분석이 어렵습니다.\n"
+            "- 현재 제공된 자료에서:\n"
+            "- 상대 업체의 산업 위치, 시장 포지션, 주요 사업 영역이 명시되지 않음"
+        )
+        context = "삼성증권 STO 지갑 비수탁 deFi RFP KYC AML"
+        with patch.object(before, "_generate", return_value=generated):
+            out = before._build_service_connections(context, "MyID loopchain K-BTF")
+
+        assert "죄송" not in out
+        assert "구체적인 정보" not in out
+        assert "MyID" in out or "loopchain" in out
+
+    def test_low_value_apology_does_not_return_when_no_fallback_exists(self):
+        generated = "- 죄송하지만, 상대 업체의 구체적인 정보가 제공되지 않아 정확한 접점 분석이 어렵습니다."
+        with patch.object(before, "_generate", return_value=generated):
+            out = before._build_service_connections("", "MyID loopchain K-BTF")
+
+        assert "죄송" not in out
+        assert "분석 정보 없음" in out
