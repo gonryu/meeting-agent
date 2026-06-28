@@ -169,7 +169,7 @@ class TestInternalCompanyResearchGuard:
 class TestConnectionQualityGuard:
     def test_low_value_apology_connections_are_filtered_to_fallback(self):
         generated = (
-            "- 죄송하지만, 상대 업체의 구체적인 정보가 제공되지 않아 정확한 접점 분석이 어렵습니다.\n"
+            "- 제공하신 정보만으로는 상대 업체의 구체적인 정보가 불명확하여, 정확한 접점 분석이 제한됩니다.\n"
             "- 현재 제공된 자료에서:\n"
             "- 상대 업체의 산업 위치, 시장 포지션, 주요 사업 영역이 명시되지 않음"
         )
@@ -178,13 +178,14 @@ class TestConnectionQualityGuard:
             out = before._build_service_connections(context, "MyID loopchain K-BTF")
 
         assert "죄송" not in out
+        assert "제공하신 정보" not in out
         assert "구체적인 정보" not in out
         assert "MyID" in out or "loopchain" in out
 
     def test_low_value_apology_does_not_return_when_no_fallback_exists(self):
-        generated = "- 죄송하지만, 상대 업체의 구체적인 정보가 제공되지 않아 정확한 접점 분석이 어렵습니다."
+        generated = "- 제공하신 정보만으로는 상대 업체의 구체적인 정보가 불명확하여, 정확한 접점 분석이 제한됩니다."
         with patch.object(before, "_generate", return_value=generated):
             out = before._build_service_connections("", "MyID loopchain K-BTF")
 
-        assert "죄송" not in out
+        assert "제공하신 정보" not in out
         assert "분석 정보 없음" in out
