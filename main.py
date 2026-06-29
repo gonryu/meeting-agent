@@ -1178,6 +1178,13 @@ def _post_company_research_result(client, *, user_id: str, company: str,
     news_lines, parascope_lines, connection_lines, _emails, update_lines = (
         before_agent._extract_company_content_sections(content)
     )
+    # v1 rich 렌더 핸드오프: 에이전트가 만든 확장 CompanyResearch가 있으면 v2 블록으로 발송.
+    rich = before_agent.pop_last_research(user_id, company)
+    if before_agent.is_rich_research(rich):
+        blocks = before_agent.build_company_research_block_v2(rich)
+        client.chat_postMessage(channel=channel or user_id, thread_ts=thread_ts,
+                                text=f"✅ *{company}* 기업정보 갱신 완료.", blocks=blocks)
+        return
     trello_summary: list[str] = []
     trello_card_name = ""
     trello_url = ""
@@ -1450,7 +1457,7 @@ def _route_message(text: str, client, user_id: str, channel: str = None,
         client.chat_postMessage(channel=channel or user_id, thread_ts=thread_ts,
                                 text=f"🔍 *{company}* 기업정보 리서치 중...")
         try:
-            content, _ = research_company(user_id, company, force=True)
+            content, _ = research_company(user_id, company, force=True, slack_client=client)
             _post_company_research_result(
                 client, user_id=user_id, company=company, content=content,
                 channel=channel, thread_ts=thread_ts,
@@ -2015,7 +2022,7 @@ def _company_handler(ack, body, client):
         return
     client.chat_postMessage(channel=user_id, text=f"🔍 *{company_name}* 기업정보 리서치 중...")
     try:
-        content, _ = research_company(user_id, company_name, force=True)
+        content, _ = research_company(user_id, company_name, force=True, slack_client=client)
         _post_company_research_result(
             client, user_id=user_id, company=company_name, content=content,
         )

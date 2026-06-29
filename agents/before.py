@@ -30,6 +30,7 @@ from tools.slack_tools import (
     build_briefing_message,
     build_meeting_header_block,
     build_company_research_block,
+    build_company_research_block_v2,
     build_persons_block,
     build_context_block,
     ask_company_name,
@@ -51,6 +52,20 @@ load_dotenv(override=True)
 
 _claude = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
 _CLAUDE_MODEL = "claude-haiku-4-5"
+
+_last_research_obj: dict = {}   # (user_id, company) → CompanyResearch (렌더 핸드오프, 휘발)
+
+
+def pop_last_research(user_id: str, company_name: str):
+    """온디맨드 렌더용: 직전 research_company가 만든 rich 객체를 꺼냄(없으면 None)."""
+    return _last_research_obj.pop((user_id, company_name), None)
+
+
+def is_rich_research(r) -> bool:
+    """에이전트가 채운 확장 필드가 하나라도 있으면 rich(렌더 v2 대상)."""
+    return bool(r and (r.summary_line or r.deal_context or r.source_docs
+                       or r.attendees or r.talking_points))
+
 
 def _internal_domains_set() -> set[str]:
     """프라이버시 보호 — 내부 직원·내부 메일 식별 기준.
@@ -886,7 +901,7 @@ def _build_update_check_lines(existing_content: str | None, today: str,
     return [f"{prev} → {today} {engine}으로 업데이트 여부 재확인"]
 
 
-def research_company(user_id: str, company_name: str, force: bool = False) -> tuple[str, str | None]:
+def research_company(user_id: str, company_name: str, force: bool = False, slack_client=None) -> tuple[str, str | None]:
     """업체 정보 수집. Returns: (content, file_id)
     force=True 이면 신선도 체크 없이 강제 재검색.
     """
@@ -949,9 +964,12 @@ def research_company(user_id: str, company_name: str, force: bool = False) -> tu
                 gmail_context=gmail_excerpt,
                 user_id=user_id,
                 creds=creds,
+                slack_client=slack_client,
             )
             # 단계1: 구조화 객체 → 위키 '## 최근 동향' 본문 직렬화(외부 동작 불변).
             news_text = _rt.render_company_news_block(research_obj)
+            # v1 렌더 핸드오프: 온디맨드 렌더가 rich 확장필드를 직접 소비하도록 보관(휘발).
+            _last_research_obj[(user_id, company_name)] = research_obj
             used_orchestrator = True
     except Exception as e:
         log.warning(f"업체 리서치 오케스트레이터 실패, 단일 호출로 폴백 ({company_name}): {e}")

@@ -240,6 +240,38 @@ def _format_news_item_for_slack(item: dict) -> str:
     return head
 
 
+def build_company_research_block_v2(r) -> list[dict]:
+    """확장 CompanyResearch(에이전트 산출) → Slack 블록. 빈 섹션은 생략(콜드 graceful)."""
+    L = ["━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━", f"*🏢 {r.company_name} 리서치 결과*"]
+    if r.summary_line:
+        L += ["", f"📌 {r.summary_line}"]
+    L += ["", "📰  *업체 동향*"]
+    news = [s for s in (_format_news_item_for_slack(
+        {"title": n.title, "summary": n.summary, "url": n.url}) for n in r.news) if s]
+    L += [f"• {s}" for s in news[:3]] or ["• 최근 동향 정보 없음"]
+    if r.deal_context:
+        L += ["", "🔄  *거래 맥락*", _strip_display_markdown(r.deal_context)]
+    if r.connections:
+        L += ["", "🔗  *파라메타 서비스 연결점*"] + [f"• {_strip_display_markdown(c)}" for c in r.connections[:3]]
+    if r.attendees:
+        L += ["", "👤  *참석자*"]
+        for a in r.attendees[:5]:
+            bits = " · ".join(x for x in (a.role, a.contact) if x)
+            L.append(f"• {a.name}" + (f" ({bits})" if bits else ""))
+    if r.source_docs:
+        L += ["", "📎  *자료*"]
+        for d in r.source_docs[:5]:
+            # 자료 파일명은 확장자 포함 원문 유지(견적서.pdf 등 식별성 보존)
+            label = (d.title or "").strip()
+            if d.url:
+                L.append(f"• <{d.url}|{label}>" + (f" — {d.why}" if d.why else ""))
+            else:
+                L.append(f"• {label}" + (f" — {d.why}" if d.why else ""))
+    if r.talking_points:
+        L += ["", "✅  *오늘 논의 포인트*"] + [f"• {_strip_display_markdown(t)}" for t in r.talking_points[:5]]
+    return [{"type": "section", "text": {"type": "mrkdwn", "text": "\n".join(L)}}]
+
+
 _LOW_VALUE_CONNECTION_PATTERNS = (
     "명확한 접점 없음",
     "서비스 영역 차이",
