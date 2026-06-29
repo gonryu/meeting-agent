@@ -947,6 +947,8 @@ def research_company(user_id: str, company_name: str, force: bool = False) -> tu
                 company_name=company_name,
                 knowledge_md=knowledge or "",
                 gmail_context=gmail_excerpt,
+                user_id=user_id,
+                creds=creds,
             )
             # 단계1: 구조화 객체 → 위키 '## 최근 동향' 본문 직렬화(외부 동작 불변).
             news_text = _rt.render_company_news_block(research_obj)

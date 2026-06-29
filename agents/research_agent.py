@@ -29,6 +29,18 @@ class ToolContext:
     folder_id: str = ""
 
 
+def run_agentic_research(*, company_name: str, user_id: str, creds, slack_client=None,
+                         meeting_context: str = "") -> "CompanyResearch | None":
+    """에이전트 리서치. 성공 시 CompanyResearch, 실패/미완 시 None(호출부 폴백)."""
+    folder_id = os.getenv("DRIVE_RESEARCH_FOLDER_ID", "")
+    ctx = ToolContext(user_id=user_id, creds=creds, slack_client=slack_client, folder_id=folder_id)
+    try:
+        return _agent_loop(company_name, meeting_context, ctx)
+    except Exception as e:
+        log.exception(f"에이전트 리서치 실패, 폴백 ({company_name}): {e}")
+        return None
+
+
 _SUBMIT_SCHEMA = {
     "type": "object",
     "properties": {
