@@ -6,23 +6,22 @@ import tools.gmail as gmail
 
 
 def _thread_payload():
-    return {"messages": [
-        {"payload": {"headers": [{"name": "From", "value": "이성룡 <a@d-antwort.com>"},
-                                  {"name": "Date", "value": "Sun, 15 Jun 2026 10:00:00 +0900"},
-                                  {"name": "Subject", "value": "KOMSA 견적서"}],
-                     "body": {"data": ""},
-                     "parts": [{"mimeType": "text/plain",
-                                "body": {"data": "VG90YWwgNTUsMDQwLDAwMA=="}}]}},  # "Total 55,040,000"
-    ]}
+    def _msg(subj, b64):
+        return {"payload": {"headers": [{"name": "From", "value": "a@b.com"},
+                                        {"name": "Subject", "value": subj}],
+                            "body": {"data": ""},
+                            "parts": [{"mimeType": "text/plain", "body": {"data": b64}}]}}
+    return {"messages": [_msg("RFQ", "UkZRIGJvZHk="),          # "RFQ body" (oldest)
+                          _msg("최종확정", "VG90YWwgNTUsMDQwLDAwMA==")]}  # newest
 
 
-def test_read_thread_returns_messages_with_body():
+def test_read_thread_newest_first():
     with patch.object(gmail, "_service") as msvc:
         msvc.return_value.users.return_value.threads.return_value.get.return_value.execute.return_value = _thread_payload()
-        out = gmail.read_thread(MagicMock(), "thread123")
-    assert out and out[0]["from"].startswith("이성룡")
+        out = gmail.read_thread(MagicMock(), "t1")
+    assert out[0]["subject"] == "최종확정"          # 최신이 먼저
     assert "55,040,000" in out[0]["body"]
-    assert out[0]["subject"] == "KOMSA 견적서"
+    assert out[-1]["subject"] == "RFQ"
 
 
 def test_search_recent_emails_includes_thread_id():

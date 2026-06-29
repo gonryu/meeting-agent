@@ -271,19 +271,22 @@ def search_recent_emails(creds: Credentials, person_name: str,
     return emails
 
 
-def read_thread(creds: Credentials, thread_id: str, max_messages: int = 20) -> list[dict]:
-    """스레드의 메시지들을 헤더+본문으로 반환. 거래 흐름·수치 재구성용.
-    Returns: [{date, from, subject, body}] (오래된→최신)."""
+def read_thread(creds: Credentials, thread_id: str, max_messages: int = 20,
+                body_chars: int = 800) -> list[dict]:
+    """스레드 메시지를 헤더+본문으로 반환 — **최신순**(결론부 보존), 본문은 body_chars로 캡.
+    Returns: [{date, from, subject, body}] (최신→과거)."""
     svc = _service(creds)
     data = svc.users().threads().get(userId="me", id=thread_id, format="full").execute()
+    msgs = data.get("messages") or []
     out: list[dict] = []
-    for msg in (data.get("messages") or [])[:max_messages]:
+    for msg in msgs:
         payload = msg.get("payload", {})
         headers = {h["name"].lower(): h["value"] for h in payload.get("headers", [])}
         out.append({
             "date": headers.get("date", ""),
             "from": headers.get("from", ""),
             "subject": headers.get("subject", ""),
-            "body": _decode_body(payload).strip(),
+            "body": _decode_body(payload).strip()[:body_chars],
         })
-    return out
+    out.reverse()                       # 최신 → 과거
+    return out[:max_messages]

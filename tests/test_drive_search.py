@@ -5,19 +5,26 @@ from unittest.mock import MagicMock, patch
 import tools.drive as drive
 
 
-def test_search_files_scopes_folder_owner_shared():
-    captured = {}
+def test_search_files_uses_fulltext_recursive_shared():
+    calls = []
     def _list(q=None, fields=None, pageSize=None, **kw):
-        captured["q"] = q
-        m = MagicMock(); m.execute.return_value = {"files": [
-            {"id": "f1", "name": "KOMSA 견적서.pdf", "mimeType": "application/pdf"}]}
+        calls.append(q)
+        m = MagicMock()
+        # 하위폴더 열거(첫 호출들)는 빈 결과, 최종 검색은 파일 반환
+        if "mimeType='application/vnd.google-apps.folder'" in (q or ""):
+            m.execute.return_value = {"files": []}
+        else:
+            m.execute.return_value = {"files": [
+                {"id": "f1", "name": "2026-06-15_견적서_최종.pdf", "mimeType": "application/pdf"}]}
         return m
     with patch.object(drive, "_service") as msvc:
         msvc.return_value.files.return_value.list.side_effect = _list
-        out = drive.search_files(MagicMock(), "KOMSA 견적", folder_id="FOLDER1")
-    assert out and out[0]["name"] == "KOMSA 견적서.pdf"
-    assert "FOLDER1" in captured["q"]
-    assert "sharedWithMe" in captured["q"] or "'me' in owners" in captured["q"]
+        out = drive.search_files(MagicMock(), "디안트보르트", folder_id="FOLDER1")
+    assert out and out[0]["name"].endswith(".pdf")
+    final_q = calls[-1]
+    assert "fullText contains '디안트보르트'" in final_q
+    assert "sharedWithMe = true" in final_q
+    assert "'FOLDER1' in parents" in final_q
 
 
 def test_extract_hwpx_text():

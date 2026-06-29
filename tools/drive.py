@@ -1058,21 +1058,43 @@ def replace_auto_section(
     return body[:section_start] + new_block + body[section_end:]
 
 
+def _descendant_folder_ids(creds: Credentials, root_id: str, max_folders: int = 50) -> list[str]:
+    """root 폴더의 모든 하위폴더 ID(BFS, max_folders 상한). 공유폴더 재귀 검색용."""
+    svc = _service(creds)
+    out: list[str] = []
+    queue = [root_id]
+    while queue and len(out) < max_folders:
+        cur = queue.pop(0)
+        try:
+            res = svc.files().list(
+                q=f"'{cur}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false",
+                fields="files(id)", pageSize=100,
+                includeItemsFromAllDrives=True, supportsAllDrives=True,
+            ).execute()
+        except Exception as e:
+            log.warning(f"하위폴더 열거 실패({cur}): {e}")
+            break
+        for f in res.get("files", []):
+            out.append(f["id"]); queue.append(f["id"])
+    return out
+
+
 def search_files(creds: Credentials, query: str, folder_id: str = None,
                  include_shared: bool = True, page_size: int = 15) -> list[dict]:
-    """영업/제안 공유폴더 + 본인 소유 + sharedWithMe 범위에서 파일 검색.
+    """영업/제안 공유폴더(재귀) + 본인 소유 + sharedWithMe 범위에서 내용(fullText) 검색.
     Returns: [{id, name, mimeType, modifiedTime}]."""
     svc = _service(creds)
     terms = re.sub(r"['\\]", " ", query or "").strip()
-    name_q = f"name contains '{terms}'" if terms else ""
+    text_q = f"fullText contains '{terms}'" if terms else ""
     scope_clauses = []
     if folder_id:
-        scope_clauses.append(f"'{folder_id}' in parents")
+        for fid in [folder_id] + _descendant_folder_ids(creds, folder_id):
+            scope_clauses.append(f"'{fid}' in parents")
     scope_clauses.append("'me' in owners")
     if include_shared:
-        scope_clauses.append("sharedWithMe")
+        scope_clauses.append("sharedWithMe = true")
     scope = " or ".join(f"({c})" for c in scope_clauses)
-    q = f"({name_q}) and ({scope}) and trashed=false" if name_q else f"({scope}) and trashed=false"
+    q = f"({text_q}) and ({scope}) and trashed=false" if text_q else f"({scope}) and trashed=false"
     result = svc.files().list(
         q=q, pageSize=page_size, orderBy="modifiedTime desc",
         fields="files(id,name,mimeType,modifiedTime)",

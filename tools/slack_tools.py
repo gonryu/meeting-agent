@@ -240,6 +240,34 @@ def _format_news_item_for_slack(item: dict) -> str:
     return head
 
 
+def _split_long(line: str, limit: int = 2900) -> list[str]:
+    """단일 줄이 limit를 초과하면 limit 단위로 하드 분할(거래맥락 등 자유 프로즈 대비)."""
+    if len(line) <= limit:
+        return [line]
+    return [line[i:i + limit] for i in range(0, len(line), limit)]
+
+
+def _pack_blocks(lines: list[str], limit: int = 2900) -> list[dict]:
+    """줄 리스트를 여러 section 블록으로 패킹 — 각 블록 text가 limit(3000 안전마진) 이내.
+
+    Slack section text 3000자 한도 초과 시 invalid_blocks 거부를 막는다.
+    limit를 넘는 단일 줄은 _split_long으로 먼저 하드 분할."""
+    blocks: list[dict] = []
+    buf: list[str] = []
+    size = 0
+    for raw in lines:
+        for ln in _split_long(raw, limit):
+            add = len(ln) + 1
+            if buf and size + add > limit:
+                blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": "\n".join(buf)}})
+                buf, size = [], 0
+            buf.append(ln)
+            size += add
+    if buf:
+        blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": "\n".join(buf)}})
+    return blocks or [{"type": "section", "text": {"type": "mrkdwn", "text": " "}}]
+
+
 def build_company_research_block_v2(r) -> list[dict]:
     """확장 CompanyResearch(에이전트 산출) → Slack 블록. 빈 섹션은 생략(콜드 graceful)."""
     L = ["━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━", f"*🏢 {r.company_name} 리서치 결과*"]
@@ -269,7 +297,7 @@ def build_company_research_block_v2(r) -> list[dict]:
                 L.append(f"• {label}" + (f" — {d.why}" if d.why else ""))
     if r.talking_points:
         L += ["", "✅  *오늘 논의 포인트*"] + [f"• {_strip_display_markdown(t)}" for t in r.talking_points[:5]]
-    return [{"type": "section", "text": {"type": "mrkdwn", "text": "\n".join(L)}}]
+    return _pack_blocks(L)
 
 
 _LOW_VALUE_CONNECTION_PATTERNS = (

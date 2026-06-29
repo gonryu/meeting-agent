@@ -5,6 +5,10 @@ from tools.slack_tools import build_company_research_block_v2
 from agents.research_types import CompanyResearch, NewsItem, SourceDoc, Attendee
 
 
+def _all_text(blocks):
+    return "\n".join(b["text"]["text"] for b in blocks)
+
+
 def test_renders_all_sections():
     r = CompanyResearch(
         company_name="KOMSA", summary_line="홍보 용역 범위 협의",
@@ -14,7 +18,7 @@ def test_renders_all_sections():
         source_docs=[SourceDoc(title="견적서.pdf", url="https://drive/x", why="견적 항목")],
         attendees=[Attendee(name="이성룡", role="국장", contact="a@d-antwort.com")],
         talking_points=["굿즈가 견적 45%"])
-    text = build_company_research_block_v2(r)[0]["text"]["text"]
+    text = _all_text(build_company_research_block_v2(r))
     assert "홍보 용역 범위 협의" in text
     assert "RFQ" in text
     assert "<https://x|전자증서>" in text
@@ -25,5 +29,15 @@ def test_renders_all_sections():
 
 def test_cold_meeting_graceful():
     r = CompanyResearch(company_name="신규업체", summary_line="첫 미팅")
-    text = build_company_research_block_v2(r)[0]["text"]["text"]
+    text = _all_text(build_company_research_block_v2(r))
     assert "신규업체" in text
+
+
+def test_long_brief_splits_under_3000():
+    from agents.research_types import CompanyResearch, NewsItem
+    big = "가" * 1500
+    r = CompanyResearch(company_name="KOMSA", summary_line="요약",
+                        deal_context=big, talking_points=[big, big])
+    blocks = build_company_research_block_v2(r)
+    assert len(blocks) >= 2                      # 분할됨
+    assert all(len(b["text"]["text"]) <= 3000 for b in blocks)   # 모든 블록 한도 이내
