@@ -28,3 +28,22 @@ def test_run_critics_keeps_when_all_grounded(monkeypatch):
     ctx = ra.ToolContext(user_id="U", creds=MagicMock(), folder_id="F")
     out = ra._run_critics(r, ctx, called={"gmail_search", "drive_search"})
     assert out.news and out.summary_line == "ok"
+
+
+def test_collect_domains():
+    from agents.research_types import CompanyResearch, Attendee, SourceDoc
+    r = CompanyResearch(company_name="x",
+                        attendees=[Attendee(name="a", contact="lee@komsa.or.kr")],
+                        source_docs=[SourceDoc(title="t", url="https://drive.google.com/x")])
+    doms = ra._collect_domains(r)
+    assert "komsa.or.kr" in doms and "drive.google.com" in doms
+
+
+def test_identity_caveat_on_domain_mismatch(monkeypatch):
+    from agents.research_types import CompanyResearch, Attendee
+    r = CompanyResearch(company_name="komsa", summary_line="협의",
+                        attendees=[Attendee(name="x", contact="a@komsa-ag.de")])
+    monkeypatch.setattr(ra, "_identity_consistent", lambda c, claim, doms: False)
+    out = ra._run_critics(r, MagicMock(), called={"gmail_search", "drive_search"},
+                          identity_claim="komsa=한국해양교통안전공단")
+    assert out.summary_line.startswith("⚠️")

@@ -5,8 +5,23 @@ import os
 log = logging.getLogger(__name__)
 
 
+def biz_channel_list() -> list[dict]:
+    """SLACK_BIZ_CHANNELS 파싱. 'C1:이름,C2:이름' 또는 'C1,C2' → [{id, name}]."""
+    out = []
+    for tok in os.getenv("SLACK_BIZ_CHANNELS", "").split(","):
+        tok = tok.strip()
+        if not tok:
+            continue
+        if ":" in tok:
+            cid, name = tok.split(":", 1)
+            out.append({"id": cid.strip(), "name": name.strip()})
+        else:
+            out.append({"id": tok, "name": ""})
+    return out
+
+
 def allowed_channels() -> set[str]:
-    return {c.strip() for c in os.getenv("SLACK_BIZ_CHANNELS", "").split(",") if c.strip()}
+    return {c["id"] for c in biz_channel_list()}
 
 
 def channel_history(client, channel_id: str, limit: int = 30) -> list[dict]:
