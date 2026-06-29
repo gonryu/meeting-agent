@@ -967,6 +967,7 @@ def research_company(user_id: str, company_name: str, force: bool = False, slack
                 user_id=user_id,
                 creds=creds,
                 slack_client=slack_client,
+                allow_agent=stash_research,  # v1: 온디맨드(stash_research=True)만 에이전트
             )
             # 단계1: 구조화 객체 → 위키 '## 최근 동향' 본문 직렬화(외부 동작 불변).
             news_text = _rt.render_company_news_block(research_obj)

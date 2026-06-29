@@ -166,7 +166,7 @@ def _company_synthesis(*, company_name: str, today: str,
 
 def run_company_research(*, company_name: str, knowledge_md: str = "",
                           gmail_context: str = "", user_id: str = "",
-                          creds=None, slack_client=None) -> "CompanyResearch":
+                          creds=None, slack_client=None, allow_agent: bool = False) -> "CompanyResearch":
     """업체 리서치 다단계 파이프라인. Returns: CompanyResearch 구조화 객체.
 
     호출부(before.py.research_company)는 research_types.render_company_news_block()로
@@ -178,7 +178,8 @@ def run_company_research(*, company_name: str, knowledge_md: str = "",
     # 에이전트 플래그 ON + 자격 있으면 위임, 실패/미완 시 레거시 폴백
     try:
         from agents import research_agent
-        if research_agent.agentic_enabled() and user_id and creds is not None:
+        # v1: 에이전트는 온디맨드(allow_agent=True)만 — 브리핑은 레거시 유지(비용·rich 미렌더)
+        if research_agent.agentic_enabled() and allow_agent and user_id and creds is not None:
             agent_out = research_agent.run_agentic_research(
                 company_name=company_name, user_id=user_id, creds=creds,
                 slack_client=slack_client, meeting_context=gmail_context)
