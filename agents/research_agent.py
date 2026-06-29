@@ -96,3 +96,75 @@ def _dispatch(name: str, args: dict, ctx: ToolContext) -> str:
     except Exception as e:
         log.warning(f"도구 {name} 실패: {e}")
         return f"(도구 {name} 실패: {str(e)[:120]})"
+
+
+_MAX_ROUNDS = int(os.getenv("AGENTIC_MAX_ROUNDS", "12"))
+
+_SYSTEM = """당신은 파라메타(parametacorp) 사업개발 리서치 에이전트다. 목표: '제대로'(풍부+정확).
+파라메타 사업분야: 블록체인(loopchain), 디지털자산·STO·RWA, DID/MyID, 결제·금융 인프라,
+공공·국가 블록체인(K-BTF), 보안·인증(CSAP)·AI보안, 핀테크, 규제 대응.
+
+원칙:
+1. 다중홉: 한 도구 결과(파일명·회사명·thread_id)를 다음 검색 쿼리에 적극 사용하라.
+   예) 제목→gmail_search→스레드의 견적서 파일명→그 이름으로 drive_search→drive_read.
+2. 여러 소스를 교차로 확인하라. Gmail만 보고 끝내지 말 것 — Drive(견적/제안/deck)·Trello·
+   (내부/biz 미팅이면) slack_channel_history·web을 관련되면 반드시 들러라.
+3. 동명 타사 주의: 회사 동일성을 확정하라(예: komsa=한국해양교통안전공단 vs 독일 KOMSA AG).
+4. talking_points는 수집이 아니라 조합 — 전체 맥락에서 미팅 논의 포인트를 도출하라.
+5. 충분히 모았으면 submit_research를 호출하라. 모든 주장에 가능한 한 출처를 남겨라."""
+
+
+def _initial_prompt(company_name: str, meeting_context: str) -> str:
+    ctx = f"\n\n미팅 맥락:\n{meeting_context}" if meeting_context else ""
+    return f"'{company_name}'에 대해 파라메타 미팅 사전 리서치를 수행하라.{ctx}"
+
+
+def _run_critics(r, ctx, called):
+    # Task 7에서 실제 critic으로 교체. 현재는 패스스루 스텁.
+    return r
+
+
+def _agent_loop(company_name: str, meeting_context: str, ctx: "ToolContext"):
+    tools = _tool_specs()
+    messages = [{"role": "user", "content": _initial_prompt(company_name, meeting_context)}]
+    called: set = set()
+    for _round in range(_MAX_ROUNDS):
+        resp = _claude.messages.create(model=_MODEL, max_tokens=4096, system=_SYSTEM,
+                                       tools=tools, messages=messages)
+        messages.append({"role": "assistant", "content": resp.content})
+        tool_uses = [b for b in resp.content if getattr(b, "type", None) == "tool_use"]
+        if not tool_uses:
+            break
+        results = []
+        submit_input = None
+        for tu in tool_uses:
+            called.add(tu.name)
+            if tu.name == "submit_research":
+                submit_input = tu.input
+                results.append({"type": "tool_result", "tool_use_id": tu.id, "content": "접수됨"})
+            else:
+                out = _dispatch(tu.name, tu.input, ctx)
+                results.append({"type": "tool_result", "tool_use_id": tu.id, "content": (out or "")[:8000]})
+        messages.append({"role": "user", "content": results})
+        if submit_input is not None:
+            research = _to_company_research(submit_input, company_name)
+            return _run_critics(research, ctx, called)
+    return None
+
+
+def _to_company_research(d: dict, company_name: str) -> CompanyResearch:
+    return CompanyResearch(
+        company_name=company_name,
+        summary_line=d.get("summary_line", ""),
+        deal_context=d.get("deal_context", ""),
+        news=[NewsItem(title=n.get("title", ""), summary=n.get("summary", ""),
+                       url=n.get("url") or None, source=n.get("source", ""))
+              for n in (d.get("news") or [])],
+        connections=list(d.get("connections") or []),
+        source_docs=[SourceDoc(title=s.get("title", ""), url=s.get("url", ""), why=s.get("why", ""))
+                     for s in (d.get("source_docs") or [])],
+        attendees=[Attendee(name=a.get("name", ""), role=a.get("role", ""),
+                            contact=a.get("contact", ""), note=a.get("note", ""))
+                   for a in (d.get("attendees") or [])],
+        talking_points=list(d.get("talking_points") or []),
+    )
