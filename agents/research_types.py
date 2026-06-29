@@ -21,6 +21,21 @@ class NewsItem:
 
 
 @dataclass
+class SourceDoc:
+    title: str
+    url: str = ""
+    why: str = ""          # 왜 관련된지 한 줄
+
+
+@dataclass
+class Attendee:
+    name: str
+    role: str = ""
+    contact: str = ""
+    note: str = ""
+
+
+@dataclass
 class CompanyResearch:
     company_name: str
     company_type: str = "normal"   # 'normal' | 'media'
@@ -31,6 +46,12 @@ class CompanyResearch:
     trello_context: str = ""       # 기존 '## Trello 맥락' 본문
     parascope: list[str] = field(default_factory=list)
     searched_at: str = ""          # YYYY-MM-DD
+    # 에이전트 v1 확장 필드(전부 기본값 — 기존 호출부 불변)
+    summary_line: str = ""                    # 이 미팅/건 한 줄 요약
+    deal_context: str = ""                    # 거래·관계 진행 흐름(prose)
+    source_docs: list[SourceDoc] = field(default_factory=list)
+    attendees: list[Attendee] = field(default_factory=list)
+    talking_points: list[str] = field(default_factory=list)
 
 
 # 트렌드 불릿 한 줄 파싱: "- **[제목]**: 요약 (날짜, URL)" 변형 폭넓게 수용
