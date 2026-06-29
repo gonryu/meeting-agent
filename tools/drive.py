@@ -6,6 +6,8 @@ from datetime import datetime, timezone
 import logging
 import os
 import re
+import io
+import zipfile
 
 log = logging.getLogger(__name__)
 
@@ -1054,3 +1056,105 @@ def replace_auto_section(
         new_block = body_part + f"\n\n{AUTO_START}\n{new_auto_content.rstrip()}\n{AUTO_END}\n"
 
     return body[:section_start] + new_block + body[section_end:]
+
+
+def search_files(creds: Credentials, query: str, folder_id: str = None,
+                 include_shared: bool = True, page_size: int = 15) -> list[dict]:
+    """영업/제안 공유폴더 + 본인 소유 + sharedWithMe 범위에서 파일 검색.
+    Returns: [{id, name, mimeType, modifiedTime}]."""
+    svc = _service(creds)
+    terms = re.sub(r"['\\]", " ", query or "").strip()
+    name_q = f"name contains '{terms}'" if terms else ""
+    scope_clauses = []
+    if folder_id:
+        scope_clauses.append(f"'{folder_id}' in parents")
+    scope_clauses.append("'me' in owners")
+    if include_shared:
+        scope_clauses.append("sharedWithMe")
+    scope = " or ".join(f"({c})" for c in scope_clauses)
+    q = f"({name_q}) and ({scope}) and trashed=false" if name_q else f"({scope}) and trashed=false"
+    result = svc.files().list(
+        q=q, pageSize=page_size, orderBy="modifiedTime desc",
+        fields="files(id,name,mimeType,modifiedTime)",
+        includeItemsFromAllDrives=True, supportsAllDrives=True,
+    ).execute()
+    return result.get("files", [])
+
+
+_HWPX_TAG_RE = re.compile(r"<[^>]+>")
+
+
+def _extract_hwpx(raw: bytes) -> str:
+    """.hwpx(zip+XML) → 텍스트. section/content XML의 태그 제거. stdlib만 사용."""
+    out = []
+    try:
+        with zipfile.ZipFile(io.BytesIO(raw)) as z:
+            for name in z.namelist():
+                low = name.lower()
+                if low.endswith(".xml") and ("section" in low or "content" in low):
+                    xml = z.read(name).decode("utf-8", "ignore")
+                    out.append(_HWPX_TAG_RE.sub(" ", xml))
+    except Exception as e:
+        log.warning(f"hwpx 추출 실패: {e}")
+        return ""
+    return re.sub(r"\s+", " ", " ".join(out)).strip()
+
+
+def _extract_pdf(raw: bytes) -> str:
+    """PDF → 텍스트. pdfminer.six lazy import, 미설치/실패 시 빈 문자열(graceful)."""
+    try:
+        from pdfminer.high_level import extract_text
+        return extract_text(io.BytesIO(raw)) or ""
+    except Exception as e:
+        log.warning(f"pdf 추출 실패(또는 pdfminer 미설치): {e}")
+        return ""
+
+
+def _extract_office(raw: bytes, lname: str) -> str:
+    """docx/xlsx/pptx → 텍스트. python-docx/openpyxl lazy import, 실패 시 빈 문자열."""
+    try:
+        if lname.endswith(".docx"):
+            import docx
+            d = docx.Document(io.BytesIO(raw))
+            return "\n".join(p.text for p in d.paragraphs if p.text)
+        if lname.endswith(".xlsx"):
+            import openpyxl
+            wb = openpyxl.load_workbook(io.BytesIO(raw), read_only=True, data_only=True)
+            rows = []
+            for ws in wb.worksheets:
+                for row in ws.iter_rows(values_only=True):
+                    cells = [str(c) for c in row if c is not None]
+                    if cells:
+                        rows.append(" | ".join(cells))
+            return "\n".join(rows)
+    except Exception as e:
+        log.warning(f"office 추출 실패({lname}): {e}")
+    return ""
+
+
+def read_file_text(creds: Credentials, file_id: str, mime_type: str = "",
+                   name: str = "", max_chars: int = 12000) -> str:
+    """파일 본문을 텍스트로 추출. Google문서=export, pdf/hwpx/docx/xlsx=get_media+추출.
+    추출 불가 포맷·실패는 빈 문자열(graceful)."""
+    svc = _service(creds)
+    lname = (name or "").lower()
+    try:
+        if mime_type.startswith("application/vnd.google-apps"):
+            text = svc.files().export(fileId=file_id, mimeType="text/plain").execute()
+            text = text.decode("utf-8", "ignore") if isinstance(text, bytes) else str(text)
+        else:
+            raw = svc.files().get_media(fileId=file_id).execute()
+            if isinstance(raw, str):
+                raw = raw.encode("utf-8", "ignore")
+            if lname.endswith(".hwpx"):
+                text = _extract_hwpx(raw)
+            elif lname.endswith(".pdf"):
+                text = _extract_pdf(raw)
+            elif lname.endswith((".docx", ".xlsx")):
+                text = _extract_office(raw, lname)
+            else:
+                text = raw.decode("utf-8", "ignore")
+    except Exception as e:
+        log.warning(f"파일 추출 실패({file_id}, {lname}): {e}")
+        return ""
+    return (text or "")[:max_chars]
