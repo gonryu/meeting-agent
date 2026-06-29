@@ -901,8 +901,10 @@ def _build_update_check_lines(existing_content: str | None, today: str,
     return [f"{prev} → {today} {engine}으로 업데이트 여부 재확인"]
 
 
-def research_company(user_id: str, company_name: str, force: bool = False, slack_client=None) -> tuple[str, str | None]:
+def research_company(user_id: str, company_name: str, force: bool = False, slack_client=None, stash_research: bool = False) -> tuple[str, str | None]:
     """업체 정보 수집. Returns: (content, file_id)
+    stash_research=True면 에이전트 rich 객체를 _last_research_obj에 저장(온디맨드 v2 렌더 핸드오프).
+    브리핑 등 미저장 호출은 기본값(False)으로 — 휘발 dict 누수 방지.
     force=True 이면 신선도 체크 없이 강제 재검색.
     """
     try:
@@ -968,8 +970,10 @@ def research_company(user_id: str, company_name: str, force: bool = False, slack
             )
             # 단계1: 구조화 객체 → 위키 '## 최근 동향' 본문 직렬화(외부 동작 불변).
             news_text = _rt.render_company_news_block(research_obj)
-            # v1 렌더 핸드오프: 온디맨드 렌더가 rich 확장필드를 직접 소비하도록 보관(휘발).
-            _last_research_obj[(user_id, company_name)] = research_obj
+            # v1 렌더 핸드오프: 온디맨드(stash_research=True)에서만 rich 객체 보관(휘발).
+            # 브리핑 등은 저장 안 함 — pop 안 되는 경로의 dict 누수 방지.
+            if stash_research:
+                _last_research_obj[(user_id, company_name)] = research_obj
             used_orchestrator = True
     except Exception as e:
         log.warning(f"업체 리서치 오케스트레이터 실패, 단일 호출로 폴백 ({company_name}): {e}")

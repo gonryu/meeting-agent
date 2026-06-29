@@ -1457,7 +1457,7 @@ def _route_message(text: str, client, user_id: str, channel: str = None,
         client.chat_postMessage(channel=channel or user_id, thread_ts=thread_ts,
                                 text=f"🔍 *{company}* 기업정보 리서치 중...")
         try:
-            content, _ = research_company(user_id, company, force=True, slack_client=client)
+            content, _ = research_company(user_id, company, force=True, slack_client=client, stash_research=True)
             _post_company_research_result(
                 client, user_id=user_id, company=company, content=content,
                 channel=channel, thread_ts=thread_ts,
@@ -2022,7 +2022,7 @@ def _company_handler(ack, body, client):
         return
     client.chat_postMessage(channel=user_id, text=f"🔍 *{company_name}* 기업정보 리서치 중...")
     try:
-        content, _ = research_company(user_id, company_name, force=True, slack_client=client)
+        content, _ = research_company(user_id, company_name, force=True, slack_client=client, stash_research=True)
         _post_company_research_result(
             client, user_id=user_id, company=company_name, content=content,
         )

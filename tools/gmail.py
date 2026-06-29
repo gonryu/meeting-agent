@@ -228,7 +228,8 @@ def search_recent_emails(creds: Credentials, person_name: str,
                          company_name: str, days: int = 90) -> list[dict]:
     """
     상대방 이름 + 업체명으로 최근 이메일 검색
-    Returns: [{"date", "subject", "snippet", "from", "to", "cc"}]
+    Returns: [{"date", "subject", "snippet", "from", "to", "cc", "thread_id"}]
+    thread_id는 read_thread()로 스레드 본문을 이어 읽는 멀티홉용.
     """
     after = (datetime.now() - timedelta(days=days)).strftime("%Y/%m/%d")
     if person_name and person_name != company_name:
@@ -264,6 +265,7 @@ def search_recent_emails(creds: Credentials, person_name: str,
             "from": headers.get("From", ""),
             "to": headers.get("To", ""),
             "cc": headers.get("Cc", ""),
+            "thread_id": detail.get("threadId", msg.get("threadId", "")),
         })
 
     return emails
