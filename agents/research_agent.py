@@ -13,6 +13,8 @@ from agents.research_types import CompanyResearch, NewsItem, SourceDoc, Attendee
 log = logging.getLogger(__name__)
 _claude = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
 _MODEL = "claude-sonnet-4-5"
+_HAIKU = "claude-haiku-4-5"
+_KEY_SOURCES = {"gmail_search", "drive_search"}   # 최소 들러야 할 핵심 소스
 
 
 def agentic_enabled() -> bool:
@@ -119,8 +121,40 @@ def _initial_prompt(company_name: str, meeting_context: str) -> str:
     return f"'{company_name}'에 대해 파라메타 미팅 사전 리서치를 수행하라.{ctx}"
 
 
-def _run_critics(r, ctx, called):
-    # Task 7에서 실제 critic으로 교체. 현재는 패스스루 스텁.
+def _coverage_gap(called: set) -> bool:
+    """핵심 소스(gmail/drive)를 안 들렀으면 커버리지 부족(조기종료 의심)."""
+    return not _KEY_SOURCES.issubset(called)
+
+
+def _url_grounding_keep(r: CompanyResearch) -> set:
+    """Haiku 기계적 패스: news 각 항목이 출처(url/source)에 근거하는지 → 유지 인덱스 집합."""
+    items = [f"{i}. {n.title} | url={n.url or ''} src={n.source or ''}" for i, n in enumerate(r.news)]
+    if not items:
+        return set()
+    prompt = ("아래 뉴스 항목 중 **출처(url 또는 src)가 실재하는** 항목의 번호만 JSON으로.\n"
+              '형식: {"keep":[0,2]}\n\n' + "\n".join(items))
+    try:
+        resp = _claude.messages.create(model=_HAIKU, max_tokens=256,
+                                       messages=[{"role": "user", "content": prompt}])
+        raw = resp.content[0].text.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
+        return {int(i) for i in json.loads(raw).get("keep", [])}
+    except Exception as e:
+        log.warning(f"url grounding 실패, 전체 유지: {e}")
+        return set(range(len(r.news)))
+
+
+def _apply_url_grounding(r: CompanyResearch) -> CompanyResearch:
+    keep = _url_grounding_keep(r)
+    r.news = [n for i, n in enumerate(r.news) if i in keep]
+    return r
+
+
+def _run_critics(r: CompanyResearch, ctx, called: set) -> CompanyResearch:
+    """①URL 그라운딩(Haiku) 적용. ②동명타사=capable 모델이 submit의 company_identity_confirmed로
+    책임(스키마 required). ③커버리지 부족은 v1에선 로그 관측."""
+    r = _apply_url_grounding(r)
+    if _coverage_gap(called):
+        log.info(f"[AGENTIC] 커버리지 부족(들른 소스={called}) — {r.company_name}")
     return r
 
 
