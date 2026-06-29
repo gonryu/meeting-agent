@@ -57,10 +57,15 @@ Claude-in-Slack이 **못 하는 것** = 봇의 존재 이유 → **그대로 유
 | `gmail_read_thread(thread_id)` | 스레드 본문 읽기 | **신규** — 거래 흐름·수치 |
 | `drive_search(query)` | **영업/제안 상위폴더 하위** 검색 → 파일 목록 | **신규·범위 한정** |
 | `drive_read(file_id)` | 파일 본문/추출 텍스트(PDF·docx·xlsx) | **신규** |
+| `trello_lookup(company)` | 업체 파이프라인 카드(체크리스트·코멘트) | **기존 `tools/trello.py` 노출** — 내부 거래단계/액션 맥락 |
 | `web_search(query)` | 웹 검색 | 기존 |
 | `ontology_lookup(name)` | lib-mesh 엔티티·문서 | 기존, 게이팅 사용자 |
 
-**Drive 범위:** 설정된 영업/제안 상위폴더 ID로 한정(`q`에 `'<folder>' in parents` 재귀). 미설정 시 Drive 검색 도구 비활성(나머지 도구로 진행 — graceful). 폴더는 사용자별 설정 또는 env로 해석.
+**데이터 소스 5층(우선순위):** ① **공유 영업/제안 폴더(못박은 ID)** → ② 사용자 본인 Drive → ③ Gmail → ④ Trello(업체 카드) → ⑤ 웹+온톨로지. 비어있으면 graceful 스킵.
+
+**Drive 범위:** `drive_search`는 **(a) 공유 영업/제안 폴더**(env `DRIVE_RESEARCH_FOLDER_ID`, 팀 공유·전 사용자 접근) 재귀 + **(b) 요청 사용자 본인 소유 파일**(`'me' in owners`). 둘 다 사용자 OAuth로 접근. 공유폴더 ID는 `.env`에 고정(사용자별 폴더 설정 없음 — 각자 Drive 관리가 달라 못박는 게 안전). 본인 Drive가 비어도(미사용자) 공유폴더+Gmail+Trello로 진행.
+
+**Slack은 v1 비포함**(§10) — 대화 검색은 user-token `search:read` 필요·노이즈 큼. 같은 내부 맥락을 Trello가 구조화로 제공하므로 2차.
 
 ## 5. 출력 스키마 (CompanyResearch 확장)
 
@@ -98,15 +103,17 @@ Claude-in-Slack이 **못 하는 것** = 봇의 존재 이유 → **그대로 유
 
 ## 10. 비목표 (YAGNI)
 
-- 회의록(during/after)·스케줄러·버튼·토큰관리·OAuth·Trello·Dreamplus **손대지 않음**.
+- 회의록(during/after)·스케줄러·버튼·토큰관리·OAuth·Dreamplus **손대지 않음**. Trello는 **읽기(get_card_context)만 도구로 노출** — 쓰기/등록 흐름은 불변.
 - 스트랭글러 폐기 아님 — 렌더/저장 레이어로 흡수. 단계4(레거시 추출기 제거)는 폴백 안정 후.
-- Drive 전체 검색·공유 온톨로지 적재 안 함(프라이버시·범위 통제).
+- **Slack 대화 검색 v1 비포함** — user-token `search:read` 필요·노이즈. 2차.
+- Drive: 공유폴더+본인 소유만(타인 공유문서 무차별 검색·공유 온톨로지 적재 안 함 — 프라이버시·범위 통제).
 
 ## 11. 설정·오픈 이슈
 
-- **영업/제안 폴더 ID** 해석 방법 확정 필요: 사용자별 설정 UI vs env vs 폴더명 규칙(`영업`/`제안` 이름 매칭). 1차는 env/설정값으로 단순화.
+- ✅ **Drive 폴더(확정)**: 공유 영업/제안 폴더 ID를 `.env` `DRIVE_RESEARCH_FOLDER_ID`에 고정(사용자가 제공) + 사용자 본인 소유 파일. 사용자별 폴더 설정 없음.
 - 도구 호출 예산 기본값(미팅당 N) 실측 후 확정.
 - 첨부 PDF/xlsx 텍스트 추출 경로(기존 문서 업로드 추출 재사용 가능 여부).
+- (참고) `DRIVE_RESEARCH_FOLDER_ID` 값은 라이브 `.env`에만 — 리포 커밋 금지.
 
 ---
 
