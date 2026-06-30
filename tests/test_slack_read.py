@@ -21,26 +21,18 @@ def test_allowlist_blocks_unlisted(monkeypatch):
     client.conversations_history.assert_not_called()
 
 
-def test_gate_off_allowlist_only_reads(monkeypatch):
-    # 기본(게이트 OFF): allowlist면 멤버십 체크 없이 읽음(추가 스코프 불필요)
+def test_gate_on_by_default_member_reads(monkeypatch):
+    # 기본 ON: 요청자가 멤버면 읽음
     monkeypatch.delenv("SLACK_MEMBERSHIP_GATE", raising=False)
-    monkeypatch.setenv("SLACK_BIZ_CHANNELS", "C_BIZ1")
-    client = _client_with_members(["U2"])   # U1 없어도
-    out = channel_history(client, "C_BIZ1", requesting_user_id="U1", limit=10)
-    assert any("9월로 연기" in m["text"] for m in out)
-    client.conversations_members.assert_not_called()   # 게이트 OFF면 멤버십 확인 안 함
-
-
-def test_gate_on_member_reads(monkeypatch):
-    monkeypatch.setenv("SLACK_MEMBERSHIP_GATE", "true")
     monkeypatch.setenv("SLACK_BIZ_CHANNELS", "C_BIZ1")
     client = _client_with_members(["U1", "U2"])
     out = channel_history(client, "C_BIZ1", requesting_user_id="U1", limit=10)
     assert any("9월로 연기" in m["text"] for m in out)
 
 
-def test_gate_on_non_member_blocked(monkeypatch):
-    monkeypatch.setenv("SLACK_MEMBERSHIP_GATE", "true")
+def test_gate_on_by_default_non_member_blocked(monkeypatch):
+    # 기본 ON: 요청자가 비멤버면 차단(다른 사람이 초대한 방 누수 방지)
+    monkeypatch.delenv("SLACK_MEMBERSHIP_GATE", raising=False)
     monkeypatch.setenv("SLACK_BIZ_CHANNELS", "C_BIZ1")
     client = _client_with_members(["U2", "U3"])   # U1 없음
     out = channel_history(client, "C_BIZ1", requesting_user_id="U1")
@@ -48,14 +40,24 @@ def test_gate_on_non_member_blocked(monkeypatch):
     client.conversations_history.assert_not_called()
 
 
-def test_gate_on_error_fail_closed(monkeypatch):
-    monkeypatch.setenv("SLACK_MEMBERSHIP_GATE", "true")
+def test_gate_error_fail_closed(monkeypatch):
+    monkeypatch.delenv("SLACK_MEMBERSHIP_GATE", raising=False)
     monkeypatch.setenv("SLACK_BIZ_CHANNELS", "C_BIZ1")
     client = MagicMock()
     client.conversations_members.side_effect = RuntimeError("scope missing")
     out = channel_history(client, "C_BIZ1", requesting_user_id="U1")
-    assert out == []   # 게이트 ON·확인 실패 = 비노출
+    assert out == []   # 확인 실패 = 비노출
     client.conversations_history.assert_not_called()
+
+
+def test_gate_explicitly_disabled_reads_without_membership(monkeypatch):
+    # 폐쇄 환경: 명시적으로 끄면 allowlist만으로 읽음(멤버십 확인 안 함)
+    monkeypatch.setenv("SLACK_MEMBERSHIP_GATE", "false")
+    monkeypatch.setenv("SLACK_BIZ_CHANNELS", "C_BIZ1")
+    client = _client_with_members(["U2"])   # U1 없어도
+    out = channel_history(client, "C_BIZ1", requesting_user_id="U1", limit=10)
+    assert any("9월로 연기" in m["text"] for m in out)
+    client.conversations_members.assert_not_called()
 
 
 def test_biz_channel_list_parses_id_and_name(monkeypatch):
