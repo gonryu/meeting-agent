@@ -67,3 +67,27 @@ def test_biz_channel_list_parses_id_and_name(monkeypatch):
     assert {"id": "C1", "name": "parasta_biz"} in lst
     assert {"id": "C2", "name": ""} in lst
     assert allowed_channels() == {"C1", "C2", "C3"}
+
+
+def test_biz_channels_resolved_fills_names(monkeypatch):
+    import tools.slack_read as sr
+    sr._CHANNEL_NAME_CACHE.clear()
+    monkeypatch.setenv("SLACK_BIZ_CHANNELS", "C1, C2:이미있음")
+    client = MagicMock()
+    client.conversations_info.return_value = {"channel": {"name": "nh-biz"}}
+    out = sr.biz_channels_resolved(client)
+    by_id = {c["id"]: c["name"] for c in out}
+    assert by_id["C1"] == "nh-biz"        # 해석됨
+    assert by_id["C2"] == "이미있음"       # env 이름 유지(해석 안 함)
+    # 캐시: 두 번째 호출은 API 재호출 안 함
+    client.conversations_info.reset_mock()
+    sr.biz_channels_resolved(client)
+    client.conversations_info.assert_not_called()
+
+
+def test_resolve_channel_name_error_returns_blank(monkeypatch):
+    import tools.slack_read as sr
+    sr._CHANNEL_NAME_CACHE.clear()
+    client = MagicMock()
+    client.conversations_info.side_effect = RuntimeError("no scope")
+    assert sr._resolve_channel_name(client, "Cxxx") == ""

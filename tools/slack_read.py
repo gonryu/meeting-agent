@@ -24,6 +24,33 @@ def allowed_channels() -> set[str]:
     return {c["id"] for c in biz_channel_list()}
 
 
+_CHANNEL_NAME_CACHE: dict = {}
+
+
+def _resolve_channel_name(client, channel_id: str) -> str:
+    """conversations.info로 채널 이름 해석(프로세스 캐시). 실패 시 빈 문자열."""
+    if channel_id in _CHANNEL_NAME_CACHE:
+        return _CHANNEL_NAME_CACHE[channel_id]
+    name = ""
+    try:
+        resp = client.conversations_info(channel=channel_id)
+        name = (resp.get("channel") or {}).get("name", "") or ""
+    except Exception as e:
+        log.warning(f"채널 이름 조회 실패({channel_id}): {e}")
+    _CHANNEL_NAME_CACHE[channel_id] = name
+    return name
+
+
+def biz_channels_resolved(client) -> list[dict]:
+    """biz_channel_list에 이름 보강 — env에 이름 없으면 conversations.info로 해석(캐시).
+    에이전트가 'C0A7E50DMGW(nh-biz)'처럼 보고 관련 채널을 고를 수 있게."""
+    out = []
+    for c in biz_channel_list():
+        name = c["name"] or (_resolve_channel_name(client, c["id"]) if client else "")
+        out.append({"id": c["id"], "name": name})
+    return out
+
+
 def _is_member(client, channel_id: str, user_id: str) -> bool:
     """요청 사용자가 채널 멤버인지(ACL 게이트). 페이지네이션. 확인 불가/실패 시 False(fail-closed: 비노출)."""
     try:
