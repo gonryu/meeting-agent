@@ -21,15 +21,26 @@ def test_allowlist_blocks_unlisted(monkeypatch):
     client.conversations_history.assert_not_called()
 
 
-def test_returns_messages_when_requester_is_member(monkeypatch):
+def test_gate_off_allowlist_only_reads(monkeypatch):
+    # 기본(게이트 OFF): allowlist면 멤버십 체크 없이 읽음(추가 스코프 불필요)
+    monkeypatch.delenv("SLACK_MEMBERSHIP_GATE", raising=False)
+    monkeypatch.setenv("SLACK_BIZ_CHANNELS", "C_BIZ1")
+    client = _client_with_members(["U2"])   # U1 없어도
+    out = channel_history(client, "C_BIZ1", requesting_user_id="U1", limit=10)
+    assert any("9월로 연기" in m["text"] for m in out)
+    client.conversations_members.assert_not_called()   # 게이트 OFF면 멤버십 확인 안 함
+
+
+def test_gate_on_member_reads(monkeypatch):
+    monkeypatch.setenv("SLACK_MEMBERSHIP_GATE", "true")
     monkeypatch.setenv("SLACK_BIZ_CHANNELS", "C_BIZ1")
     client = _client_with_members(["U1", "U2"])
     out = channel_history(client, "C_BIZ1", requesting_user_id="U1", limit=10)
     assert any("9월로 연기" in m["text"] for m in out)
 
 
-def test_non_member_blocked_no_history_read(monkeypatch):
-    # 요청자가 채널 멤버가 아니면 내용 노출 안 함(ACL 누수 방지)
+def test_gate_on_non_member_blocked(monkeypatch):
+    monkeypatch.setenv("SLACK_MEMBERSHIP_GATE", "true")
     monkeypatch.setenv("SLACK_BIZ_CHANNELS", "C_BIZ1")
     client = _client_with_members(["U2", "U3"])   # U1 없음
     out = channel_history(client, "C_BIZ1", requesting_user_id="U1")
@@ -37,20 +48,13 @@ def test_non_member_blocked_no_history_read(monkeypatch):
     client.conversations_history.assert_not_called()
 
 
-def test_empty_requester_fail_closed(monkeypatch):
-    monkeypatch.setenv("SLACK_BIZ_CHANNELS", "C_BIZ1")
-    client = MagicMock()
-    assert channel_history(client, "C_BIZ1", requesting_user_id="") == []
-    client.conversations_members.assert_not_called()
-    client.conversations_history.assert_not_called()
-
-
-def test_membership_check_error_fail_closed(monkeypatch):
+def test_gate_on_error_fail_closed(monkeypatch):
+    monkeypatch.setenv("SLACK_MEMBERSHIP_GATE", "true")
     monkeypatch.setenv("SLACK_BIZ_CHANNELS", "C_BIZ1")
     client = MagicMock()
     client.conversations_members.side_effect = RuntimeError("scope missing")
     out = channel_history(client, "C_BIZ1", requesting_user_id="U1")
-    assert out == []   # 확인 실패 = 비노출
+    assert out == []   # 게이트 ON·확인 실패 = 비노출
     client.conversations_history.assert_not_called()
 
 

@@ -41,21 +41,27 @@ def _is_member(client, channel_id: str, user_id: str) -> bool:
         return False   # 안전 우선 — 확인 못 하면 노출하지 않음
 
 
+def _membership_gate_enabled() -> bool:
+    """요청자 멤버십 게이트 토글. 기본 OFF — allowlist만으로 노출(팀 공유 채널 정책).
+    GA(전 Slack 사용자 공개)처럼 봇 사용자 간 채널 접근이 다를 때만 ON(=channels:read/groups:read 필요)."""
+    return os.getenv("SLACK_MEMBERSHIP_GATE", "false").lower() == "true"
+
+
 def channel_history(client, channel_id: str, requesting_user_id: str = "",
                     limit: int = 30) -> list[dict]:
-    """allowlist 채널의 최근 메시지. **요청 사용자가 멤버인 채널만** 반환(ACL 누수 방지).
-
-    봇 토큰은 봇이 들어간 모든 채널을 읽을 수 있으므로, 요청자가 접근권 없는 채널 내용이
-    새지 않도록 ① allowlist + ② 요청자 멤버십 2중 게이트. requesting_user_id 없으면 fail-closed."""
+    """allowlist된 biz 채널의 최근 메시지. 게이트 OFF(기본)면 allowlist만으로 노출
+    (봇이 들어간 팀 공유 채널 = 관리자가 의도한 공유 정책). 게이트 ON이면 요청자 멤버십까지 확인
+    (봇 사용자 간 접근이 다른 GA 환경의 ACL 누수 방지). 미허용/비멤버 시 빈 리스트."""
     if channel_id not in allowed_channels():
         log.info(f"slack channel_history 차단(allowlist 외): {channel_id}")
         return []
-    if not requesting_user_id:
-        log.info(f"slack channel_history 차단(요청자 미상): {channel_id}")
-        return []
-    if not _is_member(client, channel_id, requesting_user_id):
-        log.info(f"slack channel_history 차단(요청자 비멤버): {requesting_user_id}@{channel_id}")
-        return []
+    if _membership_gate_enabled():
+        if not requesting_user_id:
+            log.info(f"slack channel_history 차단(게이트 ON·요청자 미상): {channel_id}")
+            return []
+        if not _is_member(client, channel_id, requesting_user_id):
+            log.info(f"slack channel_history 차단(요청자 비멤버): {requesting_user_id}@{channel_id}")
+            return []
     try:
         resp = client.conversations_history(channel=channel_id, limit=limit)
         return [{"text": m.get("text", ""), "ts": m.get("ts", ""), "user": m.get("user", "")}
