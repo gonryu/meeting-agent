@@ -41,3 +41,15 @@ def test_long_brief_splits_under_3000():
     blocks = build_company_research_block_v2(r)
     assert len(blocks) >= 2                      # 분할됨
     assert all(len(b["text"]["text"]) <= 3000 for b in blocks)   # 모든 블록 한도 이내
+
+
+def test_embedded_bullets_split_into_lines():
+    # 모델이 한 talking_point에 '•'로 여러 포인트를 욱여넣어도 개별 줄로 분리(글루 방지)
+    from agents.research_types import CompanyResearch
+    r = CompanyResearch(company_name="다날",
+                        talking_points=["역할 분담으로 재구성.• 다날 기술 문의 대응", "무상지원 재제안"])
+    text = "\n".join(b["text"]["text"] for b in build_company_research_block_v2(r))
+    assert "재구성.• 다날" not in text          # 글루 없음
+    assert "• 역할 분담으로 재구성." in text
+    assert "• 다날 기술 문의 대응" in text
+    assert "• 무상지원 재제안" in text
