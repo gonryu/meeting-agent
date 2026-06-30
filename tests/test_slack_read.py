@@ -91,3 +91,18 @@ def test_resolve_channel_name_error_returns_blank(monkeypatch):
     client = MagicMock()
     client.conversations_info.side_effect = RuntimeError("no scope")
     assert sr._resolve_channel_name(client, "Cxxx") == ""
+
+
+def test_agent_passes_name_resolved_to_id_and_reads(monkeypatch):
+    # 에이전트가 ID 대신 채널 '이름'을 넘겨도 해석되어 읽힘(parasta_biz 차단 버그 수정)
+    import tools.slack_read as sr
+    sr._CHANNEL_NAME_CACHE.clear()
+    monkeypatch.delenv("SLACK_MEMBERSHIP_GATE", raising=False)   # 게이트 ON
+    monkeypatch.setenv("SLACK_BIZ_CHANNELS", "C_BIZ1")
+    client = _client_with_members(["U1"])
+    client.conversations_info.return_value = {"channel": {"name": "nh-biz"}}
+    out = sr.channel_history(client, "nh-biz", requesting_user_id="U1", limit=10)
+    assert any("9월로 연기" in m["text"] for m in out)
+    # 읽기는 해석된 ID로 호출
+    client.conversations_history.assert_called_once()
+    assert client.conversations_history.call_args.kwargs.get("channel") == "C_BIZ1"
