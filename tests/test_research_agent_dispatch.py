@@ -58,3 +58,19 @@ def test_ontology_brief_formats_when_enabled(monkeypatch):
 def test_initial_prompt_includes_ontology_context():
     p = ra._initial_prompt("다날", "", ontology_context="관계: 관련=소타텍")
     assert "사내 온톨로지 맥락" in p and "소타텍" in p
+
+
+def test_string_fields_not_char_exploded():
+    # 모델이 connections/talking_points를 문자열로 줘도 문자폭발 안 됨(블→['블'...] 방지)
+    r = ra._to_company_research(
+        {"summary_line": "x", "connections": "블록체인 기반 협력", "talking_points": "홍콩 리테일 출시"},
+        "미래에셋")
+    assert r.connections == ["블록체인 기반 협력"]
+    assert r.talking_points == ["홍콩 리테일 출시"]
+
+
+def test_malformed_dict_fields_skipped_not_crash():
+    # news가 문자열 등 비정상이어도 크래시 없이 빈 처리(폴백 유발 방지)
+    r = ra._to_company_research(
+        {"summary_line": "x", "news": "그냥 문자열", "attendees": None}, "X")
+    assert r.news == [] and r.attendees == []

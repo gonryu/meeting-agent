@@ -245,7 +245,8 @@ def _bullet_lines(items: list, limit: int) -> list[str]:
     (모델이 한 항목에 여러 포인트를 •로 욱여넣어 글루되는 것 방지)."""
     out: list[str] = []
     for it in items:
-        for sub in re.split(r"[•\n]+", str(it or "")):
+        # 불릿 글리프 변형(•‣▪◦∙●)·줄바꿈으로 분리. '·'(중점)은 인라인 구분자라 제외.
+        for sub in re.split(r"[•‣▪◦∙●\n]+", str(it or "")):
             cleaned = _strip_display_markdown(sub)
             if cleaned:
                 out.append(f"• {cleaned}")

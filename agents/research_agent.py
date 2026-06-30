@@ -240,7 +240,9 @@ def _identity_consistent(company: str, identity_claim: str, domains: list) -> bo
     """관찰된 도메인이 주장한 회사 동일성과 모순되지 않는지(Haiku). 실패 시 True(관대)."""
     try:
         prompt = (f"회사: {company}\n동일성 주장: {identity_claim}\n관찰된 도메인: {', '.join(domains)}\n"
-                  "이 도메인들이 주장한 회사 동일성과 **명백히 모순되면** false, 일치하거나 무관하면 true. "
+                  "오직 도메인이 **명백히 다른 나라·다른 업종의 동명(同名) 타사**임을 가리킬 때만 false. "
+                  "다음은 모두 true(일치)로 본다: 회사명 변형(예: 신한증권=신한투자증권, 미래에셋=미래에셋증권), "
+                  "자회사·계열사, 내부 프로젝트/협업명, 도메인 정보 부족·무관. 의심스러우면 true. "
                   '코드펜스 없이 JSON만: {"consistent": true}')
         resp = _claude.messages.create(model=_HAIKU, max_tokens=128,
                                        messages=[{"role": "user", "content": prompt}])
@@ -320,19 +322,33 @@ def _agent_loop(company_name: str, meeting_context: str, ctx: "ToolContext",
     return None
 
 
+def _as_list(v) -> list:
+    """리스트면 그대로, 문자열이면 [문자열], 그 외 빈 리스트. 모델이 배열 대신 문자열을
+    반환했을 때 list('블록체인')→['블','록','체','인'] 문자폭발 방지."""
+    if isinstance(v, list):
+        return v
+    if isinstance(v, str) and v.strip():
+        return [v.strip()]
+    return []
+
+
+def _as_str_list(v) -> list:
+    return [str(x).strip() for x in _as_list(v) if str(x).strip()]
+
+
 def _to_company_research(d: dict, company_name: str) -> CompanyResearch:
     return CompanyResearch(
         company_name=company_name,
-        summary_line=d.get("summary_line", ""),
-        deal_context=d.get("deal_context", ""),
+        summary_line=str(d.get("summary_line", "")),
+        deal_context=str(d.get("deal_context", "")),
         news=[NewsItem(title=n.get("title", ""), summary=n.get("summary", ""),
                        url=n.get("url") or None, source=n.get("source", ""))
-              for n in (d.get("news") or [])],
-        connections=list(d.get("connections") or []),
+              for n in _as_list(d.get("news")) if isinstance(n, dict)],
+        connections=_as_str_list(d.get("connections")),
         source_docs=[SourceDoc(title=s.get("title", ""), url=s.get("url", ""), why=s.get("why", ""))
-                     for s in (d.get("source_docs") or [])],
+                     for s in _as_list(d.get("source_docs")) if isinstance(s, dict)],
         attendees=[Attendee(name=a.get("name", ""), role=a.get("role", ""),
                             contact=a.get("contact", ""), note=a.get("note", ""))
-                   for a in (d.get("attendees") or [])],
-        talking_points=list(d.get("talking_points") or []),
+                   for a in _as_list(d.get("attendees")) if isinstance(a, dict)],
+        talking_points=_as_str_list(d.get("talking_points")),
     )
