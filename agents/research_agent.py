@@ -90,7 +90,19 @@ def _tool_specs() -> list[dict]:
 
 
 def _dispatch(name: str, args: dict, ctx: ToolContext) -> str:
+    """도구 실행 + 계측(소요시간·출력크기 로깅). 어떤 도구가 시간을 먹는지 진단용."""
+    t0 = time.monotonic()
     try:
+        out = _dispatch_call(name, args, ctx)
+    except Exception as e:
+        log.warning(f"[AGENTIC] tool {name} 실패 {int((time.monotonic()-t0)*1000)}ms: {e}")
+        return f"(도구 {name} 실패: {str(e)[:120]})"
+    log.info(f"[AGENTIC] tool {name}({str(args)[:60]}) {int((time.monotonic()-t0)*1000)}ms → {len(out or '')}자")
+    return out
+
+
+def _dispatch_call(name: str, args: dict, ctx: ToolContext) -> str:
+    if True:
         if name == "gmail_search":
             return json.dumps(gmail.search_recent_emails(ctx.creds, args.get("query", ""), args.get("query", "")), ensure_ascii=False, default=str)
         if name == "gmail_read_thread":
@@ -109,9 +121,6 @@ def _dispatch(name: str, args: dict, ctx: ToolContext) -> str:
         if name == "ontology_lookup":
             return json.dumps(ontology.company_context(ctx.user_id, args.get("name", ""), recent=True) or {}, ensure_ascii=False, default=str)
         return f"unknown tool: {name}"
-    except Exception as e:
-        log.warning(f"도구 {name} 실패: {e}")
-        return f"(도구 {name} 실패: {str(e)[:120]})"
 
 
 _MAX_ROUNDS = int(os.getenv("AGENTIC_MAX_ROUNDS", "12"))
@@ -222,15 +231,21 @@ def _agent_loop(company_name: str, meeting_context: str, ctx: "ToolContext"):
     nudged = False
     start = time.monotonic()
     for _round in range(_MAX_ROUNDS):
-        if time.monotonic() - start > _TIMEOUT_S:
-            log.warning(f"[AGENTIC] 타임아웃({_TIMEOUT_S}s) 초과 → 레거시 폴백 ({company_name})")
+        elapsed = int(time.monotonic() - start)
+        if elapsed > _TIMEOUT_S:
+            log.warning(f"[AGENTIC] 타임아웃({_TIMEOUT_S}s, R{_round+1}) → 폴백 ({company_name}) 누적도구={sorted(called)}")
             return None
+        t_llm = time.monotonic()
         resp = _claude.messages.create(model=_MODEL, max_tokens=4096, system=_SYSTEM,
                                        tools=tools, messages=messages)
+        log.info(f"[AGENTIC] {company_name} R{_round+1} (elapsed={elapsed}s) "
+                 f"LLM {int((time.monotonic()-t_llm)*1000)}ms stop={getattr(resp, 'stop_reason', '?')}")
         messages.append({"role": "assistant", "content": resp.content})
         tool_uses = [b for b in resp.content if getattr(b, "type", None) == "tool_use"]
         if not tool_uses:
+            log.info(f"[AGENTIC] {company_name} R{_round+1} tool_use 없음(end_turn) → submit 없이 폴백")
             break
+        log.info(f"[AGENTIC] {company_name} R{_round+1} 도구={[tu.name for tu in tool_uses]}")
         results = []
         submit_input = None
         for tu in tool_uses:
@@ -248,8 +263,12 @@ def _agent_loop(company_name: str, meeting_context: str, ctx: "ToolContext"):
                 results.append({"type": "tool_result", "tool_use_id": tu.id, "content": (out or "")[:8000]})
         messages.append({"role": "user", "content": results})
         if submit_input is not None:
+            log.info(f"[AGENTIC] {company_name} submit 수락 "
+                     f"(R{_round+1}, elapsed={int(time.monotonic()-start)}s, 누적도구={sorted(called)})")
             research = _to_company_research(submit_input, company_name)
             return _run_critics(research, ctx, called, submit_input.get("company_identity_confirmed", ""))
+        elif nudged and "submit_research" in {tu.name for tu in tool_uses}:
+            log.info(f"[AGENTIC] {company_name} R{_round+1} submit 시도→커버리지 nudge 반려")
     return None
 
 
