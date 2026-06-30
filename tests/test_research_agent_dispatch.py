@@ -25,3 +25,36 @@ def test_dispatch_unknown_tool_returns_error_string():
     ctx = ra.ToolContext(user_id="U1", creds=MagicMock(), slack_client=None, folder_id="")
     out = ra._dispatch("nope", {}, ctx)
     assert "unknown" in out.lower() or "알 수 없" in out
+
+
+def test_ontology_doc_fetch_spec_and_dispatch():
+    names = {t["name"] for t in ra._tool_specs()}
+    assert "ontology_doc_fetch" in names
+    ctx = ra.ToolContext(user_id="U1", creds=MagicMock(), folder_id="")
+    with patch("agents.research_agent.ontology.document_fetch",
+               return_value={"title": "소타텍 회의록", "summary": "휴대폰 인증 진행"}) as md:
+        out = ra._dispatch("ontology_doc_fetch", {"document_id": "d1"}, ctx)
+    md.assert_called_once()
+    assert "소타텍 회의록" in out
+
+
+def test_ontology_brief_empty_when_not_enabled(monkeypatch):
+    import agents.before as before
+    monkeypatch.setattr(before, "_ontology_enabled", lambda u: False)
+    assert ra._ontology_brief("U1", "다날") == ""
+
+
+def test_ontology_brief_formats_when_enabled(monkeypatch):
+    import agents.before as before
+    monkeypatch.setattr(before, "_ontology_enabled", lambda u: True)
+    monkeypatch.setattr(ra.ontology, "company_context",
+        lambda u, c, recent=True: {
+            "relations": [{"relation": "관련", "title": "소타텍 회의"}],
+            "documents": [{"id": "d1", "title": "2025-06-10 소타텍 주간보고"}]})
+    brief = ra._ontology_brief("U1", "다날")
+    assert "소타텍 회의" in brief and "document_id=d1" in brief
+
+
+def test_initial_prompt_includes_ontology_context():
+    p = ra._initial_prompt("다날", "", ontology_context="관계: 관련=소타텍")
+    assert "사내 온톨로지 맥락" in p and "소타텍" in p
