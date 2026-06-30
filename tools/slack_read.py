@@ -42,9 +42,10 @@ def _is_member(client, channel_id: str, user_id: str) -> bool:
 
 
 def _membership_gate_enabled() -> bool:
-    """요청자 멤버십 게이트 토글. 기본 OFF — allowlist만으로 노출(팀 공유 채널 정책).
-    GA(전 Slack 사용자 공개)처럼 봇 사용자 간 채널 접근이 다를 때만 ON(=channels:read/groups:read 필요)."""
-    return os.getenv("SLACK_MEMBERSHIP_GATE", "false").lower() == "true"
+    """요청자 멤버십 게이트 토글. **기본 ON(안전)** — 채널이 분산돼 있고 사용자가 봇을 자기 방에
+    초대할 수 있으므로, 요청자가 멤버인 채널만 노출해 크로스유저 누수를 막는다(channels:read/groups:read 필요).
+    모든 봇 사용자가 동일 채널을 공유하는 폐쇄 환경에서만 SLACK_MEMBERSHIP_GATE=false로 끌 수 있다."""
+    return os.getenv("SLACK_MEMBERSHIP_GATE", "true").lower() != "false"
 
 
 def channel_history(client, channel_id: str, requesting_user_id: str = "",
