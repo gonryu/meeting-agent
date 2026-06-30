@@ -240,6 +240,20 @@ def _format_news_item_for_slack(item: dict) -> str:
     return head
 
 
+def _bullet_lines(items: list, limit: int) -> list[str]:
+    """리스트 항목을 깔끔한 불릿 줄로. 항목 안에 내장된 불릿(•)·줄바꿈은 개별 줄로 분리
+    (모델이 한 항목에 여러 포인트를 •로 욱여넣어 글루되는 것 방지)."""
+    out: list[str] = []
+    for it in items:
+        for sub in re.split(r"[•\n]+", str(it or "")):
+            cleaned = _strip_display_markdown(sub)
+            if cleaned:
+                out.append(f"• {cleaned}")
+            if len(out) >= limit:
+                return out
+    return out
+
+
 def _split_long(line: str, limit: int = 2900) -> list[str]:
     """단일 줄이 limit를 초과하면 limit 단위로 하드 분할(거래맥락 등 자유 프로즈 대비)."""
     if len(line) <= limit:
@@ -280,7 +294,7 @@ def build_company_research_block_v2(r) -> list[dict]:
     if r.deal_context:
         L += ["", "🔄  *거래 맥락*", _strip_display_markdown(r.deal_context)]
     if r.connections:
-        L += ["", "🔗  *파라메타 서비스 연결점*"] + [f"• {_strip_display_markdown(c)}" for c in r.connections[:3]]
+        L += ["", "🔗  *파라메타 서비스 연결점*"] + _bullet_lines(r.connections, 4)
     if r.attendees:
         L += ["", "👤  *참석자*"]
         for a in r.attendees[:5]:
@@ -296,7 +310,7 @@ def build_company_research_block_v2(r) -> list[dict]:
             else:
                 L.append(f"• {label}" + (f" — {d.why}" if d.why else ""))
     if r.talking_points:
-        L += ["", "✅  *오늘 논의 포인트*"] + [f"• {_strip_display_markdown(t)}" for t in r.talking_points[:5]]
+        L += ["", "✅  *오늘 논의 포인트*"] + _bullet_lines(r.talking_points, 6)
     return _pack_blocks(L)
 
 
