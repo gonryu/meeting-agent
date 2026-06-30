@@ -68,3 +68,17 @@ def test_loop_timeout_returns_none(monkeypatch):
         out = ra._agent_loop("X", "", ctx)
     assert out is None
     mc.assert_not_called()   # 타임아웃이 첫 라운드 진입 전 컷
+
+
+def test_force_submit_on_last_round_accepts_despite_gap(monkeypatch):
+    # 마지막 라운드면 커버리지 gap이어도 submit 강제 수락(타임아웃 대신 결과 산출)
+    monkeypatch.setattr(ra, "_MAX_ROUNDS", 1)
+    submit_in = {"summary_line": "강제수락", "company_identity_confirmed": "x"}
+    r1 = SimpleNamespace(content=[_b(type="tool_use", id="s1", name="submit_research", input=submit_in)])
+    with patch.object(ra._claude.messages, "create", return_value=r1) as mc, \
+         patch.object(ra, "_run_critics", side_effect=lambda r, ctx, called, identity_claim="": r):
+        ctx = ra.ToolContext(user_id="U", creds=MagicMock(), folder_id="F")
+        out = ra._agent_loop("X", "", ctx)
+    assert out is not None and out.summary_line == "강제수락"   # gap이어도 force라 수락
+    _, kwargs = mc.call_args
+    assert kwargs.get("tool_choice", {}).get("name") == "submit_research"   # tool_choice 강제

@@ -1058,8 +1058,14 @@ def replace_auto_section(
     return body[:section_start] + new_block + body[section_end:]
 
 
+_FOLDER_DESC_CACHE: dict = {}   # root_id → [descendant ids] (프로세스 수명 캐시)
+
+
 def _descendant_folder_ids(creds: Credentials, root_id: str, max_folders: int = 50) -> list[str]:
-    """root 폴더의 모든 하위폴더 ID(BFS, max_folders 상한). 공유폴더 재귀 검색용."""
+    """root 폴더의 모든 하위폴더 ID(BFS, max_folders 상한). 공유폴더 재귀 검색용.
+    폴더 트리는 거의 안 바뀌므로 프로세스 수명 캐시(검색마다 20초+ BFS 재실행 방지 — 재시작 시 갱신)."""
+    if root_id in _FOLDER_DESC_CACHE:
+        return _FOLDER_DESC_CACHE[root_id]
     svc = _service(creds)
     out: list[str] = []
     queue = [root_id]
@@ -1076,6 +1082,7 @@ def _descendant_folder_ids(creds: Credentials, root_id: str, max_folders: int = 
             break
         for f in res.get("files", []):
             out.append(f["id"]); queue.append(f["id"])
+    _FOLDER_DESC_CACHE[root_id] = out
     return out
 
 
