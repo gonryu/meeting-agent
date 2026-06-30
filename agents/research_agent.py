@@ -144,7 +144,7 @@ def _dispatch_call(name: str, args: dict, ctx: ToolContext) -> str:
         if name == "drive_read":
             return drive.read_file_text(ctx.creds, args.get("file_id", ""), args.get("mime_type", ""), args.get("name", ""))
         if name == "slack_channel_history":
-            return json.dumps(slack_read.channel_history(ctx.slack_client, args.get("channel", "")), ensure_ascii=False, default=str)
+            return json.dumps(slack_read.channel_history(ctx.slack_client, args.get("channel", ""), requesting_user_id=ctx.user_id), ensure_ascii=False, default=str)
         if name == "trello_lookup":
             return json.dumps(trello.get_card_context(ctx.user_id, args.get("company", ""), limit_comments=3) or {}, ensure_ascii=False, default=str)
         if name == "web_search":
