@@ -68,6 +68,18 @@ def _is_member(client, channel_id: str, user_id: str) -> bool:
         return False   # 안전 우선 — 확인 못 하면 노출하지 않음
 
 
+def _resolve_to_allowed_id(client, channel_arg: str) -> str:
+    """에이전트가 채널을 ID로 주든 이름('parasta_biz'·'#parasta_biz')으로 주든 allowlist 정식 ID로 해석.
+    매칭 없으면 빈 문자열(allowlist 외)."""
+    arg = (channel_arg or "").strip().lstrip("#")
+    if arg in allowed_channels():
+        return arg
+    for c in biz_channels_resolved(client):
+        if c["name"] and arg == c["name"]:
+            return c["id"]
+    return ""
+
+
 def _membership_gate_enabled() -> bool:
     """요청자 멤버십 게이트 토글. **기본 ON(안전)** — 채널이 분산돼 있고 사용자가 봇을 자기 방에
     초대할 수 있으므로, 요청자가 멤버인 채널만 노출해 크로스유저 누수를 막는다(channels:read/groups:read 필요).
@@ -80,18 +92,19 @@ def channel_history(client, channel_id: str, requesting_user_id: str = "",
     """allowlist된 biz 채널의 최근 메시지. 게이트 OFF(기본)면 allowlist만으로 노출
     (봇이 들어간 팀 공유 채널 = 관리자가 의도한 공유 정책). 게이트 ON이면 요청자 멤버십까지 확인
     (봇 사용자 간 접근이 다른 GA 환경의 ACL 누수 방지). 미허용/비멤버 시 빈 리스트."""
-    if channel_id not in allowed_channels():
-        log.info(f"slack channel_history 차단(allowlist 외): {channel_id}")
+    cid = _resolve_to_allowed_id(client, channel_id)
+    if not cid:
+        log.info(f"slack channel_history 차단(allowlist 외/미해석): {channel_id}")
         return []
     if _membership_gate_enabled():
         if not requesting_user_id:
-            log.info(f"slack channel_history 차단(게이트 ON·요청자 미상): {channel_id}")
+            log.info(f"slack channel_history 차단(게이트 ON·요청자 미상): {cid}")
             return []
-        if not _is_member(client, channel_id, requesting_user_id):
-            log.info(f"slack channel_history 차단(요청자 비멤버): {requesting_user_id}@{channel_id}")
+        if not _is_member(client, cid, requesting_user_id):
+            log.info(f"slack channel_history 차단(요청자 비멤버): {requesting_user_id}@{cid}")
             return []
     try:
-        resp = client.conversations_history(channel=channel_id, limit=limit)
+        resp = client.conversations_history(channel=cid, limit=limit)
         return [{"text": m.get("text", ""), "ts": m.get("ts", ""), "user": m.get("user", "")}
                 for m in (resp.get("messages") or []) if m.get("text")]
     except Exception as e:
