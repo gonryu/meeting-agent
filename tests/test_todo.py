@@ -296,6 +296,28 @@ class TestCloseFlows:
         text = slack.chat_postMessage.call_args.kwargs.get("text", "")
         assert "여러 개" in text
 
+    def test_number_is_display_index_not_db_id(self, temp_db, patch_drive):
+        # 자연어 "N번" = 표시 순번(work→personal→ai), DB id 아님 (#2 버그 수정)
+        slack = _slack()
+        t1 = user_store.add_todo(_TEST_USER, "work-A", "work")          # 표시 1
+        t2 = user_store.add_todo(_TEST_USER, "personal-B", "personal")  # 표시 3 (personal 뒤로)
+        t3 = user_store.add_todo(_TEST_USER, "work-C", "work")          # 표시 2
+        # _active_ordered = [work-A, work-C, personal-B] → "2번" = work-C(t3), DB id 2(t2) 아님
+        ok = todo_agent.handle_delete(slack, _TEST_USER, "2")
+        assert ok
+        assert user_store.get_todo(_TEST_USER, t3)["status"] == "deleted"  # 표시 2번 = t3
+        assert user_store.get_todo(_TEST_USER, t2)["status"] == "open"     # DB id 2는 안 지워짐
+
+    def test_button_int_target_uses_db_id(self, temp_db, patch_drive):
+        # 버튼은 DB id(int)를 넘김 → 순번 아닌 그 id 삭제
+        slack = _slack()
+        t1 = user_store.add_todo(_TEST_USER, "일1", "work")
+        t2 = user_store.add_todo(_TEST_USER, "일2", "work")
+        ok = todo_agent.handle_delete(slack, _TEST_USER, t2)   # int DB id
+        assert ok
+        assert user_store.get_todo(_TEST_USER, t2)["status"] == "deleted"
+        assert user_store.get_todo(_TEST_USER, t1)["status"] == "open"
+
 
 # ── handle_update ────────────────────────────────────────────
 
@@ -344,19 +366,31 @@ class TestBuildTodoBlock:
 
         blocks = todo_agent.build_todo_block(_TEST_USER, today_date=today)
         assert blocks, "블록이 생성되어야 함"
-        text = blocks[0]["text"]["text"]
+        text = "".join(b["text"]["text"] for b in blocks if b.get("type") == "section")
         # 각 색상 이모지 모두 포함
         assert "🔴" in text
         assert "🟠" in text
         assert "🟡" in text
         assert "⚪" in text
 
+    def test_has_delete_and_complete_buttons(self, temp_db):
+        # 브리핑 Todo에서 바로 완료/삭제할 수 있어야 함(#1)
+        tid = user_store.add_todo(_TEST_USER, "지울 일", "work")
+        blocks = todo_agent.build_todo_block(_TEST_USER)
+        actions = [b for b in blocks if b.get("type") == "actions"]
+        assert actions, "완료/삭제 버튼 actions 블록이 있어야 함"
+        aids = {e["action_id"] for b in actions for e in b["elements"]}
+        assert "todo_delete_btn" in aids and "todo_complete_btn" in aids
+        # 버튼 value는 DB id
+        vals = {e["value"] for b in actions for e in b["elements"]}
+        assert str(tid) in vals
+
     def test_overflow_collapses(self, temp_db):
         today = datetime(2026, 4, 28, tzinfo=todo_agent.KST)
         for i in range(20):
             user_store.add_todo(_TEST_USER, f"task-{i}", "work", "2026-05-15")
         blocks = todo_agent.build_todo_block(_TEST_USER, today_date=today)
-        text = blocks[0]["text"]["text"]
+        text = "".join(b["text"]["text"] for b in blocks if b.get("type") == "section")
         assert "외" in text  # "…외 N건" 폴드
 
 

@@ -499,12 +499,31 @@ def handle_list(slack_client, user_id: str,
 
 # ── 완료/취소/삭제 (FR-T3) ──────────────────────────────────
 
+def _active_ordered(user_id: str) -> list[dict]:
+    """활성 Todo를 표시 순서(work→personal→ai)로 평탄화 — _build_active_blocks/build_todo_block의
+    표시 번호(1..N)와 동일. 자연어 'N번'을 이 순서의 N번째로 해석하기 위함."""
+    grouped: dict[str, list[dict]] = {"work": [], "personal": [], "ai": []}
+    for t in user_store.list_active_todos(user_id):
+        grouped.setdefault(t.get("category") or "work", []).append(t)
+    ordered: list[dict] = []
+    for cat in ("work", "personal", "ai"):
+        ordered.extend(grouped.get(cat, []))
+    return ordered
+
+
 def _resolve_todo_target(user_id: str, target: int | str) -> dict | None:
-    """ID(int) 또는 텍스트(str)로 활성 Todo 1건 식별. 모호하면 None."""
-    if isinstance(target, int) or (isinstance(target, str) and target.isdigit()):
-        todo_id = int(target)
-        return user_store.get_todo(user_id, todo_id)
-    matches = user_store.find_todo_by_text(user_id, str(target).strip())
+    """활성 Todo 1건 식별. 모호하면 None.
+    - int: DB id (버튼이 value로 실어 보냄) → get_todo
+    - str 숫자('1','2'): **표시 순번**(목록의 N번째) — DB id 아님
+    - str 텍스트: 제목 부분일치(단일매칭만)"""
+    if isinstance(target, int):
+        return user_store.get_todo(user_id, target)
+    s = str(target).strip()
+    if s.isdigit():
+        ordered = _active_ordered(user_id)
+        idx = int(s) - 1
+        return ordered[idx] if 0 <= idx < len(ordered) else None
+    matches = user_store.find_todo_by_text(user_id, s)
     if len(matches) == 1:
         return matches[0]
     return None  # 0건 또는 다중매칭 — 호출측에서 처리
@@ -639,35 +658,39 @@ def handle_update(slack_client, user_id: str, target_text: str | int,
 # ── 브리핑 통합 (FR-T5) ─────────────────────────────────────
 
 def build_todo_block(user_id: str, today_date: datetime | None = None) -> list[dict]:
-    """브리핑 단계 2에서 호출. 활성 Todo 요약 블록 (최대 12줄, 초과 시 +N more)."""
+    """브리핑 단계 2에서 호출. 활성 Todo — 각 항목에 ✅완료/🗑️삭제 버튼(브리핑에서 바로 처리).
+    표시 번호(1..N)는 _active_ordered 순서라 자연어 'N번'과 일치. 최대 10건, 초과 시 +N more."""
     today = today_date or datetime.now(KST)
-    active = user_store.list_active_todos(user_id)
-    if not active:
+    ordered = _active_ordered(user_id)
+    if not ordered:
         return []
 
-    lines: list[str] = [f"📋 *오늘의 Todo* — 활성 {len(active)}건"]
-    MAX_LINES = 12
-    counter = 0
-    for t in active:
-        if counter >= MAX_LINES:
-            break
-        counter += 1
+    MAX = 10
+    blocks: list[dict] = [{
+        "type": "section",
+        "text": {"type": "mrkdwn", "text": f"📋 *오늘의 Todo* — 활성 {len(ordered)}건"},
+    }]
+    for i, t in enumerate(ordered[:MAX], start=1):
         emoji, label = _format_due(t.get("due_date"), today)
         cat = t.get("category") or "work"
         cat_marker = {"work": "💼", "personal": "🏠", "ai": "🤖"}.get(cat, "•")
-        line = f"{emoji} {cat_marker} {t.get('task','')}"
+        line = f"{emoji} *{i}.* {cat_marker} {t.get('task','')}"
         if label:
-            line += f" _({label})_"
-        lines.append(line)
+            line += f"  ·  _{label}_"
+        tid = str(t.get("id"))
+        blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": line}})
+        blocks.append({"type": "actions", "elements": [
+            {"type": "button", "text": {"type": "plain_text", "text": "✅ 완료"},
+             "style": "primary", "action_id": "todo_complete_btn", "value": tid},
+            {"type": "button", "text": {"type": "plain_text", "text": "🗑️ 삭제"},
+             "style": "danger", "action_id": "todo_delete_btn", "value": tid},
+        ]})
 
-    overflow = len(active) - counter
+    overflow = len(ordered) - min(len(ordered), MAX)
     if overflow > 0:
-        lines.append(f"_…외 {overflow}건. `/할일` 로 전체 보기_")
-
-    return [{
-        "type": "section",
-        "text": {"type": "mrkdwn", "text": "\n".join(lines)},
-    }]
+        blocks.append({"type": "section", "text": {"type": "mrkdwn",
+                       "text": f"_…외 {overflow}건. `/할일` 로 전체 보기_"}})
+    return blocks
 
 
 # ── 버튼 라우팅 ──────────────────────────────────────────────
