@@ -21,7 +21,7 @@ from agents import proposal_orchestrator
 log = logging.getLogger(__name__)
 
 _claude = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
-_CLAUDE_MODEL = "claude-sonnet-4-5"  # 제안서는 고품질 모델 사용
+_CLAUDE_MODEL = "claude-opus-4-8"  # 제안서는 고품질 모델 사용
 
 # FR-A11: 제안서 트리거 키워드
 _PROPOSAL_TRIGGERS = [

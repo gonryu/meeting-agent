@@ -32,7 +32,7 @@ KST = ZoneInfo("Asia/Seoul")
 
 _claude = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
 _CLAUDE_MODEL = "claude-haiku-4-5"
-_CLAUDE_MINUTES_MODEL = "claude-sonnet-4-5"  # 회의록 생성 전용
+_CLAUDE_MINUTES_MODEL = "claude-opus-4-8"  # 회의록 생성 전용
 
 # ── 세션 파일 저장 경로 ──────────────────────────────────────
 _SESSIONS_DIR = Path(__file__).parent.parent / ".sessions"

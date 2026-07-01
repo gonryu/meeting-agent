@@ -40,7 +40,7 @@ _TEMPLATES_DIR = Path(__file__).parent.parent / "prompts" / "templates" / "propo
 
 _claude = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
 _HAIKU = "claude-haiku-4-5"
-_SONNET = "claude-sonnet-4-5"
+_SONNET = "claude-opus-4-8"
 
 _SYSTEM_PROMPT = """\
 당신은 B2B 제안서 작성 다중 에이전트 시스템의 일부입니다. 다음 원칙을 준수하세요:

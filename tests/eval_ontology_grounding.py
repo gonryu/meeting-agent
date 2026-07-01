@@ -8,7 +8,7 @@ import argparse, json, os, sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 _GOLDEN = Path(__file__).parent / "golden" / "ontology_grounding.jsonl"
-_SONNET = "claude-sonnet-4-5"
+_SONNET = "claude-sonnet-5"
 
 
 def load_golden() -> list[dict]:
