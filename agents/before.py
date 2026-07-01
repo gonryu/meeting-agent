@@ -1471,6 +1471,12 @@ def _structured_render_enabled() -> bool:
     return os.getenv("STRUCTURED_RENDER", "true").lower() != "false"
 
 
+def _agentic_briefing_enabled() -> bool:
+    """브리핑에서도 에이전트 리서치 사용 토글. 기본 OFF(AGENTIC_BRIEFING=true로 켬).
+    스케줄 브리핑은 전 사용자 대상이라 검증 후 켠다."""
+    return os.getenv("AGENTIC_BRIEFING", "false").lower() == "true"
+
+
 def _structured_news_items(company_content: str, news_lines: list[str],
                            label: str = "") -> list[dict] | None:
     """단계2: 위키 `### 최근 동향`을 단일 파서로 NewsItem 추출 → 렌더용 dict 리스트.
@@ -1671,6 +1677,34 @@ def _extract_company_content_sections(company_content: str) -> tuple[list[str], 
     return news_lines, parascope_lines, connection_lines, drive_emails, update_lines
 
 
+def _post_agentic_company_block(slack_client, user_id: str, meeting: dict,
+                                company_name: str, channel, thread_ts) -> bool:
+    """에이전트가 미팅 주제를 스스로 판단·리서치해 리치 v2 블록 발송. 성공 시 True.
+    company_name이 비어도 제목을 주제로 넘겨 에이전트가 실제 대상(예: '권혁주 - Acash'→Acash)을
+    판단하게 한다. 실패/빈결과/주제없음 시 False(호출부가 레거시로 폴백)."""
+    subject = (company_name or meeting.get("summary", "") or "").strip()
+    if not subject:
+        return False
+    try:
+        creds, _, _ = _get_creds_and_config(user_id)
+        emails = ", ".join(a.get("email", "") for a in meeting.get("attendees", []) if a.get("email"))
+        mctx = f"제목: {meeting.get('summary','')}\n참석자: {emails}\n설명: {meeting.get('description','')}".strip()
+        from agents import research_agent
+        r = research_agent.run_agentic_research(
+            company_name=subject, user_id=user_id, creds=creds,
+            slack_client=slack_client, meeting_context=mctx)
+        if r is None or not is_rich_research(r):
+            log.info(f"에이전트 브리핑 결과 빈약/실패 → 레거시 폴백 ({subject})")
+            return False
+        blocks = build_company_research_block_v2(r)
+        _post(slack_client, user_id=user_id, channel=channel, thread_ts=thread_ts,
+              blocks=blocks, text=f"🏢 {r.company_name or subject} 리서치")
+        return True
+    except Exception as e:
+        log.warning(f"에이전트 브리핑 실패, 레거시 폴백 ({subject}): {e}")
+        return False
+
+
 def _run_briefing_research(
     slack_client, user_id: str, meeting: dict, company_name: str,
     channel: str | None, thread_ts: str | None,
@@ -1679,60 +1713,66 @@ def _run_briefing_research(
     try:
         _ch = channel or user_id
 
-        # 0. 회의 분류 — 내부 회의면 리서치 건너뜀 (QA 2.1)
-        try:
-            from agents import briefing_classifier
-            if briefing_classifier.is_enabled():
-                cls_result = briefing_classifier.classify_meeting(
-                    title=meeting.get("summary", ""),
-                    attendees=meeting.get("attendees", []),
-                    company_hint=company_name or "",
-                    description=meeting.get("description", ""),
-                )
-                if cls_result and (
-                    cls_result.get("meeting_type") == "internal"
-                    or cls_result.get("research_recommended") is False
-                ):
-                    rationale = cls_result.get("rationale", "")
-                    log.info(
-                        f"브리핑 리서치 스킵 (내부 회의 판정): {company_name} — {rationale}"
-                    )
-                    return
-        except Exception as cls_err:
-            log.warning(f"브리핑 분류기 호출 실패, 기본 경로로 리서치 진행: {cls_err}")
+        # 에이전트 경로(게이팅): 성공 시 업체 리서치(0+1)를 대체하고 인물 리서치로 진행.
+        _agentic_done = _agentic_briefing_enabled() and _post_agentic_company_block(
+            slack_client, user_id, meeting, company_name, channel, thread_ts)
 
-        # 1. 업체 리서치
-        progress_resp = _post(slack_client, user_id=user_id, channel=channel, thread_ts=thread_ts,
-              text=f"🔍 *{company_name}* 업체 리서치 중...")
-        progress_ts = progress_resp.get("ts") if progress_resp else None
-        company_content = ""
-        try:
-            company_content, _ = research_company(user_id, company_name)
-        except Exception as e:
-            err = str(e)
-            msg = ("⚠️ AI API 할당량 초과. 잠시 후 다시 시도해주세요."
-                   if "429" in err else f"⚠️ 업체 리서치 오류: {err[:200]}")
-            _post(slack_client, user_id=user_id, channel=channel, thread_ts=thread_ts, text=msg)
-
-        # 진행 메시지 삭제
-        if progress_ts:
+        drive_emails: list[str] = []   # 에이전트 경로에선 레거시 추출을 건너뛰므로 기본값 확보
+        if not _agentic_done:
+            # 0. 회의 분류 — 내부 회의면 리서치 건너뜀 (QA 2.1)
             try:
-                slack_client.chat_delete(channel=_ch, ts=progress_ts)
-            except Exception:
-                pass
+                from agents import briefing_classifier
+                if briefing_classifier.is_enabled():
+                    cls_result = briefing_classifier.classify_meeting(
+                        title=meeting.get("summary", ""),
+                        attendees=meeting.get("attendees", []),
+                        company_hint=company_name or "",
+                        description=meeting.get("description", ""),
+                    )
+                    if cls_result and (
+                        cls_result.get("meeting_type") == "internal"
+                        or cls_result.get("research_recommended") is False
+                    ):
+                        rationale = cls_result.get("rationale", "")
+                        log.info(
+                            f"브리핑 리서치 스킵 (내부 회의 판정): {company_name} — {rationale}"
+                        )
+                        return
+            except Exception as cls_err:
+                log.warning(f"브리핑 분류기 호출 실패, 기본 경로로 리서치 진행: {cls_err}")
 
-        news_lines, parascope_lines, connection_lines, drive_emails, update_lines = \
-            _extract_company_content_sections(company_content)
-        log.info(f"news_lines ({company_name}): {news_lines}")
+            # 1. 업체 리서치
+            progress_resp = _post(slack_client, user_id=user_id, channel=channel, thread_ts=thread_ts,
+                  text=f"🔍 *{company_name}* 업체 리서치 중...")
+            progress_ts = progress_resp.get("ts") if progress_resp else None
+            company_content = ""
+            try:
+                company_content, _ = research_company(user_id, company_name)
+            except Exception as e:
+                err = str(e)
+                msg = ("⚠️ AI API 할당량 초과. 잠시 후 다시 시도해주세요."
+                       if "429" in err else f"⚠️ 업체 리서치 오류: {err[:200]}")
+                _post(slack_client, user_id=user_id, channel=channel, thread_ts=thread_ts, text=msg)
 
-        # 단계2: 구조화 뉴스 렌더 (단일 파서 → NewsItem 직접 렌더, _extract 정규식 우회).
-        news_items = _structured_news_items(company_content, news_lines, company_name)
-        company_blocks = build_company_research_block(
-            company_name, news_lines, parascope_lines, connection_lines, update_lines,
-            news_items=news_items,
-        )
-        _post(slack_client, user_id=user_id, channel=channel, thread_ts=thread_ts,
-              blocks=company_blocks, text=f"🏢 {company_name} 업체 정보")
+            # 진행 메시지 삭제
+            if progress_ts:
+                try:
+                    slack_client.chat_delete(channel=_ch, ts=progress_ts)
+                except Exception:
+                    pass
+
+            news_lines, parascope_lines, connection_lines, drive_emails, update_lines = \
+                _extract_company_content_sections(company_content)
+            log.info(f"news_lines ({company_name}): {news_lines}")
+
+            # 단계2: 구조화 뉴스 렌더 (단일 파서 → NewsItem 직접 렌더, _extract 정규식 우회).
+            news_items = _structured_news_items(company_content, news_lines, company_name)
+            company_blocks = build_company_research_block(
+                company_name, news_lines, parascope_lines, connection_lines, update_lines,
+                news_items=news_items,
+            )
+            _post(slack_client, user_id=user_id, channel=channel, thread_ts=thread_ts,
+                  blocks=company_blocks, text=f"🏢 {company_name} 업체 정보")
 
         # 2. 인물 리서치 (순차적으로 각 인물 완료 시 발송) — 내부 도메인 제외
         targets = _build_person_targets(meeting.get("attendees", []), user_id, slack_client)
