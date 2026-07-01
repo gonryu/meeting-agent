@@ -394,6 +394,76 @@ class TestBuildTodoBlock:
         assert "외" in text  # "…외 N건" 폴드
 
 
+# ── _disable_clicked_action_block (버튼 클릭 후 메시지 갱신) ──
+
+class TestDisableClickedActionBlock:
+    """클릭된 actions 블록만 '✓ {status}'로 교체하고 chat_update로 원본 메시지 갱신."""
+
+    @staticmethod
+    def _msg_blocks(*todo_ids):
+        """build_todo_block 유사 구조 — 각 todo 마다 section + actions(고유 block_id)."""
+        blocks = [{"type": "section", "text": {"type": "mrkdwn", "text": "📋 오늘의 Todo"}}]
+        for tid in todo_ids:
+            blocks.append({"type": "section", "block_id": f"sec_{tid}",
+                           "text": {"type": "mrkdwn", "text": f"item {tid}"}})
+            blocks.append({"type": "actions", "block_id": f"act_{tid}", "elements": [
+                {"type": "button", "action_id": "todo_delete_btn", "value": str(tid)},
+            ]})
+        return blocks
+
+    def _body(self, *, block_id, value, blocks):
+        return {
+            "user": {"id": _TEST_USER},
+            "channel": {"id": "D123"},
+            "message": {"ts": "999.888", "blocks": blocks, "text": "📋 오늘의 Todo"},
+            "actions": [{"action_id": "todo_delete_btn", "block_id": block_id, "value": value}],
+        }
+
+    def test_matches_by_block_id_even_when_value_empty(self):
+        # Slack이 message.blocks의 버튼 value를 비워 에코하는 상황 재현:
+        # value 매칭은 실패해도 block_id로 교체되어야 함(관측된 무응답 버그의 근본 원인).
+        echoed = self._msg_blocks(3)
+        for b in echoed:
+            if b.get("type") == "actions":
+                for el in b["elements"]:
+                    el["value"] = ""          # Slack이 value를 비워 보냄
+        client = _slack()
+        body = self._body(block_id="act_3", value="3", blocks=echoed)
+        todo_agent._disable_clicked_action_block(client, body, "삭제됨")
+
+        client.chat_update.assert_called_once()
+        new_blocks = client.chat_update.call_args.kwargs["blocks"]
+        # act_3 actions 블록이 context '✓ 삭제됨'으로 교체됐는지
+        assert not any(b.get("block_id") == "act_3" and b.get("type") == "actions" for b in new_blocks)
+        ctx_text = "".join(
+            e["text"] for b in new_blocks if b.get("type") == "context" for e in b["elements"])
+        assert "삭제됨" in ctx_text
+
+    def test_falls_back_to_value_when_no_block_id(self):
+        # 구버전/일부 payload는 block_id가 없을 수 있음 → value 폴백으로 교체.
+        client = _slack()
+        body = self._body(block_id="", value="7", blocks=self._msg_blocks(7))
+        todo_agent._disable_clicked_action_block(client, body, "완료됨")
+        new_blocks = client.chat_update.call_args.kwargs["blocks"]
+        assert any(b.get("type") == "context" for b in new_blocks)
+
+    def test_other_todos_actions_preserved(self):
+        # 같은 메시지 내 다른 todo의 버튼은 유지되어야 함.
+        client = _slack()
+        body = self._body(block_id="act_3", value="3", blocks=self._msg_blocks(3, 5))
+        todo_agent._disable_clicked_action_block(client, body, "삭제됨")
+        new_blocks = client.chat_update.call_args.kwargs["blocks"]
+        # act_5는 그대로, act_3만 사라짐
+        act_ids = {b.get("block_id") for b in new_blocks if b.get("type") == "actions"}
+        assert "act_5" in act_ids and "act_3" not in act_ids
+
+    def test_skips_when_no_channel_or_ts(self):
+        client = _slack()
+        body = {"user": {"id": _TEST_USER}, "actions": [{"block_id": "act_3", "value": "3"}]}
+        todo_agent._disable_clicked_action_block(client, body, "삭제됨")
+        client.chat_update.assert_not_called()
+
+
 # ── parse_close_command (자연어) ────────────────────────────
 
 class TestParseCloseCommand:

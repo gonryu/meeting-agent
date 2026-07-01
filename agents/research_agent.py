@@ -16,7 +16,10 @@ log = logging.getLogger(__name__)
 _claude = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
 _MODEL = "claude-sonnet-5"        # 에이전트 실행/합성 — most agentic Sonnet(완주·자체검증), Opus 근접·저가
 _HAIKU = "claude-haiku-4-5"       # critic(URL그라운딩·동일성) — 기계적이라 저가 유지
-_KEY_SOURCES = {"gmail_search", "drive_search"}   # 최소 들러야 할 핵심 소스
+_KEY_SOURCES = {"gmail_search", "drive_search", "web_search"}   # 최소 들러야 할 핵심 소스
+# web_search가 없으면 news(업체 동향)는 필연적으로 공백이다 — 효율 우선 원칙(5번) 때문에
+# 모델이 "내부 정보로 충분"하다고 판단해 web_search를 건너뛰는 경우가 있어(회귀 관측치),
+# gmail/drive와 동일하게 커버리지 필수 항목으로 승격해 최소 1회 검색을 강제한다.
 
 
 def agentic_enabled() -> bool:
@@ -204,8 +207,21 @@ def _initial_prompt(company_name: str, meeting_context: str, ontology_context: s
 
 
 def _coverage_gap(called: set) -> bool:
-    """핵심 소스(gmail/drive)를 안 들렀으면 커버리지 부족(조기종료 의심)."""
+    """핵심 소스(gmail/drive/web_search)를 안 들렀으면 커버리지 부족(조기종료 의심)."""
     return not _KEY_SOURCES.issubset(called)
+
+
+def _coverage_gap_message(called: set) -> str:
+    """빠진 핵심 소스에 맞춰 구체적으로 지적 — 뭉뚱그리면 모델이 이미 확인한 소스까지
+    다시 확인하며 시간을 쓰고, web_search 누락은 지적조차 안 될 수 있다."""
+    missing = _KEY_SOURCES - called
+    parts = []
+    if missing & {"gmail_search", "drive_search"}:
+        parts.append("아직 Gmail/Drive를 확인하지 않았다. 관련 메일·문서를 먼저 검색·교차확인하라.")
+    if "web_search" in missing:
+        parts.append("web_search로 외부 최근 동향을 아직 검색하지 않았다 — "
+                      "news(업체 동향) 섹션은 web_search 없이는 채울 수 없다. 최소 1회 검색하라.")
+    return " ".join(parts) + " 그 후 다시 submit_research를 호출하라."
 
 
 def _url_grounding_keep(r: CompanyResearch) -> set:
@@ -324,7 +340,7 @@ def _agent_loop(company_name: str, meeting_context: str, ctx: "ToolContext",
                 if _coverage_gap(called) and not nudged and not force_submit:
                     nudged = True
                     results.append({"type": "tool_result", "tool_use_id": tu.id,
-                        "content": "아직 Gmail/Drive를 확인하지 않았다. 관련 메일·문서를 먼저 검색·교차확인한 뒤 다시 submit_research를 호출하라."})
+                        "content": _coverage_gap_message(called)})
                 else:
                     submit_input = tu.input
                     results.append({"type": "tool_result", "tool_use_id": tu.id, "content": "접수됨"})

@@ -696,45 +696,66 @@ def build_todo_block(user_id: str, today_date: datetime | None = None) -> list[d
 # ── 버튼 라우팅 ──────────────────────────────────────────────
 
 def _disable_clicked_action_block(slack_client, body: dict, status_label: str) -> None:
-    """버튼 클릭 후 원본 메시지의 해당 actions 블록을 상태 표시 텍스트로 교체.
+    """버튼 클릭 후 원본 메시지에서 클릭된 항목의 actions 블록을 '✓ {status}'로 교체.
 
     동일 todo의 좀비 버튼 클릭 방지 — '완료해놓고 삭제 누르는' 케이스 차단.
     같은 메시지 내 다른 todo의 actions 블록은 그대로 유지.
+
+    클릭된 블록은 Slack이 인터랙션 payload에 항상 실어주는 actions[0].block_id 로
+    식별한다. 과거엔 message.blocks 안의 버튼 value 로 매칭했으나, Slack이 에코하는
+    message.blocks 에서 버튼 value 가 비어 오는 경우가 있어(→ 매칭 실패 → new_blocks 가
+    원본과 동일 → chat_update 가 no-op → 예외 없이 '버튼이 안 바뀜') 무응답처럼 보였다.
+    block_id 우선, value 는 폴백. 갱신 결과·미매칭은 로그로 남겨 무응답을 막는다.
     """
     channel = (body.get("channel") or {}).get("id") or (body.get("container") or {}).get("channel_id")
     msg_ts = (body.get("message") or {}).get("ts") or (body.get("container") or {}).get("message_ts")
     if not (channel and msg_ts):
+        log.warning(f"[TODO-BTN] 메시지 갱신 스킵 — channel={channel!r} msg_ts={msg_ts!r}")
         return
-    clicked_value = (body.get("actions") or [{}])[0].get("value", "")
-    if not clicked_value:
-        return
+
+    action = (body.get("actions") or [{}])[0]
+    clicked_block_id = action.get("block_id") or ""
+    clicked_value = action.get("value") or ""
 
     original_blocks = (body.get("message") or {}).get("blocks") or []
     if not original_blocks:
+        log.warning(f"[TODO-BTN] 메시지 갱신 스킵 — message.blocks 없음 "
+                    f"(message keys={list((body.get('message') or {}).keys())})")
         return
 
+    replaced = False
     new_blocks: list[dict] = []
     for blk in original_blocks:
         if blk.get("type") == "actions":
             elements = blk.get("elements", []) or []
-            # 이 actions 블록이 클릭된 버튼(=todo_id)에 속하면 상태 텍스트로 교체
-            if any((el.get("value") or "") == clicked_value for el in elements):
+            match_by_id = bool(clicked_block_id) and blk.get("block_id") == clicked_block_id
+            match_by_val = bool(clicked_value) and any(
+                (el.get("value") or "") == clicked_value for el in elements)
+            if match_by_id or match_by_val:
                 new_blocks.append({
                     "type": "context",
                     "elements": [{"type": "mrkdwn", "text": f"_✓ {status_label}_"}],
                 })
+                replaced = True
                 continue
         new_blocks.append(blk)
 
+    if not replaced:
+        log.warning(
+            f"[TODO-BTN] 클릭 블록 미매칭 — block_id={clicked_block_id!r} value={clicked_value!r} "
+            f"actions_block_ids={[b.get('block_id') for b in original_blocks if b.get('type') == 'actions']}")
+
     try:
-        slack_client.chat_update(
+        resp = slack_client.chat_update(
             channel=channel,
             ts=msg_ts,
             blocks=new_blocks,
             text=(body.get("message") or {}).get("text") or "할 일 처리됨",
         )
+        log.info(f"[TODO-BTN] 메시지 갱신 ok={getattr(resp, 'get', lambda *_: None)('ok')} "
+                 f"replaced={replaced} channel={channel} ts={msg_ts} status={status_label}")
     except Exception as e:
-        log.warning(f"chat_update 실패 (무시): {e}")
+        log.warning(f"[TODO-BTN] chat_update 실패 (무시): {e} channel={channel} ts={msg_ts}")
 
 
 def _guarded_button_action(slack_client, body: dict, *, handler, action_label: str,
