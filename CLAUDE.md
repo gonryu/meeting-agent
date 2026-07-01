@@ -95,7 +95,7 @@ _generate(prompt)  # Claude (검색 없음)
 generate_text()    # _generate의 public 래퍼 (main.py의 인텐트 분류에서 사용)
 ```
 
-전 모듈이 Claude `claude-haiku-4-5`를 사용합니다. 회의록 생성·수정(`_generate_minutes`)·제안서·업체 뉴스 관련성 판정(`news_relevance.judge_news`)은 Claude `claude-sonnet-4-5`를 직접 사용합니다 (고품질 요구). Gemini는 완전히 제거되었습니다.
+**모델 티어링 (2026-07 기준):** 브리핑·인텐트분류·명함OCR 등 경량/기계적 작업은 `claude-haiku-4-5`. **상시 다단계·판정 작업**(에이전트 리서치 엔진 `research_agent`·리서치오케·`news_relevance`·주간보고·액션아이템·`ontology_synth` 합성)은 `claude-sonnet-5`(most agentic·Opus 근접·저가). **사용자 직접 산출물**인 **회의록**(`during`·`minutes_orchestrator`·`minutes_normalizer`)·**제안서**(`proposal`·`proposal_orchestrator`)는 `claude-opus-4-8`(정밀 최고품질). critic(URL그라운딩·동일성·grounding)은 `claude-haiku-4-5` 유지. Gemini는 완전히 제거됨. (원칙: 경량=haiku / 상시=sonnet-5 / 정밀 산출물=opus-4-8)
 
 ### 브리핑 비동기 흐름
 
