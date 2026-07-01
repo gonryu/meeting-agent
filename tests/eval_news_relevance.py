@@ -18,7 +18,7 @@ _GOLDEN = Path(__file__).parent / "golden" / "news_relevance.jsonl"
 _LABELS = ["high", "mid", "low", "exclude"]
 _DEFAULT_THRESHOLD = {"oracle": 1.0, "stub": 0.0, "haiku": 0.55, "sonnet": 0.55}
 _HAIKU = "claude-haiku-4-5"
-_SONNET = "claude-sonnet-4-5"
+_SONNET = "claude-sonnet-5"
 
 
 def load_golden() -> list[dict]:

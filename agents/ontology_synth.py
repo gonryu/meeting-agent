@@ -13,7 +13,7 @@ import anthropic
 log = logging.getLogger(__name__)
 
 _claude = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
-_SYNTH_MODEL = "claude-sonnet-4-5"
+_SYNTH_MODEL = "claude-sonnet-5"
 _CRITIC_MODEL = "claude-haiku-4-5"
 _TPL_DIR = Path(__file__).parent.parent / "prompts" / "templates"
 

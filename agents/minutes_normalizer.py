@@ -40,7 +40,7 @@ _TEMPLATES_DIR = Path(__file__).parent.parent / "prompts" / "templates" / "minut
 _CANON_TEMPLATES_DIR = Path(__file__).parent.parent / "prompts" / "templates" / "minutes"
 
 _claude = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
-_SONNET = "claude-sonnet-4-5"
+_SONNET = "claude-opus-4-8"
 
 # ── 진단 / 정상화에 사용하는 표준 섹션 정의 ────────────────────────
 

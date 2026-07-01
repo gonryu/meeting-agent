@@ -31,7 +31,7 @@ _TEMPLATES_DIR = Path(__file__).parent.parent / "prompts" / "templates" / "actio
 
 _claude = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
 _HAIKU = "claude-haiku-4-5"
-_SONNET = "claude-sonnet-4-5"
+_SONNET = "claude-sonnet-5"
 
 _SYSTEM_PROMPT = """\
 당신은 회의 액션아이템 라이프사이클 다중 에이전트 시스템의 일부입니다. 다음 원칙을 반드시 준수하세요:
