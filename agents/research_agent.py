@@ -14,8 +14,8 @@ from agents.research_types import CompanyResearch, NewsItem, SourceDoc, Attendee
 
 log = logging.getLogger(__name__)
 _claude = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
-_MODEL = "claude-sonnet-4-5"
-_HAIKU = "claude-haiku-4-5"
+_MODEL = "claude-sonnet-5"        # 에이전트 실행/합성 — most agentic Sonnet(완주·자체검증), Opus 근접·저가
+_HAIKU = "claude-haiku-4-5"       # critic(URL그라운딩·동일성) — 기계적이라 저가 유지
 _KEY_SOURCES = {"gmail_search", "drive_search"}   # 최소 들러야 할 핵심 소스
 
 
