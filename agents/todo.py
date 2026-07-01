@@ -737,40 +737,47 @@ def _disable_clicked_action_block(slack_client, body: dict, status_label: str) -
         log.warning(f"chat_update 실패 (무시): {e}")
 
 
-def handle_complete_button(slack_client, body: dict) -> None:
+def _guarded_button_action(slack_client, body: dict, *, handler, action_label: str,
+                           status_label: str) -> None:
+    """버튼 액션 공통 실행 래퍼.
+
+    daemon 스레드에서 실행되는 버튼 핸들러는 예외가 나면 아무 응답도 없이 조용히
+    죽는다 — 사용자에게는 "버튼 눌렀는데 안 됨"으로만 보이고 원인 추적이 안 됨.
+    예외를 잡아 로그 남기고 사용자에게도 실패를 알린다(무응답 대신 가시적 실패).
+    """
     user_id = body["user"]["id"]
     todo_id = body.get("actions", [{}])[0].get("value", "")
     if not todo_id:
         return
     msg_channel = body.get("channel", {}).get("id") or body.get("container", {}).get("channel_id")
     msg_thread_ts = (body.get("message") or {}).get("thread_ts")
-    handle_complete(slack_client, user_id=user_id, target=int(todo_id),
-                    channel=msg_channel, thread_ts=msg_thread_ts)
-    _disable_clicked_action_block(slack_client, body, "완료됨")
+    try:
+        ok = handler(slack_client, user_id=user_id, target=int(todo_id),
+                     channel=msg_channel, thread_ts=msg_thread_ts)
+        if ok:
+            _disable_clicked_action_block(slack_client, body, status_label)
+    except Exception as e:
+        log.exception(f"Todo {action_label} 버튼 처리 실패: todo_id={todo_id} user={user_id}")
+        try:
+            _post(slack_client, user_id=user_id, channel=msg_channel, thread_ts=msg_thread_ts,
+                  text=f"⚠️ {action_label} 처리 중 오류가 발생했어요. 다시 시도해주세요.\n_(에러: {e})_")
+        except Exception:
+            log.warning("버튼 처리 실패 알림 발송도 실패 — 무시")
+
+
+def handle_complete_button(slack_client, body: dict) -> None:
+    _guarded_button_action(slack_client, body, handler=handle_complete,
+                           action_label="완료", status_label="완료됨")
 
 
 def handle_cancel_button(slack_client, body: dict) -> None:
-    user_id = body["user"]["id"]
-    todo_id = body.get("actions", [{}])[0].get("value", "")
-    if not todo_id:
-        return
-    msg_channel = body.get("channel", {}).get("id") or body.get("container", {}).get("channel_id")
-    msg_thread_ts = (body.get("message") or {}).get("thread_ts")
-    handle_cancel(slack_client, user_id=user_id, target=int(todo_id),
-                  channel=msg_channel, thread_ts=msg_thread_ts)
-    _disable_clicked_action_block(slack_client, body, "취소됨")
+    _guarded_button_action(slack_client, body, handler=handle_cancel,
+                           action_label="취소", status_label="취소됨")
 
 
 def handle_delete_button(slack_client, body: dict) -> None:
-    user_id = body["user"]["id"]
-    todo_id = body.get("actions", [{}])[0].get("value", "")
-    if not todo_id:
-        return
-    msg_channel = body.get("channel", {}).get("id") or body.get("container", {}).get("channel_id")
-    msg_thread_ts = (body.get("message") or {}).get("thread_ts")
-    handle_delete(slack_client, user_id=user_id, target=int(todo_id),
-                  channel=msg_channel, thread_ts=msg_thread_ts)
-    _disable_clicked_action_block(slack_client, body, "삭제됨")
+    _guarded_button_action(slack_client, body, handler=handle_delete,
+                           action_label="삭제", status_label="삭제됨")
 
 
 # ── 자연어 의도 파서 (완료/취소/삭제/수정) ─────────────────

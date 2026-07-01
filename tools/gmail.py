@@ -228,8 +228,9 @@ def search_recent_emails(creds: Credentials, person_name: str,
                          company_name: str, days: int = 90) -> list[dict]:
     """
     상대방 이름 + 업체명으로 최근 이메일 검색
-    Returns: [{"date", "subject", "snippet", "from", "to", "cc", "thread_id"}]
+    Returns: [{"date", "subject", "snippet", "from", "to", "cc", "thread_id", "url"}]
     thread_id는 read_thread()로 스레드 본문을 이어 읽는 멀티홉용.
+    url은 Gmail 웹 딥링크 — 리서치 결과의 자료(source_docs) 링크로 그대로 사용 가능.
     """
     after = (datetime.now() - timedelta(days=days)).strftime("%Y/%m/%d")
     if person_name and person_name != company_name:
@@ -258,6 +259,7 @@ def search_recent_emails(creds: Credentials, person_name: str,
         subject = headers.get("Subject", "(제목 없음)")
         body = _decode_body(detail.get("payload", {}))
 
+        thread_id = detail.get("threadId", msg.get("threadId", ""))
         emails.append({
             "date": date_str,
             "subject": subject,
@@ -265,7 +267,8 @@ def search_recent_emails(creds: Credentials, person_name: str,
             "from": headers.get("From", ""),
             "to": headers.get("To", ""),
             "cc": headers.get("Cc", ""),
-            "thread_id": detail.get("threadId", msg.get("threadId", "")),
+            "thread_id": thread_id,
+            "url": f"https://mail.google.com/mail/u/0/#all/{thread_id}" if thread_id else "",
         })
 
     return emails

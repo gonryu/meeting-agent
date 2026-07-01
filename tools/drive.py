@@ -1089,7 +1089,8 @@ def _descendant_folder_ids(creds: Credentials, root_id: str, max_folders: int = 
 def search_files(creds: Credentials, query: str, folder_id: str = None,
                  include_shared: bool = True, page_size: int = 15) -> list[dict]:
     """영업/제안 공유폴더(재귀) + 본인 소유 + sharedWithMe 범위에서 내용(fullText) 검색.
-    Returns: [{id, name, mimeType, modifiedTime}]."""
+    Returns: [{id, name, mimeType, modifiedTime, url}].
+    url은 Drive 웹 딥링크 — 리서치 결과의 자료(source_docs) 링크로 그대로 사용 가능."""
     svc = _service(creds)
     terms = re.sub(r"['\\]", " ", query or "").strip()
     text_q = f"fullText contains '{terms}'" if terms else ""
@@ -1107,7 +1108,10 @@ def search_files(creds: Credentials, query: str, folder_id: str = None,
         fields="files(id,name,mimeType,modifiedTime)",
         includeItemsFromAllDrives=True, supportsAllDrives=True,
     ).execute()
-    return result.get("files", [])
+    files = result.get("files", [])
+    for f in files:
+        f["url"] = f"https://drive.google.com/file/d/{f['id']}/view" if f.get("id") else ""
+    return files
 
 
 _HWPX_TAG_RE = re.compile(r"<[^>]+>")
